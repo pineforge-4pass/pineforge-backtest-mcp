@@ -1,0 +1,46 @@
+{
+  "name": "@pineforge/codegen-mcp",
+  "version": "0.1.0",
+  "description": "Local MCP server: PineScript v6 → C++ via the PineForge codegen API + local Docker backtest runner.",
+  "type": "module",
+  "bin": {
+    "pineforge-codegen-mcp": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.6.0"
+  },
+  "keywords": [
+    "pinescript",
+    "mcp",
+    "model-context-protocol",
+    "codegen",
+    "backtest",
+    "trading"
+  ],
+  "homepage": "https://github.com/fullpass-4pass/pineforge-codegen",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fullpass-4pass/pineforge-codegen.git",
+    "directory": "cloud/mcp-local"
+  },
+  "license": "Proprietary"
+}
