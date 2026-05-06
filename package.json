@@ -1,6 +1,6 @@
 {
   "name": "@pineforge/codegen-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local MCP server: PineScript v6 → C++ via the PineForge codegen API + local Docker backtest runner.",
   "type": "module",
   "bin": {
@@ -9,7 +9,8 @@
   "main": "dist/index.js",
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=20"
@@ -36,11 +37,13 @@
     "backtest",
     "trading"
   ],
-  "homepage": "https://github.com/fullpass-4pass/pineforge-codegen",
+  "homepage": "https://github.com/fullpass-4pass/pineforge-codegen-mcp",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/fullpass-4pass/pineforge-codegen.git",
-    "directory": "cloud/mcp-local"
+    "url": "git+https://github.com/fullpass-4pass/pineforge-codegen-mcp.git"
   },
-  "license": "Proprietary"
+  "bugs": {
+    "url": "https://github.com/fullpass-4pass/pineforge-codegen-mcp/issues"
+  },
+  "license": "MIT"
 }
