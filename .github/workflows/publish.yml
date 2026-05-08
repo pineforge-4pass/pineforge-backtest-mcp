@@ -13,6 +13,24 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+
+      # Belt-and-suspenders: when triggered by a tag push, refuse to publish
+      # if the tag (e.g. v0.3.0) doesn't match the committed VERSION file.
+      # Skipped for workflow_dispatch — there's no tag to compare against.
+      - name: Verify tag matches VERSION
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          tag_version="${TAG_NAME#v}"
+          file_version="$(tr -d '[:space:]' < VERSION)"
+          echo "tag       : $tag_version"
+          echo "VERSION   : $file_version"
+          if [ "$tag_version" != "$file_version" ]; then
+            echo "::error::Tag '$TAG_NAME' does not match VERSION file '$file_version'. Bump VERSION (and re-run sync-version) before tagging."
+            exit 1
+          fi
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20

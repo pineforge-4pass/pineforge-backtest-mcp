@@ -1,7 +1,7 @@
 {
   "name": "@pineforge/codegen-mcp",
-  "version": "0.1.2",
-  "description": "Local MCP server: PineScript v6 → C++ via the PineForge codegen API + local Docker backtest runner.",
+  "version": "0.3.0",
+  "description": "Local MCP server: PineScript v6 → C++ via the PineForge codegen API + local Docker backtest runner with parameter sweeps + Binance OHLCV exporter.",
   "type": "module",
   "bin": {
     "pineforge-codegen-mcp": "dist/index.js"
@@ -16,7 +16,10 @@
     "node": ">=20"
   },
   "scripts": {
+    "sync-version": "node scripts/sync-version.mjs",
+    "prebuild": "npm run sync-version",
     "build": "tsc",
+    "predev": "npm run sync-version",
     "dev": "tsx src/index.ts",
     "prepublishOnly": "npm run build"
   },
