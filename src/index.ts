@@ -75,12 +75,21 @@ async function callGetQuota(): Promise<unknown> {
 type ParamMap = Record<string, string | number | boolean>;
 type ParamGrid = Record<string, Array<string | number | boolean>>;
 
+interface RuntimeArgsLike {
+  input_tf?: string;
+  script_tf?: string;
+  bar_magnifier?: boolean;
+  magnifier_samples?: number;
+  magnifier_dist?: string;
+}
+
 interface BacktestArgs {
   source: string;
   ohlcv_csv_path: string;
   image?: string;
   inputs?: ParamMap;
   overrides?: ParamMap;
+  runtime?: RuntimeArgsLike;
 }
 
 interface BacktestGridArgs {
@@ -91,6 +100,7 @@ interface BacktestGridArgs {
   overrides?: ParamGrid;
   fixed_inputs?: ParamMap;
   fixed_overrides?: ParamMap;
+  runtime?: RuntimeArgsLike;
   max_combinations?: number;
   concurrency?: number;
   include_trades?: boolean;
@@ -113,6 +123,7 @@ async function runBacktest(args: BacktestArgs): Promise<unknown> {
       csvPath,
       inputs: args.inputs,
       overrides: args.overrides,
+      runtime: args.runtime,
     });
     return { ...(report as object), _meta: { strategy_cpp_bytes: cpp.length, image } };
   } finally {
@@ -169,6 +180,7 @@ async function runBacktestGrid(args: BacktestGridArgs): Promise<unknown> {
           const report = await dockerBacktest({
             image, cppPath, csvPath,
             inputs: combo.inputs, overrides: combo.overrides,
+            runtime: args.runtime,
           }) as { summary?: Record<string, unknown>; applied_inputs?: unknown;
                   applied_overrides?: unknown; elapsed_seconds?: number; trades?: unknown[] };
           return {
@@ -321,6 +333,7 @@ async function dockerBacktest(args: {
   csvPath: string;
   inputs?: ParamMap | Record<string, string>;
   overrides?: ParamMap | Record<string, string>;
+  runtime?: RuntimeArgsLike;
 }): Promise<unknown> {
   const dockerArgs: string[] = [
     "run", "--rm",
@@ -333,6 +346,22 @@ async function dockerBacktest(args: {
   }
   if (Object.keys(overridesObj).length) {
     dockerArgs.push("-e", `PINEFORGE_OVERRIDES=${JSON.stringify(overridesObj)}`);
+  }
+  const r = args.runtime ?? {};
+  if (r.input_tf !== undefined && r.input_tf !== "") {
+    dockerArgs.push("-e", `PINEFORGE_INPUT_TF=${r.input_tf}`);
+  }
+  if (r.script_tf !== undefined && r.script_tf !== "") {
+    dockerArgs.push("-e", `PINEFORGE_SCRIPT_TF=${r.script_tf}`);
+  }
+  if (r.bar_magnifier !== undefined) {
+    dockerArgs.push("-e", `PINEFORGE_BAR_MAGNIFIER=${r.bar_magnifier ? "true" : "false"}`);
+  }
+  if (r.magnifier_samples !== undefined) {
+    dockerArgs.push("-e", `PINEFORGE_MAGNIFIER_SAMPLES=${r.magnifier_samples}`);
+  }
+  if (r.magnifier_dist !== undefined) {
+    dockerArgs.push("-e", `PINEFORGE_MAGNIFIER_DIST=${r.magnifier_dist}`);
   }
   dockerArgs.push(
     "-v", `${args.cppPath}:/in/strategy.cpp:ro`,
@@ -634,6 +663,196 @@ const ParamGridSchema = z.record(
 const MarketSchema = z.enum(["spot", "usdt_perp"]);
 const IntervalSchema = z.enum(BINANCE_INTERVALS);
 
+// ─── strategy() header overrides ──────────────────────────────────────────
+//
+// The pineforge-engine runtime accepts a fixed set of strategy(...) header
+// overrides via PINEFORGE_OVERRIDES. Enumerating them here (instead of an
+// opaque ParamMap) gives the agent the exact keys, value types, and enum
+// values it can pass — and lets list_strategy_overrides expose the same
+// catalog at runtime.
+const COMMISSION_TYPES = ["percent", "cash_per_order", "cash_per_contract"] as const;
+const QTY_TYPES = ["fixed", "percent_of_equity", "cash"] as const;
+const CLOSE_ENTRIES_RULES = ["ANY", "FIFO"] as const;
+
+interface OverrideSpec {
+  type: "number" | "integer" | "boolean" | "enum";
+  enum?: readonly string[];
+  description: string;
+}
+
+const STRATEGY_OVERRIDES_CATALOG: Record<string, OverrideSpec> = {
+  initial_capital: {
+    type: "number",
+    description:
+      "Starting equity in account currency. Mirrors `strategy(initial_capital=...)`.",
+  },
+  pyramiding: {
+    type: "integer",
+    description:
+      "Maximum same-direction entries before further entries are blocked. " +
+      "0 = single position. Mirrors `strategy(pyramiding=...)`.",
+  },
+  slippage: {
+    type: "integer",
+    description:
+      "Per-fill slippage in ticks (mintick units). Mirrors `strategy(slippage=...)`.",
+  },
+  commission_value: {
+    type: "number",
+    description:
+      "Commission magnitude. Units depend on commission_type. " +
+      "Mirrors `strategy(commission_value=...)`.",
+  },
+  commission_type: {
+    type: "enum",
+    enum: COMMISSION_TYPES,
+    description:
+      "Commission units. 'percent' = percent of trade value, " +
+      "'cash_per_order' = fixed cash per order, " +
+      "'cash_per_contract' = fixed cash per contract. " +
+      "Mirrors `strategy(commission_type=...)`.",
+  },
+  default_qty_value: {
+    type: "number",
+    description:
+      "Default order size, interpreted per default_qty_type. " +
+      "Mirrors `strategy(default_qty_value=...)`.",
+  },
+  default_qty_type: {
+    type: "enum",
+    enum: QTY_TYPES,
+    description:
+      "Default order sizing mode. 'fixed' = contracts/shares, " +
+      "'percent_of_equity' = percent of current equity, " +
+      "'cash' = fixed cash amount per order. " +
+      "Mirrors `strategy(default_qty_type=...)`.",
+  },
+  process_orders_on_close: {
+    type: "boolean",
+    description:
+      "When true, market orders submitted on a bar fill at that bar's close " +
+      "instead of waiting for the next bar's open. " +
+      "Mirrors `strategy(process_orders_on_close=...)`.",
+  },
+  close_entries_rule: {
+    type: "enum",
+    enum: CLOSE_ENTRIES_RULES,
+    description:
+      "How `strategy.close(id)` resolves which entries to close. " +
+      "'FIFO' = first-in-first-out (default). " +
+      "'ANY' = match all entries with the same id. " +
+      "Mirrors `strategy(close_entries_rule=...)`.",
+  },
+};
+
+const StrategyOverridesSchema = z.object({
+  initial_capital: z.number().describe(STRATEGY_OVERRIDES_CATALOG.initial_capital!.description).optional(),
+  pyramiding: z.number().int().min(0).describe(STRATEGY_OVERRIDES_CATALOG.pyramiding!.description).optional(),
+  slippage: z.number().int().min(0).describe(STRATEGY_OVERRIDES_CATALOG.slippage!.description).optional(),
+  commission_value: z.number().min(0).describe(STRATEGY_OVERRIDES_CATALOG.commission_value!.description).optional(),
+  commission_type: z.enum(COMMISSION_TYPES).describe(STRATEGY_OVERRIDES_CATALOG.commission_type!.description).optional(),
+  default_qty_value: z.number().describe(STRATEGY_OVERRIDES_CATALOG.default_qty_value!.description).optional(),
+  default_qty_type: z.enum(QTY_TYPES).describe(STRATEGY_OVERRIDES_CATALOG.default_qty_type!.description).optional(),
+  process_orders_on_close: z.boolean().describe(STRATEGY_OVERRIDES_CATALOG.process_orders_on_close!.description).optional(),
+  close_entries_rule: z.enum(CLOSE_ENTRIES_RULES).describe(STRATEGY_OVERRIDES_CATALOG.close_entries_rule!.description).optional(),
+}).strict();
+
+const StrategyOverridesGridSchema = z.object({
+  initial_capital: z.array(z.number()).min(1).optional(),
+  pyramiding: z.array(z.number().int().min(0)).min(1).optional(),
+  slippage: z.array(z.number().int().min(0)).min(1).optional(),
+  commission_value: z.array(z.number().min(0)).min(1).optional(),
+  commission_type: z.array(z.enum(COMMISSION_TYPES)).min(1).optional(),
+  default_qty_value: z.array(z.number()).min(1).optional(),
+  default_qty_type: z.array(z.enum(QTY_TYPES)).min(1).optional(),
+  process_orders_on_close: z.array(z.boolean()).min(1).optional(),
+  close_entries_rule: z.array(z.enum(CLOSE_ENTRIES_RULES)).min(1).optional(),
+}).strict();
+
+// ─── Runtime args (run_backtest_full args, NOT strategy() header) ─────────
+//
+// These are passed to pineforge-engine's run_backtest_full() rather than the
+// per-strategy override table. They control how the engine consumes input
+// bars (timeframe semantics, bar magnifier sub-bar sampling) and never
+// appear in the Pine source. The engine validates them and surfaces any
+// mismatch (e.g. script_tf finer than input_tf) through
+// strategy_get_last_error() — agents see that as
+// {"engine":"pineforge","error":"..."} on stdout, exit code 1.
+const MAGNIFIER_DISTS = [
+  "uniform", "cosine", "triangle", "endpoints", "front_loaded", "back_loaded",
+] as const;
+
+interface RuntimeSpec extends OverrideSpec {}
+
+const RUNTIME_ARGS_CATALOG: Record<string, RuntimeSpec> = {
+  input_tf: {
+    type: "enum",
+    description:
+      "Chart bar timeframe — the resolution of the OHLCV CSV being fed in. " +
+      "Use Pine timeframe strings: '1', '5', '15', '60', '240' (minutes), " +
+      "'D', '1D', 'W', '1W', 'M', '1M'. Empty / omitted = the engine " +
+      "auto-detects the timeframe from the gap between the first two bars. " +
+      "Set explicitly when the CSV's resolution is ambiguous, when fewer " +
+      "than 2 bars are present, or when registering request.security() " +
+      "evaluators that need the chart TF stated up front.",
+  },
+  script_tf: {
+    type: "enum",
+    description:
+      "Strategy / script timeframe — the resolution at which the strategy's " +
+      "on_bar() runs. Empty / omitted = same as input_tf (no aggregation). " +
+      "Set to a coarser timeframe (e.g. input_tf='5', script_tf='60') to " +
+      "have the engine aggregate the input bars into higher-TF script bars " +
+      "before invoking the strategy. MUST be coarser than or equal to " +
+      "input_tf — finer values are rejected with the error " +
+      "'script timeframe must be coarser than or equal to input timeframe'. " +
+      "When the Pine source uses request.security() to pull a higher TF, " +
+      "leave script_tf empty (the security TF is encoded inside the Pine " +
+      "source, not here).",
+  },
+  bar_magnifier: {
+    type: "boolean",
+    description:
+      "When true, the engine samples each input bar's price path at " +
+      "magnifier_samples sub-points and walks stop / limit / trailing " +
+      "orders against the sub-bars instead of the bar's OHLC corners. " +
+      "Improves intra-bar fill realism for strategies that hinge on " +
+      "wick fills, but multiplies engine work by ~magnifier_samples. " +
+      "Default false. Most useful when input_tf is coarse (15m+) and " +
+      "the strategy uses tight intra-bar exits.",
+  },
+  magnifier_samples: {
+    type: "integer",
+    description:
+      "Sub-bar sample count when bar_magnifier=true. Minimum 2 " +
+      "(open + close); typical range 4–16. Higher values give smoother " +
+      "intra-bar fill simulation at linear cost. Ignored when " +
+      "bar_magnifier=false. Default 4.",
+  },
+  magnifier_dist: {
+    type: "enum",
+    enum: MAGNIFIER_DISTS,
+    description:
+      "Distribution of sub-bar samples along the OHLC path when " +
+      "bar_magnifier=true. 'endpoints' (default) always includes the " +
+      "exact O/H/L/C corners and uniformly fills between them — best for " +
+      "TradingView parity. 'uniform' = equal spacing. 'cosine' = denser " +
+      "near segment endpoints. 'triangle' = denser near segment midpoints. " +
+      "'front_loaded' / 'back_loaded' = denser near open / close, " +
+      "simulating opening- or closing-impulse price action.",
+  },
+};
+
+const RuntimeArgsSchema = z.object({
+  input_tf: z.string().describe(RUNTIME_ARGS_CATALOG.input_tf!.description).optional(),
+  script_tf: z.string().describe(RUNTIME_ARGS_CATALOG.script_tf!.description).optional(),
+  bar_magnifier: z.boolean().describe(RUNTIME_ARGS_CATALOG.bar_magnifier!.description).optional(),
+  magnifier_samples: z.number().int().min(2).describe(RUNTIME_ARGS_CATALOG.magnifier_samples!.description).optional(),
+  magnifier_dist: z.enum(MAGNIFIER_DISTS).describe(RUNTIME_ARGS_CATALOG.magnifier_dist!.description).optional(),
+}).strict();
+
+type RuntimeArgs = z.infer<typeof RuntimeArgsSchema>;
+
 const server = new McpServer(
   { name: "pineforge-codegen-mcp", version: VERSION },
   { capabilities: { tools: {} } }
@@ -692,14 +911,26 @@ server.registerTool(
         "Map of Pine input.*() names → value (string/number/bool). " +
         "Sent as PINEFORGE_INPUTS env var to the runtime."
       ),
-      overrides: ParamMapSchema.optional().describe(
-        "Map of strategy(...) header overrides. " +
-        "Sent as PINEFORGE_OVERRIDES env var to the runtime."
+      overrides: StrategyOverridesSchema.optional().describe(
+        "strategy(...) header overrides. Each key maps to a single argument " +
+        "of the Pine `strategy()` call; only the keys you set are applied. " +
+        "Sent as PINEFORGE_OVERRIDES env var. Call list_engine_params " +
+        "for the full catalog with types and enum values."
+      ),
+      runtime: RuntimeArgsSchema.optional().describe(
+        "Engine runtime args (NOT strategy() header) controlling timeframe " +
+        "semantics and intra-bar fill simulation. input_tf / script_tf set " +
+        "the chart and strategy timeframes — script_tf must be coarser " +
+        "than or equal to input_tf or the engine rejects the run. " +
+        "bar_magnifier + magnifier_samples + magnifier_dist enable sub-bar " +
+        "price-path sampling for tighter stop / limit fills. Each field is " +
+        "optional and only forwarded to the container when set. Call " +
+        "list_engine_params for the full catalog."
       ),
     },
   },
-  async ({ source, ohlcv_csv_path, image, inputs, overrides }) =>
-    asTextResult(await runBacktest({ source, ohlcv_csv_path, image, inputs, overrides })),
+  async ({ source, ohlcv_csv_path, image, inputs, overrides, runtime }) =>
+    asTextResult(await runBacktest({ source, ohlcv_csv_path, image, inputs, overrides, runtime })),
 );
 
 server.registerTool(
@@ -721,15 +952,23 @@ server.registerTool(
         "Grid of input.*() names → list of values to sweep. " +
         "Example: {\"Fast Length\": [8, 12, 19], \"Slow Length\": [21, 26, 39]}"
       ),
-      overrides: ParamGridSchema.optional().describe(
-        "Grid of strategy() header fields → list of values. " +
-        "Example: {\"default_qty_value\": [1, 5], \"commission_value\": [0.04]}"
+      overrides: StrategyOverridesGridSchema.optional().describe(
+        "Grid of strategy(...) header overrides → list of values, one axis " +
+        "per key. Example: {\"default_qty_value\": [1, 5], \"commission_value\": [0.04]}. " +
+        "Call list_engine_params for the full catalog with types and enum values."
       ),
       fixed_inputs: ParamMapSchema.optional().describe(
         "Inputs applied to every combo (overridden by per-combo `inputs` keys)."
       ),
-      fixed_overrides: ParamMapSchema.optional().describe(
+      fixed_overrides: StrategyOverridesSchema.optional().describe(
         "Overrides applied to every combo (overridden by per-combo `overrides` keys)."
+      ),
+      runtime: RuntimeArgsSchema.optional().describe(
+        "Engine runtime args applied to every combo in the sweep. Same " +
+        "shape as backtest_pine.runtime — input_tf / script_tf / " +
+        "bar_magnifier / magnifier_samples / magnifier_dist. Currently " +
+        "fixed across the grid (not swept); add to the grid axes through " +
+        "future versions if you need to vary them."
       ),
       max_combinations: z.number().int().min(1).max(1024).optional()
         .describe("Hard cap on combinations. Default 64."),
@@ -806,6 +1045,40 @@ server.registerTool(
     },
   },
   async (args) => asTextResult(await binanceSymbols(args as SymbolsArgs)),
+);
+
+server.registerTool(
+  "list_engine_params",
+  {
+    description:
+      "Returns the full catalog of engine knobs accepted by backtest_pine / " +
+      "backtest_pine_grid in two groups: strategy_overrides (the 9 " +
+      "strategy(...) header fields the runtime reads via " +
+      "PINEFORGE_OVERRIDES — initial_capital, pyramiding, slippage, " +
+      "commission_value, commission_type, default_qty_value, " +
+      "default_qty_type, process_orders_on_close, close_entries_rule) and " +
+      "runtime_args (input_tf, script_tf, bar_magnifier, " +
+      "magnifier_samples, magnifier_dist — args to run_backtest_full, " +
+      "NOT part of the strategy() header). Each entry is " +
+      "{key, type, enum?, description}. Free — does not consume API quota " +
+      "or run docker. Use this to discover what knobs the engine exposes " +
+      "before issuing a backtest.",
+    inputSchema: {},
+  },
+  async () => asTextResult({
+    strategy_overrides: Object.entries(STRATEGY_OVERRIDES_CATALOG).map(([key, spec]) => ({
+      key,
+      type: spec.type,
+      ...(spec.enum ? { enum: [...spec.enum] } : {}),
+      description: spec.description,
+    })),
+    runtime_args: Object.entries(RUNTIME_ARGS_CATALOG).map(([key, spec]) => ({
+      key,
+      type: spec.type,
+      ...(spec.enum ? { enum: [...spec.enum] } : {}),
+      description: spec.description,
+    })),
+  }),
 );
 
 server.registerTool(
