@@ -236,6 +236,132 @@ async function pullImage(image: string): Promise<{ image: string; pulled: boolea
   return { image, pulled: true, output: (stdout + stderr).trim().slice(-2048) };
 }
 
+interface ImageFreshness {
+  image: string;
+  local_present: boolean;
+  local_digest: string | null;
+  remote_digest: string | null;
+  remote_digests_all: string[];
+  up_to_date: boolean;
+  recommend_pull: boolean;
+  notes: string[];
+  pulled?: boolean;
+  pull_output?: string;
+  error?: string;
+}
+
+// Compare local image manifest digest vs registry per-platform digest without
+// downloading layers. `docker manifest inspect --verbose` returns either a
+// single object (single-arch tag) or an array (multi-arch / manifest list);
+// each entry exposes `.Descriptor.digest`, which is exactly the digest format
+// stored in the local image's RepoDigests. Up-to-date iff local digest is in
+// the remote per-platform set.
+async function checkEngineImage(image: string, autoPull: boolean): Promise<ImageFreshness> {
+  const notes: string[] = [];
+  let local_present = false;
+  let local_digest: string | null = null;
+  let remote_digest: string | null = null;
+  let remote_digests_all: string[] = [];
+  let error: string | undefined;
+
+  {
+    const child = spawn(
+      "docker",
+      ["image", "inspect", "--format", "{{json .RepoDigests}}", image],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const { stdout, stderr, code } = await collectChild(child, DOCKER_TIMEOUT_MS);
+    if (code === 0) {
+      try {
+        const arr = JSON.parse(stdout.trim()) as string[];
+        const digests = arr
+          .map((r) => r.split("@")[1])
+          .filter((s): s is string => !!s && s.startsWith("sha256:"));
+        if (digests.length > 0) {
+          local_present = true;
+          local_digest = digests[0] ?? null;
+        } else {
+          local_present = true;
+          notes.push("local image present but has no RepoDigest (likely built locally, not pulled)");
+        }
+      } catch (e) {
+        notes.push(`failed to parse local RepoDigests: ${(e as Error).message}`);
+      }
+    } else {
+      const msg = (stderr || stdout).toLowerCase();
+      if (msg.includes("no such image") || msg.includes("no such object")) {
+        notes.push("local image absent");
+      } else {
+        notes.push(`docker image inspect failed (${code}): ${(stderr || stdout).trim().slice(-512)}`);
+      }
+    }
+  }
+
+  {
+    const child = spawn(
+      "docker",
+      ["manifest", "inspect", "--verbose", image],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const { stdout, stderr, code } = await collectChild(child, DOCKER_TIMEOUT_MS);
+    if (code === 0) {
+      try {
+        const parsed = JSON.parse(stdout.trim());
+        const items = Array.isArray(parsed) ? parsed : [parsed];
+        remote_digests_all = items
+          .map((it: any) => it?.Descriptor?.digest as string | undefined)
+          .filter((s): s is string => !!s && s.startsWith("sha256:"));
+        if (remote_digests_all.length === 0) {
+          error = "remote manifest contained no Descriptor.digest entries";
+        }
+      } catch (e) {
+        error = `failed to parse manifest inspect output: ${(e as Error).message}`;
+      }
+    } else {
+      error = `docker manifest inspect failed (${code}): ${(stderr || stdout).trim().slice(-512)}`;
+    }
+  }
+
+  let up_to_date = false;
+  if (local_digest && remote_digests_all.length > 0) {
+    up_to_date = remote_digests_all.includes(local_digest);
+    remote_digest = up_to_date ? local_digest : (remote_digests_all[0] ?? null);
+  } else if (remote_digests_all.length > 0) {
+    remote_digest = remote_digests_all[0] ?? null;
+  }
+
+  // recommend_pull defaults to "not up-to-date". When remote query failed,
+  // only recommend pulling if the local image is missing — otherwise we
+  // can't actually tell whether a pull is needed.
+  let recommend_pull = !up_to_date;
+  if (error && local_present) recommend_pull = false;
+
+  const result: ImageFreshness = {
+    image,
+    local_present,
+    local_digest,
+    remote_digest,
+    remote_digests_all,
+    up_to_date,
+    recommend_pull,
+    notes,
+    ...(error ? { error } : {}),
+  };
+
+  if (autoPull && recommend_pull) {
+    try {
+      const pulled = await pullImage(image);
+      result.pulled = true;
+      result.pull_output = pulled.output;
+    } catch (e) {
+      result.pulled = false;
+      result.notes.push(`auto_pull failed: ${(e as Error).message}`);
+    }
+  }
+
+  return result;
+}
+
 // ─── Param-grid helpers ───────────────────────────────────────────────────
 
 function stringifyParams(p?: ParamMap): Record<string, string> {
@@ -1095,6 +1221,32 @@ server.registerTool(
     },
   },
   async ({ image }) => asTextResult(await pullImage(image ?? DEFAULT_IMAGE)),
+);
+
+server.registerTool(
+  "check_engine_image",
+  {
+    description:
+      "Check whether the local pineforge-engine Docker image is up to date " +
+      "with the registry. Compares per-platform manifest digests via " +
+      "`docker manifest inspect --verbose` (no image layers downloaded). " +
+      "Returns up_to_date + recommend_pull. With auto_pull=true, runs " +
+      "`docker pull` in the same call when the local image is stale or " +
+      "missing. Does not consume API quota. Note: this is independent of " +
+      "the MCP server's own version (`@pineforge/codegen-mcp`); the MCP " +
+      "version and the engine image version evolve separately.",
+    inputSchema: {
+      image: z.string().optional().describe(
+        `Image to check. Defaults to ${DEFAULT_IMAGE}.`
+      ),
+      auto_pull: z.boolean().optional().describe(
+        "If true and the image is stale or missing, run `docker pull` in " +
+        "the same call. Default false (report only)."
+      ),
+    },
+  },
+  async ({ image, auto_pull }) =>
+    asTextResult(await checkEngineImage(image ?? DEFAULT_IMAGE, auto_pull ?? false)),
 );
 
 const transport = new StdioServerTransport();
