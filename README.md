@@ -27,11 +27,11 @@ npx -y @pineforge/codegen-mcp
 Requires:
 - Node ≥ 20
 - Docker daemon running locally
-- A PineForge API key (`pf_…`)
+- A PineForge API key (`pf_…`) — get a free key at [pineforge.dev](https://www.pineforge.dev)
 
 ## Auth
 
-Set env vars:
+Get a free API key at [https://www.pineforge.dev](https://www.pineforge.dev), then set env vars:
 
 ```bash
 export PINEFORGE_API_KEY="pf_..."
