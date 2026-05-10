@@ -16,6 +16,7 @@ machine — only the Pine source travels to the API.
 | `fetch_binance_ohlcv`  | Binance public API   | free                                           | Write a backtest-ready CSV from Binance spot or USDT-perp klines         |
 | `binance_symbols`      | Binance public API   | free                                           | List / filter Binance symbols (5-min in-process cache)                   |
 | `pull_engine_image`    | local Docker         | free                                           | Pre-pull the `pineforge-engine` runtime image                            |
+| `check_engine_image`   | local Docker + API   | free                                           | Probe local vs remote `pineforge-engine` digest (freshness check)        |
 
 ## Install
 
