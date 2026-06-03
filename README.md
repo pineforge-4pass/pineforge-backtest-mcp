@@ -1,22 +1,23 @@
 # `@pineforge/codegen-mcp`
 
-Local stdio MCP server: bridges an AI agent to the hosted PineForge codegen API
-**and** the user's local Docker daemon. The OHLCV file never leaves the user's
-machine — only the Pine source travels to the API.
+Local stdio MCP server bridging an AI agent to the user's local Docker daemon
+and Binance public market data. **Fully local** — the `pineforge-engine` image
+bundles the [`pineforge-codegen`](https://github.com/pineforge-4pass/pineforge-codegen-oss)
+transpiler, so Pine → C++ → backtest all run on the user's machine. **No API
+key, nothing leaves the box.**
 
 ## Tools
 
-| name                   | runs on              | quota                                          | purpose                                                                  |
-| ---------------------- | -------------------- | ---------------------------------------------- | ------------------------------------------------------------------------ |
-| `transpile_pine`       | remote API           | counts (refunded on compile error)             | Pine v6 → C++ translation unit                                           |
-| `get_quota`            | remote API           | free                                           | Read current month's quota usage                                         |
-| `list_engine_params`   | local (no I/O)       | free                                           | Catalog of every `overrides` + `runtime` knob accepted by the backtests  |
-| `backtest_pine`        | local Docker         | counts 1 (the transpile call inside)           | Single backtest of a Pine source against an OHLCV CSV                    |
-| `backtest_pine_grid`   | local Docker         | counts 1 (transpiled once for the whole sweep) | Cartesian sweep of `inputs` × `overrides` reusing one compile            |
-| `fetch_binance_ohlcv`  | Binance public API   | free                                           | Write a backtest-ready CSV from Binance spot or USDT-perp klines         |
-| `binance_symbols`      | Binance public API   | free                                           | List / filter Binance symbols (5-min in-process cache)                   |
-| `pull_engine_image`    | local Docker         | free                                           | Pre-pull the `pineforge-engine` runtime image                            |
-| `check_engine_image`   | local Docker + API   | free                                           | Probe local vs remote `pineforge-engine` digest (freshness check)        |
+| name                   | runs on              | purpose                                                                  |
+| ---------------------- | -------------------- | ------------------------------------------------------------------------ |
+| `transpile_pine`       | local Docker         | Pine v6 → C++ translation unit (transpile-only)                          |
+| `list_engine_params`   | local (no I/O)       | Catalog of every `overrides` + `runtime` knob accepted by the backtests  |
+| `backtest_pine`        | local Docker         | Single backtest of a Pine source against an OHLCV CSV                    |
+| `backtest_pine_grid`   | local Docker         | Cartesian sweep of `inputs` × `overrides` reusing one compile            |
+| `fetch_binance_ohlcv`  | Binance public API   | Write a backtest-ready CSV from Binance spot or USDT-perp klines         |
+| `binance_symbols`      | Binance public API   | List / filter Binance symbols (5-min in-process cache)                   |
+| `pull_engine_image`    | local Docker         | Pre-pull the `pineforge-engine` runtime image                            |
+| `check_engine_image`   | local Docker         | Probe local vs registry `pineforge-engine` digest (freshness check)      |
 
 ## Install
 
@@ -27,16 +28,9 @@ npx -y @pineforge/codegen-mcp
 Requires:
 - Node ≥ 20
 - Docker daemon running locally
-- A PineForge API key (`pf_…`) — get a free key at [pineforge.dev](https://www.pineforge.dev)
 
-## Auth
-
-Get a free API key at [https://www.pineforge.dev](https://www.pineforge.dev), then set env vars:
-
-```bash
-export PINEFORGE_API_KEY="pf_..."
-export PINEFORGE_GATEWAY="https://codegen.pineforge.dev"   # optional
-```
+No API key. The first backtest pulls the `pineforge-engine` image (or run
+`pull_engine_image` ahead of time).
 
 ## Client configuration
 
@@ -47,10 +41,7 @@ export PINEFORGE_GATEWAY="https://codegen.pineforge.dev"   # optional
   "mcpServers": {
     "pineforge-codegen": {
       "command": "npx",
-      "args": ["-y", "@pineforge/codegen-mcp"],
-      "env": {
-        "PINEFORGE_API_KEY": "pf_..."
-      }
+      "args": ["-y", "@pineforge/codegen-mcp"]
     }
   }
 }
@@ -61,7 +52,6 @@ export PINEFORGE_GATEWAY="https://codegen.pineforge.dev"   # optional
 ```bash
 claude mcp add pineforge-codegen \
   --transport stdio \
-  --env PINEFORGE_API_KEY=pf_... \
   -- npx -y @pineforge/codegen-mcp
 ```
 
@@ -150,7 +140,7 @@ Returns the same JSON schema as the standalone `pineforge-engine` Docker image:
 
 ## `backtest_pine_grid` — parameter sweep
 
-Transpiles the Pine source **once** (one quota hit) then runs the same
+Transpiles the Pine source **once** (locally, in-container) then runs the same
 compiled binary against the cartesian product of `inputs` × `overrides`.
 Returns a ranked list plus the top entry under `best`.
 
@@ -185,7 +175,7 @@ Returns a ranked list plus the top entry under `best`.
 
 Writes a backtest-ready CSV (header `timestamp,open,high,low,close,volume`,
 timestamp = open time in UNIX ms UTC) from Binance's public endpoints. No
-auth required, no PineForge quota cost. Requests > 1000 bars are paginated
+auth required. Requests > 1000 bars are paginated
 automatically. Output path is subject to the same cwd scope as
 `ohlcv_csv_path` (relax with `PINEFORGE_ALLOW_ANYWHERE=1`).
 
@@ -230,7 +220,6 @@ export PINEFORGE_ALLOW_ANYWHERE=1
 
 | var | default | purpose |
 |---|---|---|
-| `PINEFORGE_API_KEY`             | (required) | Bearer for the codegen API |
-| `PINEFORGE_GATEWAY`             | production URL | Override the API host |
+| `PINEFORGE_IMAGE`               | `ghcr.io/pineforge-4pass/pineforge-engine:latest` | Engine image used for transpile + backtest |
 | `PINEFORGE_ALLOW_ANYWHERE`      | `0` | Allow OHLCV paths outside cwd |
 | `PINEFORGE_DOCKER_TIMEOUT_MS`   | `120000` | Hard kill for `docker pull` / `docker run` |

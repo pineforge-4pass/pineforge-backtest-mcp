@@ -2,14 +2,14 @@
 /**
  * @pineforge/codegen-mcp — local stdio MCP server.
  *
- * Bridges an AI agent to the hosted PineForge codegen API (transpile,
- * quota), to the user's local Docker daemon (backtest runner + grid
- * sweep), and to Binance public market-data endpoints (OHLCV CSV
- * export, symbol lookup). Runs on the user's machine so OHLCV files
- * never leave it; only the Pine source travels to the codegen API.
+ * Bridges an AI agent to the user's local Docker daemon (Pine → C++
+ * transpile, backtest runner + grid sweep) and to Binance public
+ * market-data endpoints (OHLCV CSV export, symbol lookup). Everything
+ * runs on the user's machine: the pineforge-engine image bundles the
+ * pineforge-codegen transpiler, so Pine is transpiled in-container —
+ * no hosted API, no API key, source never leaves the box.
  *
- * Auth: PINEFORGE_API_KEY env var (required).
- * Gateway override: PINEFORGE_GATEWAY env var (default: production URL).
+ * Requires: Docker, and the pineforge-engine image (auto-pull supported).
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -23,9 +23,7 @@ import { VERSION } from "./version.js";
 
 // ─── Config ───────────────────────────────────────────────────────────────
 
-const GATEWAY = process.env.PINEFORGE_GATEWAY ?? "https://codegen.pineforge.dev";
-const API_KEY = process.env.PINEFORGE_API_KEY ?? "";
-const DEFAULT_IMAGE = "ghcr.io/fullpass-4pass/pineforge-engine:latest";
+const DEFAULT_IMAGE = process.env.PINEFORGE_IMAGE ?? "ghcr.io/pineforge-4pass/pineforge-engine:latest";
 const ALLOW_ANYWHERE = process.env.PINEFORGE_ALLOW_ANYWHERE === "1";
 const DOCKER_TIMEOUT_MS = Number(process.env.PINEFORGE_DOCKER_TIMEOUT_MS ?? 120_000);
 
@@ -34,40 +32,33 @@ const BINANCE_FAPI_BASE = "https://fapi.binance.com";
 const BINANCE_KLINES_LIMIT = 1000;
 const BINANCE_PAGE_DELAY_MS = 200;
 
-if (!API_KEY) {
-  console.error("[pineforge-mcp] PINEFORGE_API_KEY env var is required");
-  process.exit(2);
-}
+// ─── Local transpile (Pine → C++ via the engine container) ──────────────────
 
-// ─── Codegen API ──────────────────────────────────────────────────────────
-
-interface Quota { used: number; limit: number; period: string; refunded: boolean; }
-
-async function callTranspile(source: string): Promise<{ cpp: string; quota: Quota }> {
-  const resp = await fetch(`${GATEWAY}/transpile`, {
-    method: "POST",
-    headers: { "x-api-key": API_KEY, "content-type": "text/plain" },
-    body: source,
-  });
-  const text = await resp.text();
-  const quota: Quota = {
-    used: Number(resp.headers.get("x-quota-used") ?? 0),
-    limit: Number(resp.headers.get("x-quota-limit") ?? 0),
-    period: resp.headers.get("x-quota-period") ?? "",
-    refunded: resp.headers.get("x-quota-refunded") === "1",
-  };
-  if (!resp.ok) throw new Error(`transpile failed (${resp.status}): ${text}`);
-  return { cpp: text, quota };
-}
-
-async function callGetQuota(): Promise<unknown> {
-  const resp = await fetch(`${GATEWAY}/quota`, {
-    method: "GET",
-    headers: { "x-api-key": API_KEY },
-  });
-  const text = await resp.text();
-  if (!resp.ok) throw new Error(`get_quota failed (${resp.status}): ${text}`);
-  return JSON.parse(text);
+// Runs the engine image in transpile-only mode: writes the Pine source to a
+// temp file, mounts it read-only, and returns the generated C++ on stdout.
+// No network (`--network=none`), no API key — codegen is bundled in the image.
+async function dockerTranspile(source: string, image: string): Promise<string> {
+  const tmp = await mkdtemp(join(tmpdir(), "pineforge-tr-"));
+  const pinePath = join(tmp, "strategy.pine");
+  await writeFile(pinePath, source, "utf8");
+  try {
+    const dockerArgs = [
+      "run", "--rm", "--network=none",
+      "-e", "PINEFORGE_TRANSPILE_ONLY=1",
+      "-v", `${pinePath}:/in/strategy.pine:ro`,
+      image,
+    ];
+    const child = spawn("docker", dockerArgs, { stdio: ["ignore", "pipe", "pipe"] });
+    const { stdout, stderr, code } = await collectChild(child, DOCKER_TIMEOUT_MS);
+    if (code !== 0) {
+      throw new Error(
+        `transpile failed (docker exit ${code}):\n${stderr.slice(-2048)}`
+      );
+    }
+    return stdout;
+  } finally {
+    rm(tmp, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 // ─── Backtest (single + grid) ─────────────────────────────────────────────
@@ -110,7 +101,7 @@ interface BacktestGridArgs {
 async function runBacktest(args: BacktestArgs): Promise<unknown> {
   const csvPath = await resolveCsvPath(args.ohlcv_csv_path);
   const image = args.image ?? DEFAULT_IMAGE;
-  const { cpp } = await callTranspile(args.source);
+  const cpp = await dockerTranspile(args.source, image);
 
   const tmp = await mkdtemp(join(tmpdir(), "pineforge-bt-"));
   const cppPath = join(tmp, "strategy.cpp");
@@ -155,7 +146,7 @@ async function runBacktestGrid(args: BacktestGridArgs): Promise<unknown> {
     );
   }
 
-  const { cpp } = await callTranspile(args.source);
+  const cpp = await dockerTranspile(args.source, image);
   const tmp = await mkdtemp(join(tmpdir(), "pineforge-grid-"));
   const cppPath = join(tmp, "strategy.cpp");
   await writeFile(cppPath, cpp, "utf8");
@@ -988,26 +979,23 @@ server.registerTool(
   "transpile_pine",
   {
     description:
-      "Transpile PineScript v6 source to a C++ translation unit using the hosted " +
-      "PineForge codegen API. Compile failures DO NOT consume the monthly quota — " +
-      "only successful 200 responses count. Use backtest_pine if you also want to " +
-      "run the strategy locally.",
+      "Transpile PineScript v6 source to a C++ translation unit locally, using the " +
+      "pineforge-codegen transpiler bundled in the pineforge-engine Docker image. " +
+      "No API key, no network — source never leaves the machine. Returns the " +
+      "generated C++ as text. Use backtest_pine if you also want to run the strategy.",
     inputSchema: {
       source: z.string().describe("PineScript v6 source (must include //@version=6)."),
+      image: z.string().optional().describe(
+        `Docker image override. Defaults to ${DEFAULT_IMAGE}.`
+      ),
     },
   },
-  async ({ source }) => asTextResult(await callTranspile(source)),
-);
-
-server.registerTool(
-  "get_quota",
-  {
-    description:
-      "Return the current calendar month's API quota usage for the configured key: " +
-      "{used, limit, period, expires_at, tier}. Free — does not consume quota.",
-    inputSchema: {},
-  },
-  async () => asTextResult(await callGetQuota()),
+  async ({ source, image }) => ({
+    content: [{
+      type: "text" as const,
+      text: await dockerTranspile(source, image ?? DEFAULT_IMAGE),
+    }],
+  }),
 );
 
 server.registerTool(
@@ -1015,8 +1003,8 @@ server.registerTool(
   {
     description:
       "Transpile a PineScript v6 strategy and run it against an OHLCV CSV via the " +
-      "pineforge-engine Docker image on the user's local machine. The OHLCV file " +
-      "stays on the user's box; only the Pine source travels over the network. " +
+      "pineforge-engine Docker image on the user's local machine. Fully local — " +
+      "transpile + backtest run in-container; nothing leaves the box, no API key. " +
       "Optional `inputs` overrides input.*() named values from the Pine source " +
       "(keys = the second arg of input.*(...) calls, e.g. 'Fast Length'). " +
       "Optional `overrides` overrides strategy(...) header fields " +
@@ -1063,7 +1051,7 @@ server.registerTool(
   "backtest_pine_grid",
   {
     description:
-      "Run a parameter sweep: transpile the Pine source ONCE (single quota hit), " +
+      "Run a parameter sweep: transpile the Pine source ONCE (locally, in-container), " +
       "then re-run the same compiled strategy against the OHLCV CSV across the " +
       "cartesian product of `inputs` × `overrides` grids. Returns a ranked list " +
       "of {inputs, overrides, summary, elapsed_seconds} entries sorted by `sort_by` " +
@@ -1117,7 +1105,7 @@ server.registerTool(
       "CSV (header: timestamp,open,high,low,close,volume; timestamp = open time " +
       "in UNIX ms UTC). Supports `spot` and `usdt_perp` (USDT-margined " +
       "perpetual futures). Requests larger than 1000 bars are paginated " +
-      "automatically. Free — no PineForge quota cost. The output path must " +
+      "automatically. The output path must " +
       "live inside the MCP cwd unless PINEFORGE_ALLOW_ANYWHERE=1.",
     inputSchema: {
       symbol: z.string().min(2).describe("Binance symbol, e.g. 'BTCUSDT'. Use binance_symbols to validate."),
@@ -1186,8 +1174,8 @@ server.registerTool(
       "runtime_args (input_tf, script_tf, bar_magnifier, " +
       "magnifier_samples, magnifier_dist — args to run_backtest_full, " +
       "NOT part of the strategy() header). Each entry is " +
-      "{key, type, enum?, description}. Free — does not consume API quota " +
-      "or run docker. Use this to discover what knobs the engine exposes " +
+      "{key, type, enum?, description}. Does not run docker. " +
+      "Use this to discover what knobs the engine exposes " +
       "before issuing a backtest.",
     inputSchema: {},
   },
@@ -1212,8 +1200,7 @@ server.registerTool(
   {
     description:
       "Run `docker pull` for the pineforge-engine runtime image on the user's " +
-      "machine. Does not consume API quota. Useful before the first backtest_pine " +
-      "call.",
+      "machine. Useful before the first backtest_pine call.",
     inputSchema: {
       image: z.string().optional().describe(
         `Image to pull. Defaults to ${DEFAULT_IMAGE}.`
@@ -1232,7 +1219,7 @@ server.registerTool(
       "`docker manifest inspect --verbose` (no image layers downloaded). " +
       "Returns up_to_date + recommend_pull. With auto_pull=true, runs " +
       "`docker pull` in the same call when the local image is stale or " +
-      "missing. Does not consume API quota. Note: this is independent of " +
+      "missing. Note: this is independent of " +
       "the MCP server's own version (`@pineforge/codegen-mcp`); the MCP " +
       "version and the engine image version evolve separately.",
     inputSchema: {
@@ -1251,4 +1238,4 @@ server.registerTool(
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-console.error("[pineforge-mcp] ready (stdio) — gateway:", GATEWAY);
+console.error("[pineforge-mcp] ready (stdio) — local transpile + backtest, image:", DEFAULT_IMAGE);
