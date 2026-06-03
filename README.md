@@ -223,3 +223,12 @@ export PINEFORGE_ALLOW_ANYWHERE=1
 | `PINEFORGE_IMAGE`               | `ghcr.io/pineforge-4pass/pineforge-engine:latest` | Engine image used for transpile + backtest |
 | `PINEFORGE_ALLOW_ANYWHERE`      | `0` | Allow OHLCV paths outside cwd |
 | `PINEFORGE_DOCKER_TIMEOUT_MS`   | `120000` | Hard kill for `docker pull` / `docker run` |
+
+## License
+
+Source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE), with a
+**Personal Trading exception** — free to research, backtest, and trade your own
+account with your own capital. **Commercial use** (companies, funds, managing
+third-party capital, embedding in a product, or operating a hosted / public-facing
+service) requires a commercial license: **luis@4pass.com.tw**. Source-available,
+not OSI open source.
