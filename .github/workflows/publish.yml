@@ -33,10 +33,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           registry-url: https://registry.npmjs.org
+      # npm Trusted Publishing (OIDC) needs npm >= 11.5.0 — newer than the npm
+      # bundled with Node 22. No NPM_TOKEN: the id-token below authenticates to
+      # npm via the configured trusted publisher, and provenance is automatic.
+      - run: npm install -g npm@latest
       - run: npm install --no-package-lock
       - run: npm run build
-      - run: npm publish --access=public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: npm publish --access=public
