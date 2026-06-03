@@ -40,13 +40,13 @@
     "backtest",
     "trading"
   ],
-  "homepage": "https://github.com/fullpass-4pass/pineforge-codegen-mcp",
+  "homepage": "https://github.com/pineforge-4pass/pineforge-codegen-mcp",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/fullpass-4pass/pineforge-codegen-mcp.git"
+    "url": "git+https://github.com/pineforge-4pass/pineforge-codegen-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/fullpass-4pass/pineforge-codegen-mcp/issues"
+    "url": "https://github.com/pineforge-4pass/pineforge-codegen-mcp/issues"
   },
   "license": "MIT"
 }

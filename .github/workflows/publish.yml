@@ -38,7 +38,8 @@ jobs:
       # npm Trusted Publishing (OIDC) needs npm >= 11.5.0 — newer than the npm
       # bundled with Node 22. No NPM_TOKEN: the id-token below authenticates to
       # npm via the configured trusted publisher, and provenance is automatic.
-      - run: npm install -g npm@latest
+      # Pinned (not @latest) for a reproducible, reviewed publish toolchain.
+      - run: npm install -g npm@11.5.0
       - run: npm install --no-package-lock
       - run: npm run build
       - run: npm publish --access=public
