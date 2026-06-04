@@ -29,7 +29,6 @@ import {
   type ParamMap,
   type ParamGrid,
   type RuntimeArgsLike,
-  type ImageFreshness,
 } from "./engine.js";
 
 // ─── Config ───────────────────────────────────────────────────────────────
