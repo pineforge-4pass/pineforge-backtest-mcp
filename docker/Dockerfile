@@ -15,6 +15,11 @@ RUN npm run build && npm prune --omit=dev
 
 # --- final: engine image + node runtime + MCP server ---
 FROM ghcr.io/pineforge-4pass/pineforge-engine:0.8.0
+# We copy only the `node` binary onto the engine base. This is sound ONLY while
+# the engine base stays Debian/glibc-compatible with node:22-slim (node is
+# dynamically linked against glibc + libstdc++). If the engine base ever moves
+# to Alpine/musl or a divergent glibc, node will fail at load — switch to
+# installing node in the final stage instead of copying the binary.
 COPY --from=node:22-slim /usr/local/bin/node /usr/local/bin/node
 WORKDIR /app
 COPY --from=mcp /app/dist ./dist
