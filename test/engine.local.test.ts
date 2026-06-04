@@ -45,6 +45,12 @@ test("LocalRunner backtests run in parallel without collision", async () => {
   assert.equal(b.input_tf, "D");
 });
 
+test("LocalRunner ignores per-call image override", async () => {
+  const r = new LocalRunner(PREFIX);
+  const cpp = await r.transpile("x", "ghcr.io/whatever:9.9.9");
+  assert.match(cpp, /transpiled/);
+});
+
 test("LocalRunner.engineInfo reports baked-in version from env", async () => {
   const prev = process.env.PINEFORGE_VERSION;
   process.env.PINEFORGE_VERSION = "0.8.0";

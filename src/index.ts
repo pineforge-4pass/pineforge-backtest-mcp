@@ -73,7 +73,7 @@ interface BacktestGridArgs {
 async function runBacktest(args: BacktestArgs): Promise<unknown> {
   const csvPath = await resolveCsvPath(args.ohlcv_csv_path);
   const image = args.image ?? DEFAULT_IMAGE;
-  const cpp = await engine.transpile(args.source);
+  const cpp = await engine.transpile(args.source, args.image);
 
   const tmp = await mkdtemp(join(tmpdir(), "pineforge-bt-"));
   const cppPath = join(tmp, "strategy.cpp");
@@ -83,6 +83,7 @@ async function runBacktest(args: BacktestArgs): Promise<unknown> {
     const report = await engine.backtest({
       cppPath,
       csvPath,
+      image: args.image,
       inputs: args.inputs,
       overrides: args.overrides,
       runtime: args.runtime,
@@ -120,7 +121,7 @@ async function runBacktestGrid(args: BacktestGridArgs): Promise<unknown> {
     );
   }
 
-  const cpp = await engine.transpile(args.source);
+  const cpp = await engine.transpile(args.source, args.image);
   const tmp = await mkdtemp(join(tmpdir(), "pineforge-grid-"));
   const cppPath = join(tmp, "strategy.cpp");
   await writeFile(cppPath, cpp, "utf8");
@@ -144,6 +145,7 @@ async function runBacktestGrid(args: BacktestGridArgs): Promise<unknown> {
         try {
           const report = await engine.backtest({
             cppPath, csvPath,
+            image: args.image,
             inputs: combo.inputs, overrides: combo.overrides,
             runtime: args.runtime,
           }) as { summary?: Record<string, unknown>; applied_inputs?: unknown;
@@ -742,10 +744,10 @@ server.registerTool(
       ),
     },
   },
-  async ({ source }) => ({
+  async ({ source, image }) => ({
     content: [{
       type: "text" as const,
-      text: await engine.transpile(source),
+      text: await engine.transpile(source, image),
     }],
   }),
 );

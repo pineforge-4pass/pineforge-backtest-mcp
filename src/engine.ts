@@ -294,6 +294,7 @@ export interface EngineInfo {
 export interface BacktestCall {
   cppPath: string;                 // pre-transpiled TU (grid reuses one)
   csvPath: string;                 // OHLCV csv
+  image?: string;                  // per-call docker image override; ignored by LocalRunner
   inputs?: ParamMap;
   overrides?: ParamMap;
   runtime?: RuntimeArgsLike;
@@ -301,7 +302,7 @@ export interface BacktestCall {
 
 export interface EngineRunner {
   readonly mode: "docker" | "local";
-  transpile(source: string): Promise<string>;
+  transpile(source: string, image?: string): Promise<string>;
   backtest(call: BacktestCall): Promise<unknown>;
   engineInfo(): Promise<EngineInfo>;
   // Image freshness — meaningful only for docker; local returns a static note.
@@ -313,11 +314,11 @@ export class DockerRunner implements EngineRunner {
   readonly mode = "docker" as const;
   constructor(private image: string = DEFAULT_IMAGE) {}
 
-  transpile(source: string): Promise<string> {
-    return dockerTranspile(source, this.image);
+  transpile(source: string, image?: string): Promise<string> {
+    return dockerTranspile(source, image ?? this.image);
   }
   backtest(call: BacktestCall): Promise<unknown> {
-    return dockerBacktest({ image: this.image, ...call });
+    return dockerBacktest({ ...call, image: call.image ?? this.image });
   }
   async engineInfo(): Promise<EngineInfo> {
     return { mode: "docker", baked_in: false, version: null, image: this.image };
@@ -370,7 +371,7 @@ export class LocalRunner implements EngineRunner {
     return stdout;
   }
 
-  async transpile(source: string): Promise<string> {
+  async transpile(source: string, _image?: string): Promise<string> {
     const dir = await mkdtemp(join(tmpdir(), "pineforge-lr-tr-"));
     try {
       await writeFile(join(dir, "strategy.pine"), source, "utf8");
