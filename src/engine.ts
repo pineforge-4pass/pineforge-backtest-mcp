@@ -281,3 +281,51 @@ export function collectChild(child: ReturnType<typeof spawn>, timeoutMs: number)
     });
   });
 }
+
+// ─── Engine runner abstraction ─────────────────────────────────────────────
+
+export interface EngineInfo {
+  mode: "docker" | "local";
+  baked_in: boolean;
+  version: string | null;
+  image?: string;
+}
+
+export interface BacktestCall {
+  cppPath: string;                 // pre-transpiled TU (grid reuses one)
+  csvPath: string;                 // OHLCV csv
+  inputs?: ParamMap;
+  overrides?: ParamMap;
+  runtime?: RuntimeArgsLike;
+}
+
+export interface EngineRunner {
+  readonly mode: "docker" | "local";
+  transpile(source: string): Promise<string>;
+  backtest(call: BacktestCall): Promise<unknown>;
+  engineInfo(): Promise<EngineInfo>;
+  // Image freshness — meaningful only for docker; local returns a static note.
+  checkImage(image: string, autoPull: boolean): Promise<ImageFreshness | EngineInfo>;
+  pullImage(image: string): Promise<{ image: string; pulled: boolean; output: string }>;
+}
+
+export class DockerRunner implements EngineRunner {
+  readonly mode = "docker" as const;
+  constructor(private image: string = DEFAULT_IMAGE) {}
+
+  transpile(source: string): Promise<string> {
+    return dockerTranspile(source, this.image);
+  }
+  backtest(call: BacktestCall): Promise<unknown> {
+    return dockerBacktest({ image: this.image, ...call });
+  }
+  async engineInfo(): Promise<EngineInfo> {
+    return { mode: "docker", baked_in: false, version: null, image: this.image };
+  }
+  checkImage(image: string, autoPull: boolean) {
+    return checkEngineImage(image, autoPull);
+  }
+  pullImage(image: string) {
+    return pullImage(image);
+  }
+}
