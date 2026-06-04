@@ -407,3 +407,13 @@ export class LocalRunner implements EngineRunner {
     return { image, pulled: false, output: "engine is baked into the image (local mode); nothing to pull" };
   }
 }
+
+// ─── Runner selection ──────────────────────────────────────────────────────
+
+// Pick the engine backend once from PINEFORGE_ENGINE_MODE. Default is docker;
+// "local" runs the baked-in entrypoint in-process.
+export function selectRunner(image: string = DEFAULT_IMAGE): EngineRunner {
+  return process.env.PINEFORGE_ENGINE_MODE === "local"
+    ? new LocalRunner()
+    : new DockerRunner(image);
+}

@@ -21,11 +21,11 @@ import { join, resolve, isAbsolute, dirname } from "node:path";
 import { VERSION } from "./version.js";
 import {
   DEFAULT_IMAGE,
-  dockerTranspile,
-  dockerBacktest,
+  selectRunner,
   checkEngineImage,
   pullImage,
   stringifyParams,
+  type EngineRunner,
   type ParamMap,
   type ParamGrid,
   type RuntimeArgsLike,
@@ -34,6 +34,10 @@ import {
 // ─── Config ───────────────────────────────────────────────────────────────
 
 const ALLOW_ANYWHERE = process.env.PINEFORGE_ALLOW_ANYWHERE === "1";
+
+// Pick the engine backend once at startup (docker by default, local via
+// PINEFORGE_ENGINE_MODE=local). All transpile/backtest calls route through it.
+const engine: EngineRunner = selectRunner();
 
 const BINANCE_SPOT_BASE = "https://api.binance.com";
 const BINANCE_FAPI_BASE = "https://fapi.binance.com";
@@ -69,22 +73,24 @@ interface BacktestGridArgs {
 async function runBacktest(args: BacktestArgs): Promise<unknown> {
   const csvPath = await resolveCsvPath(args.ohlcv_csv_path);
   const image = args.image ?? DEFAULT_IMAGE;
-  const cpp = await dockerTranspile(args.source, image);
+  const cpp = await engine.transpile(args.source);
 
   const tmp = await mkdtemp(join(tmpdir(), "pineforge-bt-"));
   const cppPath = join(tmp, "strategy.cpp");
   await writeFile(cppPath, cpp, "utf8");
 
   try {
-    const report = await dockerBacktest({
-      image,
+    const report = await engine.backtest({
       cppPath,
       csvPath,
       inputs: args.inputs,
       overrides: args.overrides,
       runtime: args.runtime,
     });
-    return { ...(report as object), _meta: { strategy_cpp_bytes: cpp.length, image } };
+    return {
+      ...(report as object),
+      _meta: { strategy_cpp_bytes: cpp.length, image: engine.mode === "docker" ? image : "local" },
+    };
   } finally {
     rm(tmp, { recursive: true, force: true }).catch(() => undefined);
   }
@@ -114,7 +120,7 @@ async function runBacktestGrid(args: BacktestGridArgs): Promise<unknown> {
     );
   }
 
-  const cpp = await dockerTranspile(args.source, image);
+  const cpp = await engine.transpile(args.source);
   const tmp = await mkdtemp(join(tmpdir(), "pineforge-grid-"));
   const cppPath = join(tmp, "strategy.cpp");
   await writeFile(cppPath, cpp, "utf8");
@@ -136,8 +142,8 @@ async function runBacktestGrid(args: BacktestGridArgs): Promise<unknown> {
       combos, concurrency,
       async (combo) => {
         try {
-          const report = await dockerBacktest({
-            image, cppPath, csvPath,
+          const report = await engine.backtest({
+            cppPath, csvPath,
             inputs: combo.inputs, overrides: combo.overrides,
             runtime: args.runtime,
           }) as { summary?: Record<string, unknown>; applied_inputs?: unknown;
@@ -178,7 +184,7 @@ async function runBacktestGrid(args: BacktestGridArgs): Promise<unknown> {
       succeeded: succeeded.length,
       failed: failed.length,
       sort_by: sortBy,
-      image,
+      image: engine.mode === "docker" ? image : "local",
       _meta: { strategy_cpp_bytes: cpp.length, concurrency },
       best: succeeded[0] ?? null,
       results: [...succeeded, ...failed],
@@ -736,10 +742,10 @@ server.registerTool(
       ),
     },
   },
-  async ({ source, image }) => ({
+  async ({ source }) => ({
     content: [{
       type: "text" as const,
-      text: await dockerTranspile(source, image ?? DEFAULT_IMAGE),
+      text: await engine.transpile(source),
     }],
   }),
 );
