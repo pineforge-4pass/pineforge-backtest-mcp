@@ -78,14 +78,17 @@ Bump engine `VERSION`, build + push `ghcr.io/pineforge-4pass/pineforge-engine`
 
 ### 2a. Engine-invocation abstraction (`src/engine.ts`, new)
 
-Single interface both backends implement:
+Single interface both backends implement. **Mirrors the existing two-step flow**
+(verified in `src/index.ts`): every backtest tool first calls `transpile`
+(Pine → C++ in the TS layer), writes the C++ to a temp file, then calls
+`backtest` with that `cppPath`. The grid tool transpiles **once** and reuses the
+one `cppPath` across all cells. So `backtest` takes `cppPath`, never raw Pine.
 
 ```ts
 interface EngineRunner {
-  transpile(source: string): Promise<string>;            // → C++
+  transpile(source: string): Promise<string>;            // Pine → C++
   backtest(args: {
-    pine?: string;            // strategy.pine source (preferred)
-    cppPath?: string;         // pre-transpiled TU (back-compat path)
+    cppPath: string;          // pre-transpiled TU (always present; grid reuses one)
     csvPath: string;          // OHLCV
     inputs?: ParamMap;
     overrides?: ParamMap;
@@ -95,14 +98,21 @@ interface EngineRunner {
 }
 ```
 
+Note: the engine **recompiles the C++ on every backtest call** (entrypoint
+builds `strategy.so` per invocation) — true in both modes today; "reuse one
+compile" means reuse one *transpile*, not one `.so`. Local mode preserves this
+semantics (no change to grid behavior).
+
 - **`DockerRunner`** — current `dockerTranspile` / `dockerBacktest` /
   `checkEngineImage` / pull logic moved here verbatim. Drives host Docker, one
   container per call (isolation as today). Used by `npx`-on-host.
-- **`LocalRunner`** — per call: `mktemp` an IN_DIR, write `strategy.pine`
-  (and `ohlcv.csv` for backtest) into it, set the same `PINEFORGE_*` env vars
-  plus `PINEFORGE_IN_DIR`, spawn `${PINEFORGE_PREFIX}/bin/entrypoint.sh`,
-  collect stdout (JSON for backtest, raw C++ for transpile-only). Cleanup the
-  temp dir in `finally`.
+- **`LocalRunner`** — per call: `mktemp` an IN_DIR, write `strategy.pine` (for
+  transpile) or `strategy.cpp` + `ohlcv.csv` (for backtest) into it, set the
+  same `PINEFORGE_*` env vars plus `PINEFORGE_IN_DIR`, spawn
+  `${PINEFORGE_PREFIX}/bin/entrypoint.sh`, collect stdout (JSON for backtest,
+  raw C++ for transpile-only). Cleanup the temp dir in `finally`. Because the
+  engine prefers `strategy.pine` over `strategy.cpp` when both exist, the
+  backtest call writes **only** `strategy.cpp` (+ csv) into its IN_DIR.
 
 **Engine exit-code mapping** (both runners surface clear MCP errors):
 
@@ -129,9 +139,10 @@ safe under concurrency (docker = container isolation; local = per-run mktemp).
 
 `check_engine_image` / `pull_engine_image` are docker-only concepts. In local
 mode the engine is baked in, so `LocalRunner.engineInfo()` returns a static
-descriptor (`{ mode: "local", baked_in: true, version: <engine version> }`) and
-the tools answer with that instead of shelling to docker. Tools remain listed
-(clean introspection) and never error in local mode.
+descriptor (`{ mode: "local", baked_in: true, version: process.env.PINEFORGE_VERSION }`)
+— the engine image already exports `PINEFORGE_VERSION` (set in the engine
+Dockerfile) — and the tools answer with that instead of shelling to docker.
+Tools remain listed (clean introspection) and never error in local mode.
 
 ### 2d. Binance tools
 
@@ -149,11 +160,11 @@ Move Docker artifacts into `docker/`:
   build + introspection test, so the thin image is no longer needed.
 
 ```dockerfile
-# build MCP dist + prod deps
+# build MCP dist + prod deps (lockfile present → npm ci for reproducibility)
 FROM node:22-slim AS mcp
 WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN npm install --no-audit --no-fund
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
 COPY . .
 RUN npm run build && npm prune --omit=dev
 
@@ -171,10 +182,31 @@ ENTRYPOINT ["node", "dist/index.js"]
 ```
 
 Notes:
-- Node binary copied from `node:22-slim`; engine base is debian bookworm
-  (glibc), so the node binary is ABI-compatible.
+- **Node runtime deps**: the copied `node` binary dynamically links
+  `libstdc++6` + `libgcc-s1`. The engine base ships `g++`, so both are already
+  present — but the implementation plan must verify `node --version` runs in the
+  final image (smoke check). If a future engine base drops g++, add an explicit
+  `apt-get install -y libstdc++6 libgcc-s1`.
 - Build context is the MCP repo root; `docker build -f docker/Dockerfile .`.
-- `<pinned>` = the engine version released in step 1c.
+- `<pinned>` = the engine version released in step 1c (pin an exact tag, not
+  `:latest`, for reproducible Glama builds).
+
+### 2e-bis. `.dockerignore` (new, repo root)
+
+The build context is the repo root and currently has **no `.dockerignore`**.
+Add one to keep the context small and avoid copying stale build output / the
+git history into the image:
+
+```
+.git
+node_modules
+dist
+docs
+*.log
+```
+
+(`node_modules` + `dist` are regenerated inside the build stage; excluding them
+prevents host artifacts from leaking in.)
 
 ### 2f. CI
 
@@ -219,11 +251,15 @@ Flips the "No Glama release" ✗ and awards the A grade.
 agent
   → MCP tool (e.g. backtest_pine)
   → runner = (PINEFORGE_ENGINE_MODE === "local") ? LocalRunner : DockerRunner
-  → runner.backtest({ pine, csvPath, inputs, overrides, runtime })
+  → cpp = runner.transpile(pineSource)        // step 1: Pine → C++ (once)
+  → write cpp to temp cppPath
+  → runner.backtest({ cppPath, csvPath, inputs, overrides, runtime })  // step 2
       • DockerRunner: docker run engine, -v mounts, -e env → stdout JSON
-      • LocalRunner:  mktemp IN_DIR, write files, set PINEFORGE_IN_DIR + env,
-                      spawn entrypoint.sh → stdout JSON
+      • LocalRunner:  mktemp IN_DIR, write strategy.cpp + ohlcv.csv,
+                      set PINEFORGE_IN_DIR + env, spawn entrypoint.sh → stdout JSON
   → parse JSON → MCP result
+  (grid: transpile once, then backtest() per cell via pMap — both runners
+   concurrency-safe)
 ```
 
 ## Risks / notes
@@ -235,3 +271,13 @@ agent
 - **Outbound network on Glama**: Binance tools assume egress is permitted in
   the hosted runtime; if Glama restricts egress, those two tools degrade (the
   backtest tools still work with a user-supplied CSV).
+- **Glama Dockerfile location**: Glama's build spec may expect the Dockerfile
+  at repo root or require pasting its contents in `admin/dockerfile`. The
+  dedicated `docker/Dockerfile` works for `docker build -f` and CI; if Glama's
+  admin can't point at a subfolder, paste the same contents into the build spec
+  (build context still = repo root). Confirm during the release step before
+  assuming auto-build from the subfolder.
+- **Parallel compiles vs container memory**: each grid cell runs a full `g++`
+  compile; many in parallel in a small Glama-hosted container can OOM. The grid
+  tool already defaults parallelism to 1 — keep that default in local mode and
+  document that raising it needs a larger container.
