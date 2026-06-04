@@ -5,6 +5,11 @@
 #
 # Build: docker build -f docker/Dockerfile -t pineforge-codegen-mcp .
 
+# Single source of truth for the baked engine version: it tags the base image
+# AND is exported as PINEFORGE_VERSION so engine_info can report it. Declared
+# before the first FROM so it's usable in the final stage's FROM line.
+ARG ENGINE_VERSION=0.8.0
+
 # --- build MCP dist + prod deps (reproducible: committed lockfile + npm ci) ---
 FROM node:22-slim AS mcp
 WORKDIR /app
@@ -14,9 +19,6 @@ COPY . .
 RUN npm run build && npm prune --omit=dev
 
 # --- final: engine image + node runtime + MCP server ---
-# Single source of truth for the baked engine version: it tags the base image
-# AND is exported as PINEFORGE_VERSION so check_engine_image can report it.
-ARG ENGINE_VERSION=0.8.0
 FROM ghcr.io/pineforge-4pass/pineforge-engine:${ENGINE_VERSION}
 ARG ENGINE_VERSION
 # We copy only the `node` binary onto the engine base. This is sound ONLY while
