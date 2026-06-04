@@ -1,0 +1,32 @@
+version: 2
+updates:
+  # GitHub Actions — keep SHA-pinned third-party actions fresh (Dependabot
+  # bumps the SHA + the version comment). Grouped so related bumps land in
+  # one PR instead of one-per-action.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      docker-actions:
+        patterns:
+          - "docker/*"
+      actions:
+        patterns:
+          - "actions/*"
+
+  # npm dependencies (runtime + dev).
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        patterns:
+          - "*"
+
+  # Dockerfile base images (node:22-slim, pineforge-engine) live under docker/.
+  - package-ecosystem: docker
+    directory: /docker
+    schedule:
+      interval: weekly
