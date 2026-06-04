@@ -5,13 +5,11 @@
 #
 # Build: docker build -f docker/Dockerfile -t pineforge-codegen-mcp .
 
-# --- build MCP dist + prod deps ---
-# package-lock.json is gitignored in this repo, so CI checkouts don't have it
-# and `npm ci` can't run. Use `npm install` against package.json alone.
+# --- build MCP dist + prod deps (reproducible: committed lockfile + npm ci) ---
 FROM node:22-slim AS mcp
 WORKDIR /app
-COPY package.json ./
-RUN npm install --no-audit --no-fund
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
 COPY . .
 RUN npm run build && npm prune --omit=dev
 
