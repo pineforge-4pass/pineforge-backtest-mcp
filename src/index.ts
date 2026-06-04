@@ -22,8 +22,6 @@ import { VERSION } from "./version.js";
 import {
   DEFAULT_IMAGE,
   selectRunner,
-  checkEngineImage,
-  pullImage,
   stringifyParams,
   type EngineRunner,
   type ParamMap,
@@ -961,7 +959,7 @@ server.registerTool(
       ),
     },
   },
-  async ({ image }) => asTextResult(await pullImage(image ?? DEFAULT_IMAGE)),
+  async ({ image }) => asTextResult(await engine.pullImage(image ?? DEFAULT_IMAGE)),
 );
 
 server.registerTool(
@@ -987,7 +985,7 @@ server.registerTool(
     },
   },
   async ({ image, auto_pull }) =>
-    asTextResult(await checkEngineImage(image ?? DEFAULT_IMAGE, auto_pull ?? false)),
+    asTextResult(await engine.checkImage(image ?? DEFAULT_IMAGE, auto_pull === true)),
 );
 
 const transport = new StdioServerTransport();
