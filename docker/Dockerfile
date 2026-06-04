@@ -1,7 +1,7 @@
 # Self-contained Glama-deployable MCP image: the pineforge-engine (g++, the
 # prebuilt libpineforge.a, the bundled codegen, entrypoint.sh) plus the Node
-# MCP server. Runs every tool with no host Docker daemon — the server execs
-# the engine entrypoint in-process (PINEFORGE_ENGINE_MODE=local).
+# MCP server. Runs every tool with no host Docker daemon — the local entrypoint
+# (dist/index.local.js) execs the engine entrypoint in-process.
 #
 # Build: docker build -f docker/Dockerfile -t pineforge-codegen-mcp .
 

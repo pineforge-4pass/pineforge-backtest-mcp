@@ -40,10 +40,12 @@ No API key. The first backtest pulls the `pineforge-engine` image (or run
 docker run --rm -i ghcr.io/pineforge-4pass/pineforge-codegen-mcp:latest
 ```
 
-This image bundles the backtest engine, so every tool works without a host
-Docker daemon (`PINEFORGE_ENGINE_MODE=local`). The `npx` install above instead
-runs on your host and drives your **host** Docker daemon (`PINEFORGE_ENGINE_MODE=docker`,
-the default). Binance fetch tools require outbound network in either mode.
+This image bundles the backtest engine and runs it in-process, so every tool
+works without a host Docker daemon — and it drops the engine-image management
+tools (`pull_engine_image` / `check_engine_image`), exposing a read-only
+`engine_info` instead. The `npx` install above instead runs on your host and
+drives your **host** Docker daemon, where those image tools apply. Binance fetch
+tools require outbound network in either case.
 
 ## Client configuration
 
