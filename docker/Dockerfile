@@ -14,7 +14,11 @@ COPY . .
 RUN npm run build && npm prune --omit=dev
 
 # --- final: engine image + node runtime + MCP server ---
-FROM ghcr.io/pineforge-4pass/pineforge-engine:0.8.0
+# Single source of truth for the baked engine version: it tags the base image
+# AND is exported as PINEFORGE_VERSION so check_engine_image can report it.
+ARG ENGINE_VERSION=0.8.0
+FROM ghcr.io/pineforge-4pass/pineforge-engine:${ENGINE_VERSION}
+ARG ENGINE_VERSION
 # We copy only the `node` binary onto the engine base. This is sound ONLY while
 # the engine base stays Debian/glibc-compatible with node:22-slim (node is
 # dynamically linked against glibc + libstdc++). If the engine base ever moves
@@ -25,7 +29,7 @@ WORKDIR /app
 COPY --from=mcp /app/dist ./dist
 COPY --from=mcp /app/node_modules ./node_modules
 COPY --from=mcp /app/package.json ./
-ENV PINEFORGE_ENGINE_MODE=local \
-    PINEFORGE_PREFIX=/opt/pineforge \
-    PINEFORGE_ALLOW_ANYWHERE=1
-ENTRYPOINT ["node", "dist/index.js"]
+ENV PINEFORGE_PREFIX=/opt/pineforge \
+    PINEFORGE_ALLOW_ANYWHERE=1 \
+    PINEFORGE_VERSION=${ENGINE_VERSION}
+ENTRYPOINT ["node", "dist/index.local.js"]
