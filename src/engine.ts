@@ -7,7 +7,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -327,5 +327,83 @@ export class DockerRunner implements EngineRunner {
   }
   pullImage(image: string) {
     return pullImage(image);
+  }
+}
+
+// ─── Local backend (in-process entrypoint.sh) ──────────────────────────────
+
+// Builds the PINEFORGE_* env the entrypoint reads. Shared contract with the
+// docker backend's -e flags so both speak identically.
+function engineEnv(call: { inputs?: ParamMap; overrides?: ParamMap; runtime?: RuntimeArgsLike }): Record<string, string> {
+  const env: Record<string, string> = {};
+  const inputs = stringifyParams(call.inputs);
+  const overrides = stringifyParams(call.overrides);
+  if (Object.keys(inputs).length) env.PINEFORGE_INPUTS = JSON.stringify(inputs);
+  if (Object.keys(overrides).length) env.PINEFORGE_OVERRIDES = JSON.stringify(overrides);
+  const r = call.runtime ?? {};
+  if (r.input_tf) env.PINEFORGE_INPUT_TF = r.input_tf;
+  if (r.script_tf) env.PINEFORGE_SCRIPT_TF = r.script_tf;
+  if (r.bar_magnifier !== undefined) env.PINEFORGE_BAR_MAGNIFIER = r.bar_magnifier ? "true" : "false";
+  if (r.magnifier_samples !== undefined) env.PINEFORGE_MAGNIFIER_SAMPLES = String(r.magnifier_samples);
+  if (r.magnifier_dist !== undefined) env.PINEFORGE_MAGNIFIER_DIST = r.magnifier_dist;
+  return env;
+}
+
+export class LocalRunner implements EngineRunner {
+  readonly mode = "local" as const;
+  constructor(private prefix: string = process.env.PINEFORGE_PREFIX ?? "/opt/pineforge") {}
+
+  private entrypoint(): string {
+    return join(this.prefix, "bin", "entrypoint.sh");
+  }
+
+  private async run(inDir: string, extraEnv: Record<string, string>): Promise<string> {
+    const child = spawn("bash", [this.entrypoint()], {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, PINEFORGE_PREFIX: this.prefix, PINEFORGE_IN_DIR: inDir, ...extraEnv },
+    });
+    const { stdout, stderr, code } = await collectChild(child, DOCKER_TIMEOUT_MS);
+    if (code !== 0) {
+      const map: Record<number, string> = { 2: "missing input", 3: "compile failure", 4: "backtest failure", 5: "transpile failure" };
+      throw new Error(`engine ${map[code] ?? "error"} (exit ${code}):\n${stderr.slice(-2048)}`);
+    }
+    return stdout;
+  }
+
+  async transpile(source: string): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "pineforge-lr-tr-"));
+    try {
+      await writeFile(join(dir, "strategy.pine"), source, "utf8");
+      return await this.run(dir, { PINEFORGE_TRANSPILE_ONLY: "1" });
+    } finally {
+      rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  async backtest(call: BacktestCall): Promise<unknown> {
+    const dir = await mkdtemp(join(tmpdir(), "pineforge-lr-bt-"));
+    try {
+      const cpp = await readFile(call.cppPath, "utf8");
+      await writeFile(join(dir, "strategy.cpp"), cpp, "utf8");
+      const csv = await readFile(call.csvPath, "utf8");
+      await writeFile(join(dir, "ohlcv.csv"), csv, "utf8");
+      const out = await this.run(dir, engineEnv(call));
+      try { return JSON.parse(out); }
+      catch { throw new Error(`backtest produced non-JSON output (first 500B):\n${out.slice(0, 500)}`); }
+    } finally {
+      rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  async engineInfo(): Promise<EngineInfo> {
+    return { mode: "local", baked_in: true, version: process.env.PINEFORGE_VERSION ?? null };
+  }
+
+  async checkImage(): Promise<EngineInfo> {
+    return this.engineInfo();
+  }
+
+  async pullImage(image: string) {
+    return { image, pulled: false, output: "engine is baked into the image (local mode); nothing to pull" };
   }
 }
