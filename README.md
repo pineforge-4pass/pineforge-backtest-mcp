@@ -51,7 +51,44 @@ tools require outbound network in either case.
 
 ## Client configuration
 
-### Claude Desktop / generic JSON
+Two flavors. **Prefer the container** — it's self-contained (engine bundled, runs
+in-process, no host Docker daemon needed). Use `npx` only if you'd rather run on
+the host and drive your own Docker daemon.
+
+### Container (recommended)
+
+Generic JSON (Claude Desktop / Cursor / any MCP client):
+
+```jsonc
+{
+  "mcpServers": {
+    "pineforge-codegen": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "-v", "${workspaceFolder}:/work",
+        "ghcr.io/pineforge-4pass/pineforge-codegen-mcp:latest"
+      ]
+    }
+  }
+}
+```
+
+Claude Code CLI:
+
+```bash
+claude mcp add pineforge-codegen \
+  -- docker run --rm -i -v "$PWD:/work" ghcr.io/pineforge-4pass/pineforge-codegen-mcp:latest
+```
+
+The `-v <dir>:/work` mount lets the server read/write your CSVs — point
+`fetch_binance_ohlcv` and `backtest_pine` at paths under `/work`. This flavor
+exposes a read-only `engine_info` tool and omits `pull_engine_image` /
+`check_engine_image` (nothing to manage — the engine is baked in).
+
+### npx / host (drives your host Docker daemon)
+
+Generic JSON:
 
 ```jsonc
 {
@@ -64,17 +101,20 @@ tools require outbound network in either case.
 }
 ```
 
-### Claude Code CLI
+Claude Code CLI:
 
 ```bash
 claude mcp add pineforge-codegen \
-  --transport stdio \
   -- npx -y @pineforge/codegen-mcp
 ```
 
+Requires Node ≥ 20 and a running Docker daemon; the first backtest pulls the
+`pineforge-engine` image. This flavor adds `pull_engine_image` /
+`check_engine_image` for managing that image.
+
 ### Cursor
 
-Settings → MCP → New MCP Server → paste the JSON config above.
+Settings → MCP → New MCP Server → paste the JSON for whichever flavor you want.
 
 ## `list_engine_params` — discover knobs
 
