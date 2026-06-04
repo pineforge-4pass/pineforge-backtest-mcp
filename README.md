@@ -6,7 +6,7 @@ bundles the [`pineforge-codegen`](https://github.com/pineforge-4pass/pineforge-c
 transpiler, so Pine → C++ → backtest all run on the user's machine. **No API
 key, nothing leaves the box.**
 
-[![fullpass-4pass/pineforge-codegen-mcp MCP server](https://glama.ai/mcp/servers/fullpass-4pass/pineforge-codegen-mcp/badges/score.svg)](https://glama.ai/mcp/servers/fullpass-4pass/pineforge-codegen-mcp)
+[![pineforge-4pass/pineforge-codegen-mcp MCP server](https://glama.ai/mcp/servers/pineforge-4pass/pineforge-codegen-mcp/badges/score.svg)](https://glama.ai/mcp/servers/pineforge-4pass/pineforge-codegen-mcp)
 
 ## Tools
 
