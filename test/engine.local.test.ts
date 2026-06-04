@@ -46,7 +46,13 @@ test("LocalRunner backtests run in parallel without collision", async () => {
 });
 
 test("LocalRunner.engineInfo reports baked-in version from env", async () => {
+  const prev = process.env.PINEFORGE_VERSION;
   process.env.PINEFORGE_VERSION = "0.8.0";
-  const r = new LocalRunner(PREFIX);
-  assert.deepEqual(await r.engineInfo(), { mode: "local", baked_in: true, version: "0.8.0" });
+  try {
+    const r = new LocalRunner(PREFIX);
+    assert.deepEqual(await r.engineInfo(), { mode: "local", baked_in: true, version: "0.8.0" });
+  } finally {
+    if (prev === undefined) delete process.env.PINEFORGE_VERSION;
+    else process.env.PINEFORGE_VERSION = prev;
+  }
 });

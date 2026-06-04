@@ -341,8 +341,8 @@ function engineEnv(call: { inputs?: ParamMap; overrides?: ParamMap; runtime?: Ru
   if (Object.keys(inputs).length) env.PINEFORGE_INPUTS = JSON.stringify(inputs);
   if (Object.keys(overrides).length) env.PINEFORGE_OVERRIDES = JSON.stringify(overrides);
   const r = call.runtime ?? {};
-  if (r.input_tf) env.PINEFORGE_INPUT_TF = r.input_tf;
-  if (r.script_tf) env.PINEFORGE_SCRIPT_TF = r.script_tf;
+  if (r.input_tf !== undefined && r.input_tf !== "") env.PINEFORGE_INPUT_TF = r.input_tf;
+  if (r.script_tf !== undefined && r.script_tf !== "") env.PINEFORGE_SCRIPT_TF = r.script_tf;
   if (r.bar_magnifier !== undefined) env.PINEFORGE_BAR_MAGNIFIER = r.bar_magnifier ? "true" : "false";
   if (r.magnifier_samples !== undefined) env.PINEFORGE_MAGNIFIER_SAMPLES = String(r.magnifier_samples);
   if (r.magnifier_dist !== undefined) env.PINEFORGE_MAGNIFIER_DIST = r.magnifier_dist;
