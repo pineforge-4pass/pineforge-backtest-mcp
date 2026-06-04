@@ -60,3 +60,32 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.ref_name }}
         run: gh release create "$TAG_NAME" --title "$TAG_NAME" --generate-notes
+
+  # Build + push the self-contained MCP image so users can `docker pull` it
+  # (Glama also builds from docker/Dockerfile directly). Tag pushes only.
+  image:
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/pineforge-4pass/pineforge-codegen-mcp:${{ github.ref_name }}
+            ghcr.io/pineforge-4pass/pineforge-codegen-mcp:latest
