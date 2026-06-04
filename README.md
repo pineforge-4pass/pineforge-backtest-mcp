@@ -1,9 +1,10 @@
 # `@pineforge/codegen-mcp`
 
-Local stdio MCP server bridging an AI agent to the user's local Docker daemon
-and Binance public market data. **Fully local** — the `pineforge-engine` image
+Self-contained stdio MCP server: an AI agent writes PineScript v6, and the
+bundled `pineforge-engine` transpiles it to C++ and backtests it against Binance
+market data — all in one container, in-process. **Fully local** — the image
 bundles the [`pineforge-codegen`](https://github.com/pineforge-4pass/pineforge-codegen-oss)
-transpiler, so Pine → C++ → backtest all run on the user's machine. **No API
+transpiler, so Pine → C++ → backtest run with no host Docker daemon. **No API
 key, nothing leaves the box.**
 
 [![pineforge-4pass/pineforge-codegen-mcp MCP server](https://glama.ai/mcp/servers/pineforge-4pass/pineforge-codegen-mcp/badges/score.svg)](https://glama.ai/mcp/servers/pineforge-4pass/pineforge-codegen-mcp)
@@ -14,50 +15,34 @@ key, nothing leaves the box.**
 
 | name                   | runs on              | purpose                                                                  |
 | ---------------------- | -------------------- | ------------------------------------------------------------------------ |
-| `transpile_pine`       | local Docker         | Pine v6 → C++ translation unit (transpile-only)                          |
+| `transpile_pine`       | in-process           | Pine v6 → C++ translation unit (transpile-only)                          |
 | `list_engine_params`   | local (no I/O)       | Catalog of every `overrides` + `runtime` knob accepted by the backtests  |
-| `backtest_pine`        | local Docker         | Single backtest of a Pine source against an OHLCV CSV                    |
-| `backtest_pine_grid`   | local Docker         | Cartesian sweep of `inputs` × `overrides` reusing one compile            |
+| `backtest_pine`        | in-process           | Single backtest of a Pine source against an OHLCV CSV                    |
+| `backtest_pine_grid`   | in-process           | Cartesian sweep of `inputs` × `overrides` reusing one compile            |
 | `fetch_binance_ohlcv`  | Binance public API   | Write a backtest-ready CSV from Binance spot or USDT-perp klines         |
 | `binance_symbols`      | Binance public API   | List / filter Binance symbols (5-min in-process cache)                   |
-| `pull_engine_image`    | local Docker         | Pre-pull the `pineforge-engine` runtime image                            |
-| `check_engine_image`   | local Docker         | Probe local vs registry `pineforge-engine` digest (freshness check)      |
+| `engine_info`          | local (no I/O)       | Report the bundled engine: mode, baked-in flag, version                  |
 
 ## Install
 
-```bash
-npx -y @pineforge/codegen-mcp
-```
-
-Requires:
-- Node ≥ 20
-- Docker daemon running locally
-
-No API key. The first backtest pulls the `pineforge-engine` image (or run
-`pull_engine_image` ahead of time).
-
-### Run as a container (self-contained — no host Docker)
+Runs as a self-contained container over stdio — engine bundled, in-process, no
+host Docker daemon, no API key. Mount a working dir at `/work` so the server can
+read/write your CSVs:
 
 ```bash
-docker run --rm -i ghcr.io/pineforge-4pass/pineforge-codegen-mcp:latest
+docker run --rm -i -v "$PWD:/work" ghcr.io/pineforge-4pass/pineforge-codegen-mcp:latest
 ```
 
-This image bundles the backtest engine and runs it in-process, so every tool
-works without a host Docker daemon — and it drops the engine-image management
-tools (`pull_engine_image` / `check_engine_image`), exposing a read-only
-`engine_info` instead. The `npx` install above instead runs on your host and
-drives your **host** Docker daemon, where those image tools apply. Binance fetch
-tools require outbound network in either case.
+Only requirement: Docker, and outbound network for the Binance fetch tools.
+Wire it into your MCP client below.
 
 ## Client configuration
 
-Two flavors. **Prefer the container** — it's self-contained (engine bundled, runs
-in-process, no host Docker daemon needed). Use `npx` only if you'd rather run on
-the host and drive your own Docker daemon.
+Mount a directory at `/work`; point `fetch_binance_ohlcv` / `backtest_pine` at
+paths under it. (`-i` is required; never add `-t` — a TTY corrupts the stdio
+JSON-RPC stream.)
 
-### Container (recommended)
-
-Generic JSON (Claude Desktop / Cursor / any MCP client):
+### Claude Desktop / Cursor / generic JSON
 
 ```jsonc
 {
@@ -74,47 +59,14 @@ Generic JSON (Claude Desktop / Cursor / any MCP client):
 }
 ```
 
-Claude Code CLI:
+(In Cursor: Settings → MCP → New MCP Server → paste the above.)
+
+### Claude Code CLI
 
 ```bash
 claude mcp add pineforge-codegen \
   -- docker run --rm -i -v "$PWD:/work" ghcr.io/pineforge-4pass/pineforge-codegen-mcp:latest
 ```
-
-The `-v <dir>:/work` mount lets the server read/write your CSVs — point
-`fetch_binance_ohlcv` and `backtest_pine` at paths under `/work`. This flavor
-exposes a read-only `engine_info` tool and omits `pull_engine_image` /
-`check_engine_image` (nothing to manage — the engine is baked in).
-
-### npx / host (drives your host Docker daemon)
-
-Generic JSON:
-
-```jsonc
-{
-  "mcpServers": {
-    "pineforge-codegen": {
-      "command": "npx",
-      "args": ["-y", "@pineforge/codegen-mcp"]
-    }
-  }
-}
-```
-
-Claude Code CLI:
-
-```bash
-claude mcp add pineforge-codegen \
-  -- npx -y @pineforge/codegen-mcp
-```
-
-Requires Node ≥ 20 and a running Docker daemon; the first backtest pulls the
-`pineforge-engine` image. This flavor adds `pull_engine_image` /
-`check_engine_image` for managing that image.
-
-### Cursor
-
-Settings → MCP → New MCP Server → paste the JSON for whichever flavor you want.
 
 ## `list_engine_params` — discover knobs
 
@@ -174,7 +126,7 @@ the engine accepts before composing a `backtest_pine` request.
 }
 ```
 
-`inputs` is forwarded as the `PINEFORGE_INPUTS` env var to the runtime image,
+`inputs` is forwarded as the `PINEFORGE_INPUTS` env var to the engine,
 `overrides` as `PINEFORGE_OVERRIDES`, and each `runtime` field as a separate
 `PINEFORGE_INPUT_TF` / `PINEFORGE_SCRIPT_TF` / `PINEFORGE_BAR_MAGNIFIER` /
 `PINEFORGE_MAGNIFIER_SAMPLES` / `PINEFORGE_MAGNIFIER_DIST` env var. Empty /
