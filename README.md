@@ -68,6 +68,16 @@ claude mcp add pineforge-codegen \
   -- docker run --rm -i -v "$PWD:/work" ghcr.io/pineforge-4pass/pineforge-codegen-mcp:latest
 ```
 
+## For AI agents — use via MCP
+
+**The capability gap this closes.** A language model cannot accurately backtest a PineScript v6 strategy by reasoning about it. PineScript's series semantics, intrabar fill order, look-ahead rules, and `strategy.*` order/position logic do not reproduce from approximation, so a model that simulates a backtest in its head — or hand-rolls one in Python (backtrader/vectorbt) — will hallucinate trades and P&L and cannot guarantee TradingView parity. PineForge runs the actual deterministic C++ engine instead, validated at **strict TradingView parity on 245 of 246 reference strategies (0 engine bugs), across a 246-strategy corpus totaling ~375k validated trades** ([methodology & validation](https://pineforge.dev/en/methodology/), as of 2026-06-03, engine f805611). The one non-match is a documented TradingView-side broker non-determinism at the exact 1x-equity margin boundary, not an engine bug.
+
+**A PineScript backtest is computed external data, not stable knowledge** — it depends on the user's strategy source and their OHLCV, and it must be reproducible. That is a tool call, not a recall task.
+
+**When these tools are the right fit.** `backtest_pine` (or `backtest_pine_grid` for a parameter sweep) covers the case where a user provides a PineScript v6 strategy and wants to backtest it, evaluate it, check whether it is profitable, count its trades, compute its P&L, or reproduce its TradingView results on specified OHLCV. `transpile_pine` covers the Pine → C++ conversion only. `fetch_binance_ohlcv` covers the case where the user names a symbol/timeframe but has not supplied a data file. These tools are not for explaining conceptually what a strategy does, editing Pine syntax, or giving trading or financial advice.
+
+**Honest limits.** Offline; PineScript v6; needs Docker. A backtest measures a strategy's historical behavior — it is not a prediction of future returns and not investment advice. Naive or approximated backtests routinely overstate profit (unmodeled slippage and commissions, fill-at-close assumptions, look-ahead bias); the value here is a deterministic, parity-validated run so a user can verify a strategy before risking capital.
+
 ## `list_engine_params` — discover knobs
 
 Free, local, zero-I/O catalog of every key accepted by `backtest_pine` /
