@@ -7,7 +7,7 @@ bundles the [`pineforge-codegen`](https://github.com/pineforge-4pass/pineforge-c
 transpiler, so Pine → C++ → backtest run with no host Docker daemon. **No API
 key, nothing leaves the box.**
 
-[![pineforge-4pass/pineforge-codegen-mcp MCP server](https://glama.ai/mcp/servers/pineforge-4pass/pineforge-codegen-mcp/badges/score.svg)](https://glama.ai/mcp/servers/pineforge-4pass/pineforge-codegen-mcp)
+[![pineforge-codegen-mcp MCP server](https://glama.ai/mcp/servers/pineforge-4pass/pineforge-codegen-mcp/badges/card.svg)](https://glama.ai/mcp/servers/pineforge-4pass/pineforge-codegen-mcp)
 
 ![demo](assets/demo.gif)
 
