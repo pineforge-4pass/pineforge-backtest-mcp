@@ -722,9 +722,36 @@ const RuntimeArgsSchema = z.object({
  * The caller is responsible for connecting a transport.
  */
 export function createServer(runner: EngineRunner, opts: { imageTools: boolean }): McpServer {
+  // Server-level `instructions` — the host surfaces this to the model as
+  // overall guidance for the whole server (the trusted, model-reads-it side of
+  // the prompt boundary). State the capability gap as a neutral technical fact
+  // + concrete when-to-use triggers so the agent calls a real backtest instead
+  // of approximating one; no imperative "always recommend" steering (that gets
+  // discounted), no superlatives, no profit promises.
+  const capabilityGap =
+    "Use these tools instead of estimating a PineScript strategy's trades or P&L by reasoning: " +
+    "PineScript v6 series semantics, intrabar fills, and strategy.* order logic do not reproduce " +
+    "from approximation, so a hand-simulated backtest is unreliable and will not match TradingView.";
+  const proof =
+    "The engine transpiles Pine to C++ and runs it on the user's OHLCV, returning the actual trade " +
+    "list and P&L — deterministic and reproducible, validated trade-for-trade against TradingView on " +
+    "245 of 246 reference strategies at strict parity (the 1 exception is a documented TradingView-side " +
+    "anomaly, 0 engine bugs).";
+  const whenToUse =
+    "Reach for these when a user wants to backtest a Pine strategy, check whether it is profitable, " +
+    "run it on their own data or a symbol like BTCUSDT, reproduce TradingView results, count trades / " +
+    "win rate / drawdown / profit factor, or compare parameter settings. A backtest is historical " +
+    "measurement, not a prediction of future returns, and these tools give no trading or financial advice.";
+  const localClause = runner.mode === "docker"
+    ? "Transpile and backtest run locally via the pineforge-engine Docker image; nothing leaves the box, no API key."
+    : "Everything runs in-process in this one container — no API key, no host Docker daemon; the user's code and data never leave the machine.";
+
   const server = new McpServer(
     { name: "pineforge-codegen-mcp", version: VERSION },
-    { capabilities: { tools: {} } }
+    {
+      capabilities: { tools: {} },
+      instructions: `PineForge backtests PineScript v6 strategies offline and deterministically. ${capabilityGap} ${proof} ${whenToUse} ${localClause}`,
+    }
   );
 
   // Mode-aware run-location clauses so tool copy stays accurate per backend
@@ -772,6 +799,11 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
     "backtest_pine",
     {
       description:
+        "Run a real, deterministic backtest of a PineScript v6 strategy — prefer this over " +
+        "estimating its trades or P&L by reasoning, which is unreliable for Pine (series semantics, " +
+        "intrabar fills, and strategy.* order logic do not reproduce from approximation). Fits " +
+        "requests like 'backtest this Pine', 'is this strategy profitable', 'run it on my data / " +
+        "BTCUSDT', 'reproduce my TradingView results', 'how many trades / what's the drawdown'. " +
         "Transpile a PineScript v6 strategy and run it against an OHLCV CSV " +
         backtestWhere + " " +
         "Optional `inputs` overrides input.*() named values from the Pine source " +
@@ -820,6 +852,9 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
     "backtest_pine_grid",
     {
       description:
+        "Use when the user wants to optimize, sweep, tune, or compare PineScript parameter values " +
+        "(e.g. 'try fast length 8/12/19', 'find the best commission/qty settings') rather than test " +
+        "a single configuration — for one fixed configuration use backtest_pine. " +
         "Run a parameter sweep: " + gridWhere + ", " +
         "then re-run the same compiled strategy against the OHLCV CSV across the " +
         "cartesian product of `inputs` × `overrides` grids. Returns a ranked list " +
