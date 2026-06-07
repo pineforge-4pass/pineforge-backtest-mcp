@@ -3,6 +3,7 @@
 // file. This script propagates it to:
 //   - package.json   (so npm publish ships the right version)
 //   - src/version.ts (so index.ts can import it as a typed constant)
+//   - server.json    (MCP Registry metadata: `version` + the OCI image tag)
 //
 // Run on every `npm run build` / `npm run dev` (prebuild / predev hooks).
 import { readFile, writeFile } from "node:fs/promises";
@@ -13,6 +14,7 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const VERSION_FILE = join(ROOT, "VERSION");
 const PKG_FILE     = join(ROOT, "package.json");
 const TS_FILE      = join(ROOT, "src", "version.ts");
+const SERVER_JSON  = join(ROOT, "server.json");
 
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
@@ -48,5 +50,30 @@ if (tsChanged) {
   await writeFile(TS_FILE, tsBody, "utf8");
 }
 
-const tag = (pkgChanged || tsChanged) ? "updated" : "in sync";
+// server.json: keep the registry `version` and the OCI image tag (`:vX.Y.Z`)
+// aligned with VERSION so a release never publishes mismatched metadata.
+let serverChanged = false;
+try {
+  const serverRaw = await readFile(SERVER_JSON, "utf8");
+  const server = JSON.parse(serverRaw);
+  if (server.version !== version) {
+    server.version = version;
+    serverChanged = true;
+  }
+  const pkgs = Array.isArray(server.packages) ? server.packages : [];
+  for (const p of pkgs) {
+    if (p && typeof p.identifier === "string") {
+      const next = p.identifier.replace(/:v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/, `:v${version}`);
+      if (next !== p.identifier) {
+        p.identifier = next;
+        serverChanged = true;
+      }
+    }
+  }
+  if (serverChanged) {
+    await writeFile(SERVER_JSON, JSON.stringify(server, null, 2) + "\n", "utf8");
+  }
+} catch { /* server.json absent — nothing to sync */ }
+
+const tag = (pkgChanged || tsChanged || serverChanged) ? "updated" : "in sync";
 console.error(`[sync-version] ${tag} → ${version}`);

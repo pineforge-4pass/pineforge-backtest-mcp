@@ -34,4 +34,7 @@ COPY --from=mcp /app/package.json ./
 ENV PINEFORGE_PREFIX=/opt/pineforge \
     PINEFORGE_ALLOW_ANYWHERE=1 \
     PINEFORGE_VERSION=${ENGINE_VERSION}
+# Ownership annotation for the official MCP Registry — its validator checks this
+# label on the published image and requires it to match the `name` in server.json.
+LABEL io.modelcontextprotocol.server.name="io.github.pineforge-4pass/pineforge-codegen-mcp"
 ENTRYPOINT ["node", "dist/index.local.js"]

@@ -92,3 +92,25 @@ jobs:
           tags: |
             ghcr.io/pineforge-4pass/pineforge-codegen-mcp:${{ github.ref_name }}
             ghcr.io/pineforge-4pass/pineforge-codegen-mcp:latest
+
+  # Publish metadata to the official MCP Registry (registry.modelcontextprotocol.io).
+  # Runs AFTER `image` so the pushed image carries the
+  # io.modelcontextprotocol.server.name LABEL the registry validates against
+  # server.json `name`. GitHub OIDC authenticates the io.github.pineforge-4pass
+  # namespace from this repo — no interactive login, no stored token.
+  mcp-registry:
+    needs: image
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+      - name: Login (GitHub OIDC) and publish
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish

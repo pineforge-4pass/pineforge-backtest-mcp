@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.pineforge-4pass/pineforge-codegen-mcp",
+  "title": "PineForge — offline PineScript v6 backtest MCP",
+  "description": "Offline MCP server: an AI agent transpiles PineScript v6 to C++ and runs deterministic, TradingView-parity backtests locally (245/246 strict, 0 engine bugs). One Docker container, no API key; code and data stay on the machine.",
+  "version": "0.8.6",
+  "repository": {
+    "url": "https://github.com/pineforge-4pass/pineforge-codegen-mcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/pineforge-4pass/pineforge-codegen-mcp:v0.8.6",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
