@@ -12,7 +12,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { mkdtemp, mkdir, writeFile, rm, stat, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve, isAbsolute, dirname } from "node:path";
+import { join, resolve, isAbsolute, dirname, relative } from "node:path";
 import { VERSION } from "./version.js";
 import {
   DEFAULT_IMAGE,
@@ -41,6 +41,7 @@ interface BacktestArgs {
   inputs?: ParamMap;
   overrides?: ParamMap;
   runtime?: RuntimeArgsLike;
+  report_path?: string;
 }
 
 interface BacktestGridArgs {
@@ -56,6 +57,56 @@ interface BacktestGridArgs {
   concurrency?: number;
   include_trades?: boolean;
   sort_by?: "net_pnl" | "win_rate_pct" | "max_drawdown" | "total_trades";
+  report_path?: string;
+}
+
+// A full backtest report (trades + equity curve) can be megabytes — large
+// enough to blow past an MCP client's tool-result size cap ("result too
+// large"). When the serialized result exceeds this many bytes we write the
+// full JSON to a file under the working dir and return a compact summary that
+// points at it via `report_path`. Tunable via PINEFORGE_MAX_INLINE_BYTES.
+const MAX_INLINE_BYTES = Number(process.env.PINEFORGE_MAX_INLINE_BYTES) || 200_000;
+
+// The working dir (/work) is a bind mount of a HOST directory the user passed
+// via `-v <hostdir>:/work`. A container path like /work/foo.json is NOT
+// openable on the host, so the path we hand back must be host-resolvable:
+//   - if PINEFORGE_HOST_WORKDIR is set (the host side of the mount), return an
+//     absolute HOST path the user can open directly;
+//   - otherwise return the path RELATIVE to the mount root, which the user
+//     resolves against their own <hostdir>. Either way the file physically
+//     lands in their mounted directory and survives `--rm`.
+const HOST_WORKDIR = process.env.PINEFORGE_HOST_WORKDIR;
+
+interface ReportLocation {
+  /** Host-openable path: absolute when PINEFORGE_HOST_WORKDIR is set, else relative to the mount. */
+  user_path: string;
+  /** The in-container path (under /work) — for reference/debugging. */
+  container_path: string;
+  /** Human note explaining where to find the file on the host. */
+  note: string;
+}
+
+async function writeReportFile(value: unknown, explicitPath: string | undefined, kind: string): Promise<ReportLocation> {
+  const name = explicitPath ?? `pineforge-${kind}-${Date.now()}.json`;
+  const containerPath = resolveScopedPath(name, "report");
+  await mkdir(dirname(containerPath), { recursive: true });
+  await writeFile(containerPath, JSON.stringify(value, null, 2), "utf8");
+
+  const rel = relative(process.cwd(), containerPath) || name;
+  if (HOST_WORKDIR) {
+    return {
+      user_path: join(HOST_WORKDIR, rel),
+      container_path: containerPath,
+      note: "Report written to your host directory (PINEFORGE_HOST_WORKDIR); open report_path directly.",
+    };
+  }
+  return {
+    user_path: rel,
+    container_path: containerPath,
+    note:
+      `Report written inside the host directory you mounted at /work — open <your -v hostdir>/${rel}. ` +
+      `Pass -e PINEFORGE_HOST_WORKDIR=<hostdir> to get an absolute host path in report_path instead.`,
+  };
 }
 
 async function runBacktest(runner: EngineRunner, args: BacktestArgs): Promise<unknown> {
@@ -76,9 +127,31 @@ async function runBacktest(runner: EngineRunner, args: BacktestArgs): Promise<un
       overrides: args.overrides,
       runtime: args.runtime,
     });
-    return {
+    const full = {
       ...(report as object),
       _meta: { strategy_cpp_bytes: cpp.length, image: runner.mode === "docker" ? image : "local" },
+    };
+
+    // Offload oversized reports to a file so the inline result stays small.
+    const text = JSON.stringify(full, null, 2);
+    if (text.length <= MAX_INLINE_BYTES) return full;
+
+    const loc = await writeReportFile(full, args.report_path, "backtest");
+    const r = full as Record<string, unknown>;
+    const trades = Array.isArray(r.trades) ? r.trades : undefined;
+    return {
+      summary: r.summary,
+      applied_inputs: r.applied_inputs,
+      applied_overrides: r.applied_overrides,
+      elapsed_seconds: r.elapsed_seconds,
+      total_trades: trades ? trades.length : undefined,
+      report_path: loc.user_path,
+      report_path_in_container: loc.container_path,
+      truncated: true,
+      note:
+        `Full report (${text.length} bytes, including the trade list and equity curve) exceeded the inline ` +
+        `limit (${MAX_INLINE_BYTES} bytes); the summary above has the headline P&L metrics. ${loc.note}`,
+      _meta: r._meta,
     };
   } finally {
     rm(tmp, { recursive: true, force: true }).catch(() => undefined);
@@ -169,7 +242,7 @@ async function runBacktestGrid(runner: EngineRunner, args: BacktestGridArgs): Pr
     };
     succeeded.sort((a, b) => sortValue(b) - sortValue(a));
 
-    return {
+    const full = {
       total_combinations: combos.length,
       succeeded: succeeded.length,
       failed: failed.length,
@@ -178,6 +251,29 @@ async function runBacktestGrid(runner: EngineRunner, args: BacktestGridArgs): Pr
       _meta: { strategy_cpp_bytes: cpp.length, concurrency },
       best: succeeded[0] ?? null,
       results: [...succeeded, ...failed],
+    };
+
+    // Offload an oversized sweep to a file; inline only the top-ranked subset.
+    const text = JSON.stringify(full, null, 2);
+    if (text.length <= MAX_INLINE_BYTES) return full;
+
+    const loc = await writeReportFile(full, args.report_path, "grid");
+    const TOP = 10;
+    return {
+      total_combinations: full.total_combinations,
+      succeeded: full.succeeded,
+      failed: full.failed,
+      sort_by: full.sort_by,
+      image: full.image,
+      _meta: full._meta,
+      best: full.best,
+      top_results: succeeded.slice(0, TOP),
+      results_truncated: succeeded.length > TOP || failed.length > 0,
+      report_path: loc.user_path,
+      report_path_in_container: loc.container_path,
+      note:
+        `Full sweep (${text.length} bytes across ${combos.length} combinations) exceeded the inline limit ` +
+        `(${MAX_INLINE_BYTES} bytes). Inlined the top ${TOP} by ${sortBy}. ${loc.note}`,
     };
   } finally {
     rm(tmp, { recursive: true, force: true }).catch(() => undefined);
@@ -812,7 +908,9 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         "(initial_capital, commission_value, default_qty_value, pyramiding, " +
         "slippage, default_qty_type, commission_type, process_orders_on_close). " +
         "Returns the parsed JSON report (summary, trades, applied_inputs, " +
-        "applied_overrides, elapsed_seconds). Use backtest_pine_grid for sweeps.",
+        "applied_overrides, elapsed_seconds). If the report is too large to " +
+        "return inline it is written to report_path and a compact summary " +
+        "(with that path) is returned instead. Use backtest_pine_grid for sweeps.",
       inputSchema: {
         source: z.string().describe("PineScript v6 source."),
         ohlcv_csv_path: z.string().describe(
@@ -842,10 +940,17 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
           "optional and only forwarded to the engine when set. Call " +
           "list_engine_params for the full catalog."
         ),
+        report_path: z.string().optional().describe(
+          "Where to write the full JSON report IF it is too large to return " +
+          "inline. Large backtests (long trade lists + equity curves) are " +
+          "offloaded to this file and the tool returns a compact summary + " +
+          "report_path instead; read the file for the complete trades/equity. " +
+          "Defaults to pineforge-backtest-<timestamp>.json in the working dir."
+        ),
       },
     },
-    async ({ source, ohlcv_csv_path, image, inputs, overrides, runtime }) =>
-      asTextResult(await runBacktest(runner, { source, ohlcv_csv_path, image, inputs, overrides, runtime })),
+    async ({ source, ohlcv_csv_path, image, inputs, overrides, runtime, report_path }) =>
+      asTextResult(await runBacktest(runner, { source, ohlcv_csv_path, image, inputs, overrides, runtime, report_path })),
   );
 
   server.registerTool(
@@ -895,6 +1000,12 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
           .describe("Include the per-trade list in each result. Default false (saves tokens)."),
         sort_by: z.enum(["net_pnl", "win_rate_pct", "max_drawdown", "total_trades"])
           .optional().describe("summary.* field to rank by, descending. Default net_pnl."),
+        report_path: z.string().optional().describe(
+          "Where to write the full sweep JSON IF it is too large to return " +
+          "inline. Oversized sweeps are offloaded here and the tool returns " +
+          "the best + top-ranked combinations + report_path; read the file for " +
+          "all combinations. Defaults to pineforge-grid-<timestamp>.json in the working dir."
+        ),
       },
     },
     async (args) => asTextResult(await runBacktestGrid(runner, args as BacktestGridArgs)),
