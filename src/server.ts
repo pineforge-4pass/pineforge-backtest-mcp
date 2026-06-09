@@ -1114,13 +1114,16 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
     "list_coverage_topics",
     {
       description:
-        "Lists every PineForge Pine v6 coverage topic with a one-line status " +
-        "(supported / partial / unsupported / via_transpiler) and summary, plus " +
-        "the legend explaining each status. Call this before writing a strategy " +
-        "to see which Pine feature areas the engine implements. Cheap, free, " +
-        "local — no engine run, no I/O. Follow up with get_coverage_topic for the " +
-        "full supported/unsupported feature lists of one topic, or " +
-        "check_pine_feature to look up a specific identifier.",
+        "START HERE before writing, porting, or backtesting a Pine v6 strategy on " +
+        "PineForge. PineForge implements a SUBSET of Pine v6, so checking coverage " +
+        "first avoids a strategy that compiles but silently misbehaves vs " +
+        "TradingView. Lists every coverage topic with a one-line status " +
+        "(supported / partial / unsupported / via_transpiler) and summary, plus the " +
+        "legend (note: via_transpiler still works end-to-end; unsupported means " +
+        "parsed-and-skipped or rejected) and the coverage version. Cheap, free, " +
+        "local — no engine run, no I/O. Then drill in with get_coverage_topic for " +
+        "one area's full supported/unsupported lists, or check_pine_feature to look " +
+        "up a single identifier.",
       inputSchema: {},
     },
     async () => asTextResult(coverageIndex()),
@@ -1130,11 +1133,14 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
     "get_coverage_topic",
     {
       description:
-        "Returns the full detail plus the supported[] and unsupported[] feature " +
-        "lists for one coverage topic id (the ids come from " +
-        "list_coverage_topics, e.g. 'ta', 'strategy_orders', " +
-        "'drawing_plotting_alerts'). Unknown ids return an error marker listing " +
-        "the valid ids. Local, free, no engine run.",
+        "Returns the full detail plus the exact supported[] and unsupported[] " +
+        "feature lists for ONE coverage topic id (ids from list_coverage_topics, " +
+        "e.g. 'ta', 'strategy_orders', 'request_security', " +
+        "'drawing_plotting_alerts'). Use when you are about to work in a feature " +
+        "area and need to know precisely which functions there are implemented vs " +
+        "skipped — e.g. before using request.security, the ta.* library, or " +
+        "strategy risk knobs. Unknown ids return an error marker listing the valid " +
+        "ids. Local, free, no engine run.",
       inputSchema: {
         topic: z.string().describe(
           "Coverage topic id from list_coverage_topics (e.g. 'ta', " +
@@ -1149,13 +1155,17 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
     "check_pine_feature",
     {
       description:
-        "Check whether a specific Pine v6 identifier or namespace (e.g. " +
-        "'ta.supertrend', 'alert', 'array.new', 'request.financial') is " +
-        "supported in PineForge. Resolves by exact feature match, then longest " +
-        "namespace prefix, then alias, returning {query, status, topic, note} " +
-        "where status is supported / partial / unsupported / via_transpiler / " +
-        "not_found. Call before relying on a Pine feature in a strategy. Local, " +
-        "free, no engine run.",
+        "Answer \"does PineForge support X?\" for a specific Pine v6 identifier or " +
+        "namespace (e.g. 'ta.supertrend', 'alert', 'array.new', " +
+        "'request.financial'). Use it (a) BEFORE relying on any function you are " +
+        "unsure about while writing a strategy, and (b) to DIAGNOSE a backtest that " +
+        "compiled but behaved wrong or empty — visual & alert APIs (plot, label, " +
+        "line, box, table, alert) are parsed-and-skipped and produce NO effect. " +
+        "Resolves by exact feature match, then longest namespace prefix, then " +
+        "alias, returning {query, status, topic, note} where status is " +
+        "supported / partial / unsupported / via_transpiler / not_found " +
+        "(via_transpiler = works end-to-end; unsupported = skipped or rejected). " +
+        "Local, free, no engine run.",
       inputSchema: {
         feature: z.string().describe(
           "Pine identifier or namespace to look up, e.g. 'ta.supertrend', " +
