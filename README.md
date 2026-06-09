@@ -21,6 +21,9 @@ key, nothing leaves the box.**
 | `backtest_pine_grid`   | in-process           | Cartesian sweep of `inputs` × `overrides` reusing one compile            |
 | `fetch_binance_ohlcv`  | Binance public API   | Write a backtest-ready CSV from Binance spot or USDT-perp klines         |
 | `binance_symbols`      | Binance public API   | List / filter Binance symbols (5-min in-process cache)                   |
+| `list_coverage_topics` | local (no I/O)       | Every Pine v6 coverage topic with a one-line status + summary            |
+| `check_pine_feature`   | local (no I/O)       | Look up whether a Pine identifier/namespace is supported in PineForge    |
+| `get_coverage_topic`   | local (no I/O)       | Full detail + supported/unsupported feature lists for one coverage topic |
 | `engine_info`          | local (no I/O)       | Report the bundled engine: mode, baked-in flag, version                  |
 
 ## Install

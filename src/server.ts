@@ -22,6 +22,7 @@ import {
   type ParamGrid,
   type RuntimeArgsLike,
 } from "./engine.js";
+import { coverageIndex, coverageTopic, checkPineFeature } from "./coverage.js";
 
 // ─── Config ───────────────────────────────────────────────────────────────
 
@@ -1107,6 +1108,62 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         description: spec.description,
       })),
     }),
+  );
+
+  server.registerTool(
+    "list_coverage_topics",
+    {
+      description:
+        "Lists every PineForge Pine v6 coverage topic with a one-line status " +
+        "(supported / partial / unsupported / via_transpiler) and summary, plus " +
+        "the legend explaining each status. Call this before writing a strategy " +
+        "to see which Pine feature areas the engine implements. Cheap, free, " +
+        "local — no engine run, no I/O. Follow up with get_coverage_topic for the " +
+        "full supported/unsupported feature lists of one topic, or " +
+        "check_pine_feature to look up a specific identifier.",
+      inputSchema: {},
+    },
+    async () => asTextResult(coverageIndex()),
+  );
+
+  server.registerTool(
+    "get_coverage_topic",
+    {
+      description:
+        "Returns the full detail plus the supported[] and unsupported[] feature " +
+        "lists for one coverage topic id (the ids come from " +
+        "list_coverage_topics, e.g. 'ta', 'strategy_orders', " +
+        "'drawing_plotting_alerts'). Unknown ids return an error marker listing " +
+        "the valid ids. Local, free, no engine run.",
+      inputSchema: {
+        topic: z.string().describe(
+          "Coverage topic id from list_coverage_topics (e.g. 'ta', " +
+          "'strategy_orders', 'request_security', 'drawing_plotting_alerts')."
+        ),
+      },
+    },
+    async ({ topic }) => asTextResult(coverageTopic(topic)),
+  );
+
+  server.registerTool(
+    "check_pine_feature",
+    {
+      description:
+        "Check whether a specific Pine v6 identifier or namespace (e.g. " +
+        "'ta.supertrend', 'alert', 'array.new', 'request.financial') is " +
+        "supported in PineForge. Resolves by exact feature match, then longest " +
+        "namespace prefix, then alias, returning {query, status, topic, note} " +
+        "where status is supported / partial / unsupported / via_transpiler / " +
+        "not_found. Call before relying on a Pine feature in a strategy. Local, " +
+        "free, no engine run.",
+      inputSchema: {
+        feature: z.string().describe(
+          "Pine identifier or namespace to look up, e.g. 'ta.supertrend', " +
+          "'alert', 'array.new', 'strategy.entry', 'request.dividends'."
+        ),
+      },
+    },
+    async ({ feature }) => asTextResult(checkPineFeature(feature)),
   );
 
   if (opts.imageTools) {
