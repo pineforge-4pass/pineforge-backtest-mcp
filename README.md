@@ -36,6 +36,21 @@ docker run --rm -i -v "$PWD:/work" ghcr.io/pineforge-4pass/pineforge-codegen-mcp
 Only requirement: Docker, and outbound network for the Binance fetch tools.
 Wire it into your MCP client below.
 
+### Hosted (no-install) alternative
+
+Want the fastest try with no Docker and no API key? Paste the Streamable HTTP
+endpoint into any MCP client:
+
+```
+https://mcp.pineforge.dev/mcp
+```
+
+Tradeoff vs this repo: the hosted server is **metered** (per-IP weekly quota on
+`backtest_pine` + Cloudflare edge rate-limiting) and runs against a **fixed,
+sealed crypto data-lake** (Binance spot + USDT-perp). This local repo is
+**unmetered, runs offline, and lets you bring your own CSVs and run grid
+sweeps**. Repo: [`pineforge-mcp-public`](https://github.com/pineforge-4pass/pineforge-mcp-public).
+
 ## Client configuration
 
 Mount a directory at `/work`; point `fetch_binance_ohlcv` / `backtest_pine` at
