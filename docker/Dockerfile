@@ -8,7 +8,7 @@
 # Single source of truth for the baked engine version: it tags the base image
 # AND is exported as PINEFORGE_VERSION so engine_info can report it. Declared
 # before the first FROM so it's usable in the final stage's FROM line.
-ARG ENGINE_VERSION=0.10.0
+ARG ENGINE_VERSION=0.10.3
 
 # --- build MCP dist + prod deps (reproducible: committed lockfile + npm ci) ---
 FROM node:22-slim AS mcp
@@ -26,6 +26,11 @@ ARG ENGINE_VERSION
 # dynamically linked against glibc + libstdc++). If the engine base ever moves
 # to Alpine/musl or a divergent glibc, node will fail at load — switch to
 # installing node in the final stage instead of copying the binary.
+# Run as root. The engine base went non-root (USER pineforge, uid 10001) in
+# 0.10.1; this is a LOCAL, single-user tool (PINEFORGE_ALLOW_ANYWHERE=1) that
+# writes backtest reports into caller-mounted host dirs, so it must own those
+# writes — restore the root runtime codegen shipped with on engine 0.10.0.
+USER root
 COPY --from=node:22-slim /usr/local/bin/node /usr/local/bin/node
 WORKDIR /app
 COPY --from=mcp /app/dist ./dist
