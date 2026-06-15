@@ -26,20 +26,27 @@ ARG ENGINE_VERSION
 # dynamically linked against glibc + libstdc++). If the engine base ever moves
 # to Alpine/musl or a divergent glibc, node will fail at load — switch to
 # installing node in the final stage instead of copying the binary.
-# Run as root. The engine base went non-root (USER pineforge, uid 10001) in
-# 0.10.1; this is a LOCAL, single-user tool (PINEFORGE_ALLOW_ANYWHERE=1) that
-# writes backtest reports into caller-mounted host dirs, so it must own those
-# writes — restore the root runtime codegen shipped with on engine 0.10.0.
+# Root ONLY for build-time setup (COPY is root-owned; the chown below needs
+# root). The engine base went non-root (USER pineforge, uid 10001) in 0.10.1 —
+# we keep that hardened default and drop back to it before ENTRYPOINT.
 USER root
 COPY --from=node:22-slim /usr/local/bin/node /usr/local/bin/node
 WORKDIR /app
 COPY --from=mcp /app/dist ./dist
 COPY --from=mcp /app/node_modules ./node_modules
 COPY --from=mcp /app/package.json ./
+# Reports default to cwd (= /app) when no host workdir is mounted; engine temp
+# work already goes to world-writable /tmp. Give the non-root runtime user
+# ownership of /app so report offload works out of the box.
+RUN chown -R 10001 /app
 ENV PINEFORGE_PREFIX=/opt/pineforge \
     PINEFORGE_ALLOW_ANYWHERE=1 \
     PINEFORGE_VERSION=${ENGINE_VERSION}
 # Ownership annotation for the official MCP Registry — its validator checks this
 # label on the published image and requires it to match the `name` in server.json.
 LABEL io.modelcontextprotocol.server.name="io.github.pineforge-4pass/pineforge-codegen-mcp"
+# Drop privileges: run the MCP server as the engine base's non-root user (uid
+# 10001). To write reports into a HOST bind-mount (-v <hostdir>:/work -w /work),
+# pass --user $(id -u):$(id -g) so the files carry your ownership.
+USER 10001
 ENTRYPOINT ["node", "dist/index.local.js"]
