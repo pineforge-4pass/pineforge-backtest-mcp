@@ -1,0 +1,134 @@
+name: pineforge-release
+
+# Fired by pineforge-release's publish.yml (repository_dispatch
+# event_type=pineforge-release, client_payload.release_version=X.Y.Z).
+#
+# Bumps the base-image pin (docker/Dockerfile ARG PINEFORGE_RELEASE_VERSION),
+# auto patch-bumps THIS repo's own /VERSION (independent lineage), runs
+# sync-version, commits the tracked files to main, and pushes v<VERSION> with the
+# org GitHub App token. The App-token-pushed tag re-fires the UNCHANGED
+# publish.yml (npm + GHCR + MCP registry, OIDC) — the sole publisher; this
+# workflow never publishes inline. Idempotent: no-op if the pin already matches.
+
+on:
+  repository_dispatch:
+    types: [pineforge-release]
+
+concurrency:
+  group: pineforge-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read   # GITHUB_TOKEN read-only; the App token performs the push.
+
+jobs:
+  bump-and-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint org App token
+        id: app
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.PINEFORGE_APP_ID }}
+          private-key: ${{ secrets.PINEFORGE_APP_PRIVATE_KEY }}
+
+      - name: Checkout main (App token bypasses ruleset + re-fires publish.yml)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ steps.app.outputs.token }}
+
+      - name: Validate release_version (untrusted payload)
+        id: rel
+        env:
+          RAW: ${{ github.event.client_payload.release_version }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "${RAW:-}" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?$'; then
+            echo "::error::rejected untrusted release_version '${RAW:-}'"; exit 1
+          fi
+          echo "version=${RAW#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Idempotency — stop if pin already matches
+        id: gate
+        env:
+          REL: ${{ steps.rel.outputs.version }}
+        run: |
+          set -euo pipefail
+          cur="$(grep -m1 '^ARG PINEFORGE_RELEASE_VERSION=' docker/Dockerfile | sed -E 's/^ARG PINEFORGE_RELEASE_VERSION=//' | tr -d '[:space:]')"
+          if [ "$cur" = "$REL" ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "pin already ${REL} — nothing to do (duplicate fan-out absorbed)."
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            echo "bumping PINEFORGE_RELEASE_VERSION ${cur} -> ${REL}"
+          fi
+
+      - name: Configure git identity
+        if: steps.gate.outputs.proceed == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Compute next codegen-mcp version (independent auto patch bump)
+        if: steps.gate.outputs.proceed == 'true'
+        id: ver
+        run: |
+          set -euo pipefail
+          cur="$(tr -d '[:space:]' < VERSION)"
+          [[ "$cur" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || { echo "::error::VERSION malformed '$cur'"; exit 1; }
+          maj="${BASH_REMATCH[1]}"; min="${BASH_REMATCH[2]}"; pat="${BASH_REMATCH[3]}"
+          git fetch --tags --quiet
+          next="${maj}.${min}.$((pat + 1))"
+          while git rev-parse -q --verify "refs/tags/v${next}" >/dev/null; do
+            pat=$((pat + 1)); next="${maj}.${min}.$((pat + 1))"
+          done
+          { echo "next=${next}"; echo "tag=v${next}"; } >> "$GITHUB_OUTPUT"
+          echo "codegen-mcp ${cur} -> ${next}"
+
+      - name: Setup Node
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Bump base-image pin + VERSION + sync
+        if: steps.gate.outputs.proceed == 'true'
+        env:
+          REL:  ${{ steps.rel.outputs.version }}
+          NEXT: ${{ steps.ver.outputs.next }}
+        run: |
+          set -euo pipefail
+          # Bump ONLY the pre-FROM default ARG line (the bare re-declaration has no '=').
+          sed -i -E "0,/^ARG PINEFORGE_RELEASE_VERSION=.*/s//ARG PINEFORGE_RELEASE_VERSION=${REL}/" docker/Dockerfile
+          grep -q "^ARG PINEFORGE_RELEASE_VERSION=${REL}$" docker/Dockerfile || { echo "::error::Dockerfile pin not updated"; exit 1; }
+          printf '%s\n' "$NEXT" > VERSION
+          npm ci --no-audit --no-fund
+          npm run sync-version   # rewrites package.json + server.json (+ gitignored src/version.ts)
+
+      - name: Verify synced versions before tagging
+        if: steps.gate.outputs.proceed == 'true'
+        env:
+          NEXT: ${{ steps.ver.outputs.next }}
+        run: |
+          set -euo pipefail
+          [ "$(tr -d '[:space:]' < VERSION)" = "$NEXT" ] || { echo "::error::VERSION drift"; exit 1; }
+          [ "$(node -p "require('./package.json').version")" = "$NEXT" ] || { echo "::error::package.json drift"; exit 1; }
+
+      - name: Commit + tag (fires publish.yml)
+        if: steps.gate.outputs.proceed == 'true'
+        env:
+          NEXT: ${{ steps.ver.outputs.next }}
+          TAG:  ${{ steps.ver.outputs.tag }}
+          REL:  ${{ steps.rel.outputs.version }}
+        run: |
+          set -euo pipefail
+          git add VERSION package.json server.json docker/Dockerfile
+          git diff --cached --quiet && { echo "::error::nothing staged — refusing empty release"; exit 1; }
+          git commit -m "chore(release): ${TAG} — base pineforge-release ${REL}"
+          git tag -a "${TAG}" -m "Release ${TAG} (pineforge-release ${REL})"
+          git push origin HEAD:main
+          git push origin "${TAG}"
+          echo "pushed ${TAG}; publish.yml will run from the tag"
