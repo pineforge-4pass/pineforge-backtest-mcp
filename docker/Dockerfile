@@ -6,10 +6,13 @@
 #
 # Build: docker build -f docker/Dockerfile -t pineforge-codegen-mcp .
 
-# Single source of truth for the baked pineforge-release version: it tags the
-# base image AND is exported as PINEFORGE_VERSION so engine_info can report it.
+# The baked pineforge-release version is supplied by CI as a build-arg (resolved
+# at release time; recorded in the release tag message `release=`, read back by
+# publish.yml). It tags the base image AND is exported as PINEFORGE_VERSION so
+# engine_info can report it. No default — building without
+# `--build-arg PINEFORGE_RELEASE_VERSION` fails fast at the FROM below.
 # Declared before the first FROM so it's usable in the final stage's FROM line.
-ARG PINEFORGE_RELEASE_VERSION=0.1.3
+ARG PINEFORGE_RELEASE_VERSION
 
 # --- build MCP dist + prod deps (reproducible: committed lockfile + npm ci) ---
 FROM node:22-slim AS mcp

@@ -72,6 +72,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       # Third-party actions pinned to commit SHA (supply-chain hardening); the
       # release pipeline has packages:write, so a hijacked tag could poison
       # published images. Tag comments are the resolved version.
@@ -82,6 +84,36 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
+      - name: Resolve base pineforge-release version + wait for its image
+        id: base
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          semver() { printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?$'; }
+          rel=""
+          # Trust the tag message ONLY if REF is an ANNOTATED tag — a lightweight
+          # tag (or workflow_dispatch's branch ref) leaks the commit body, not ours.
+          if [ "$(git cat-file -t "$REF" 2>/dev/null || true)" = tag ]; then
+            rel="$(git for-each-ref --format='%(contents:body)' "refs/tags/$REF" | sed -n 's/^release=//p' | head -1)"
+          fi
+          if ! semver "$rel"; then
+            echo "::warning::no valid release= in tag ${REF} — resolving latest pineforge-release (may differ from this commit's intended base)"
+            for i in 1 2 3 4 5; do rel="$(gh release view -R pineforge-4pass/pineforge-release --json tagName -q .tagName 2>/dev/null || true)"; [ -n "$rel" ] && break; sleep 5; done
+            rel="${rel#v}"
+          fi
+          semver "$rel" || { echo "::error::bad base release version '$rel'"; exit 1; }
+          # The base image must exist before we build FROM it.
+          img="ghcr.io/pineforge-4pass/pineforge-release:${rel}"
+          ok=
+          for i in $(seq 1 20); do
+            if docker manifest inspect "$img" >/dev/null 2>&1; then ok=1; break; fi
+            echo "waiting for base image ${img} ... (${i})"; sleep 15
+          done
+          [ -n "$ok" ] || { echo "::error::base image ${img} not available after wait"; exit 1; }
+          echo "release=$rel" >> "$GITHUB_OUTPUT"
+          echo "base pineforge-release=$rel"
       - name: Build and push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -89,6 +121,8 @@ jobs:
           file: docker/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: |
+            PINEFORGE_RELEASE_VERSION=${{ steps.base.outputs.release }}
           tags: |
             ghcr.io/pineforge-4pass/pineforge-codegen-mcp:${{ github.ref_name }}
             ghcr.io/pineforge-4pass/pineforge-codegen-mcp:latest
