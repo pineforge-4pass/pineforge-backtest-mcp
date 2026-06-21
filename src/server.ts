@@ -840,7 +840,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
     "win rate / drawdown / profit factor, or compare parameter settings. A backtest is historical " +
     "measurement, not a prediction of future returns, and these tools give no trading or financial advice.";
   const localClause = runner.mode === "docker"
-    ? "Transpile and backtest run locally via the pineforge-engine Docker image; nothing leaves the box, no API key."
+    ? "Transpile and backtest run locally via the pineforge-release Docker image; nothing leaves the box, no API key."
     : "Everything runs in-process in this one container — no API key, no host Docker daemon; the user's code and data never leave the machine.";
 
   const server = new McpServer(
@@ -854,12 +854,12 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
   // Mode-aware run-location clauses so tool copy stays accurate per backend
   // without duplicating tool logic.
   const transpileWhere = runner.mode === "docker"
-    ? "using the pineforge-codegen transpiler bundled in the pineforge-engine Docker image"
+    ? "using the pineforge-codegen transpiler bundled in the pineforge-release Docker image"
     : "using the pineforge-codegen transpiler bundled in this image (in-process, no host Docker)";
   const backtestWhere = runner.mode === "docker"
-    ? "via the pineforge-engine Docker image on the user's local machine. Fully local — " +
+    ? "via the pineforge-release Docker image on the user's local machine. Fully local — " +
       "transpile + backtest run in-container; nothing leaves the box, no API key."
-    : "via the bundled pineforge-engine (in-process, no host Docker daemon). Fully local — " +
+    : "via the bundled pineforge-release (in-process, no host Docker daemon). Fully local — " +
       "transpile + backtest run in this image; nothing leaves the box, no API key.";
   const gridWhere = runner.mode === "docker"
     ? "transpile the Pine source ONCE (locally, in-container)"
@@ -1181,7 +1181,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
       "pull_engine_image",
       {
         description:
-          "Run `docker pull` for the pineforge-engine runtime image on the user's " +
+          "Run `docker pull` for the pineforge-release runtime image on the user's " +
           "machine. Useful before the first backtest_pine call.",
         inputSchema: {
           image: z.string().optional().describe(
@@ -1196,7 +1196,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
       "check_engine_image",
       {
         description:
-          "Check whether the local pineforge-engine Docker image is up to date " +
+          "Check whether the local pineforge-release Docker image is up to date " +
           "with the registry. Compares per-platform manifest digests via " +
           "`docker manifest inspect --verbose` (no image layers downloaded). " +
           "Returns up_to_date + recommend_pull. With auto_pull=true, runs " +

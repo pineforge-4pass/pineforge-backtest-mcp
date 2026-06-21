@@ -13,7 +13,7 @@ import { join } from "node:path";
 
 // ─── Config ───────────────────────────────────────────────────────────────
 
-export const DEFAULT_IMAGE = process.env.PINEFORGE_IMAGE ?? "ghcr.io/pineforge-4pass/pineforge-engine:latest";
+export const DEFAULT_IMAGE = process.env.PINEFORGE_IMAGE ?? "ghcr.io/pineforge-4pass/pineforge-release:latest";
 export const DOCKER_TIMEOUT_MS = Number(process.env.PINEFORGE_DOCKER_TIMEOUT_MS ?? 120_000);
 
 // ─── Local transpile (Pine → C++ via the engine container) ──────────────────
