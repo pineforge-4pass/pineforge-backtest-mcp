@@ -3,12 +3,13 @@ name: pineforge-release
 # Fired by pineforge-release's publish.yml (repository_dispatch
 # event_type=pineforge-release, client_payload.release_version=X.Y.Z).
 #
-# Bumps the base-image pin (docker/Dockerfile ARG PINEFORGE_RELEASE_VERSION),
-# auto patch-bumps THIS repo's own /VERSION (independent lineage), runs
-# sync-version, commits the tracked files to main, and pushes v<VERSION> with the
-# org GitHub App token. The App-token-pushed tag re-fires the UNCHANGED
-# publish.yml (npm + GHCR + MCP registry, OIDC) — the sole publisher; this
-# workflow never publishes inline. Idempotent: no-op if the pin already matches.
+# Records the base pineforge-release version in the release TAG MESSAGE
+# (`release=`) — no committed pin. Auto patch-bumps THIS repo's own /VERSION
+# (independent lineage), runs sync-version, commits the tracked files to main, and
+# pushes v<VERSION> with the org GitHub App token. The App-token-pushed tag
+# re-fires the UNCHANGED publish.yml (npm + GHCR + MCP registry, OIDC) — the sole
+# publisher; this workflow never publishes inline. Idempotent: no-op if the base
+# already matches the latest release tag.
 
 on:
   repository_dispatch:
@@ -50,19 +51,24 @@ jobs:
           fi
           echo "version=${RAW#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Idempotency — stop if pin already matches
+      - name: Idempotency — stop if the base already matches the last release
         id: gate
         env:
           REL: ${{ steps.rel.outputs.version }}
         run: |
           set -euo pipefail
-          cur="$(grep -m1 '^ARG PINEFORGE_RELEASE_VERSION=' docker/Dockerfile | sed -E 's/^ARG PINEFORGE_RELEASE_VERSION=//' | tr -d '[:space:]')"
+          # The base pineforge-release version is recorded in each release tag's
+          # message (`release=`), not in a committed pin. Compare against the latest.
+          git fetch --tags --quiet
+          LATEST="$(git tag -l 'v*' --sort=-v:refname | head -1)"
+          cur=""
+          [ -n "$LATEST" ] && cur="$(git for-each-ref --format='%(contents:body)' "refs/tags/$LATEST" | sed -n 's/^release=//p' | head -1)"
           if [ "$cur" = "$REL" ]; then
             echo "proceed=false" >> "$GITHUB_OUTPUT"
-            echo "pin already ${REL} — nothing to do (duplicate fan-out absorbed)."
+            echo "base already ${REL} at ${LATEST} — nothing to do (duplicate fan-out absorbed)."
           else
             echo "proceed=true" >> "$GITHUB_OUTPUT"
-            echo "bumping PINEFORGE_RELEASE_VERSION ${cur} -> ${REL}"
+            echo "bumping base pineforge-release ${cur:-∅} -> ${REL}"
           fi
 
       - name: Configure git identity
@@ -94,16 +100,14 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Bump base-image pin + VERSION + sync
+      - name: Bump VERSION + sync
         if: steps.gate.outputs.proceed == 'true'
         env:
-          REL:  ${{ steps.rel.outputs.version }}
           NEXT: ${{ steps.ver.outputs.next }}
         run: |
           set -euo pipefail
-          # Bump ONLY the pre-FROM default ARG line (the bare re-declaration has no '=').
-          sed -i -E "0,/^ARG PINEFORGE_RELEASE_VERSION=.*/s//ARG PINEFORGE_RELEASE_VERSION=${REL}/" docker/Dockerfile
-          grep -q "^ARG PINEFORGE_RELEASE_VERSION=${REL}$" docker/Dockerfile || { echo "::error::Dockerfile pin not updated"; exit 1; }
+          # No committed base pin: the pineforge-release version is supplied to the
+          # image build as a build-arg (publish.yml) and recorded in the tag message.
           printf '%s\n' "$NEXT" > VERSION
           npm ci --no-audit --no-fund
           npm run sync-version   # rewrites package.json + server.json (+ gitignored src/version.ts)
@@ -125,10 +129,10 @@ jobs:
           REL:  ${{ steps.rel.outputs.version }}
         run: |
           set -euo pipefail
-          git add VERSION package.json server.json docker/Dockerfile
+          git add VERSION package.json server.json
           git diff --cached --quiet && { echo "::error::nothing staged — refusing empty release"; exit 1; }
           git commit -m "chore(release): ${TAG} — base pineforge-release ${REL}"
-          git tag -a "${TAG}" -m "Release ${TAG} (pineforge-release ${REL})"
+          git tag -a "${TAG}" -m "$(printf 'Release %s\n\nrelease=%s\n' "${TAG}" "${REL}")"
           git push origin HEAD:main
           git push origin "${TAG}"
-          echo "pushed ${TAG}; publish.yml will run from the tag"
+          echo "pushed ${TAG} (base ${REL}); publish.yml will run from the tag"
