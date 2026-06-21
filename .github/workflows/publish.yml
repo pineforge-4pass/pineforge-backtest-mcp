@@ -92,6 +92,10 @@ jobs:
         run: |
           set -euo pipefail
           semver() { printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?$'; }
+          # actions/checkout@v4 re-points refs/tags/<tag> at the peeled COMMIT, so
+          # cat-file would see 'commit'. Re-fetch tags (forced) to restore the
+          # annotated tag objects before reading the message.
+          git fetch --force --tags origin >/dev/null 2>&1 || true
           rel=""
           # Trust the tag message ONLY if REF is an ANNOTATED tag — a lightweight
           # tag (or workflow_dispatch's branch ref) leaks the commit body, not ours.
