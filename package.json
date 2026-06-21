@@ -1,6 +1,6 @@
 {
   "name": "@pineforge/codegen-mcp",
-  "version": "0.9.10",
+  "version": "0.9.11",
   "description": "Local MCP server: PineScript v6 → C++ + Docker backtest runner with parameter sweeps + Binance OHLCV exporter. Fully local (transpiler bundled in the engine image), no API key.",
   "type": "module",
   "bin": {
