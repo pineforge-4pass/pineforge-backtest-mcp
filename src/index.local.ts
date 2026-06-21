@@ -2,8 +2,9 @@
 /**
  * @pineforge/codegen-mcp — local (in-container) entrypoint.
  *
- * Used by the self-contained Docker image where the pineforge-engine is baked
- * in: runs the engine in-process (LocalRunner), no host Docker daemon. The MCP
+ * Used by the self-contained Docker image where the pineforge-release base
+ * (engine runtime + bundled codegen) is baked in: runs the engine in-process
+ * (LocalRunner), no host Docker daemon. The MCP
  * image *is* the container, so the image-management tools are omitted; a
  * read-only engine_info tool is registered instead. All tool logic lives in
  * ./server.ts.
