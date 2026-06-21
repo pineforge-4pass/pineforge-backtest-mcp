@@ -9,7 +9,7 @@
 # Single source of truth for the baked pineforge-release version: it tags the
 # base image AND is exported as PINEFORGE_VERSION so engine_info can report it.
 # Declared before the first FROM so it's usable in the final stage's FROM line.
-ARG PINEFORGE_RELEASE_VERSION=0.1.0
+ARG PINEFORGE_RELEASE_VERSION=0.1.1
 
 # --- build MCP dist + prod deps (reproducible: committed lockfile + npm ci) ---
 FROM node:22-slim AS mcp
