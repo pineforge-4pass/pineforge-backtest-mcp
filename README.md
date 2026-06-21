@@ -1,7 +1,7 @@
 # `@pineforge/codegen-mcp`
 
 Self-contained stdio MCP server: an AI agent writes PineScript v6, and the
-bundled `pineforge-engine` transpiles it to C++ and backtests it against Binance
+bundled `pineforge-release` image transpiles it to C++ and backtests it against Binance
 market data — all in one container, in-process. **Fully local** — the image
 bundles the [`pineforge-codegen`](https://github.com/pineforge-4pass/pineforge-codegen-oss)
 transpiler, so Pine → C++ → backtest run with no host Docker daemon. **No API
@@ -161,7 +161,7 @@ the engine accepts before composing a `backtest_pine` request.
 unset → defaults from `strategy.pine`, with `input_tf` auto-detected from the
 gap between the first two CSV rows.
 
-Returns the same JSON schema as the standalone `pineforge-engine` Docker image:
+Returns the same JSON schema as the standalone `pineforge-release` Docker image:
 
 ```jsonc
 {
@@ -171,7 +171,7 @@ Returns the same JSON schema as the standalone `pineforge-engine` Docker image:
   "applied_overrides": { "default_qty_value": "5" },
   "trades": [ ... ],
   "elapsed_seconds": 0.0042,
-  "_meta": { "strategy_cpp_bytes": 5079, "image": "ghcr.io/.../pineforge-engine:latest" }
+  "_meta": { "strategy_cpp_bytes": 5079, "image": "ghcr.io/.../pineforge-release:latest" }
 }
 ```
 
@@ -257,6 +257,6 @@ export PINEFORGE_ALLOW_ANYWHERE=1
 
 | var | default | purpose |
 |---|---|---|
-| `PINEFORGE_IMAGE`               | `ghcr.io/pineforge-4pass/pineforge-engine:latest` | Engine image used for transpile + backtest |
+| `PINEFORGE_IMAGE`               | `ghcr.io/pineforge-4pass/pineforge-release:latest` | Image (engine runtime + bundled codegen) used for transpile + backtest |
 | `PINEFORGE_ALLOW_ANYWHERE`      | `0` | Allow OHLCV paths outside cwd |
 | `PINEFORGE_DOCKER_TIMEOUT_MS`   | `120000` | Hard kill for `docker pull` / `docker run` |
