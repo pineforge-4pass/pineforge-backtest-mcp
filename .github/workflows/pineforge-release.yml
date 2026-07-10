@@ -77,7 +77,7 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Compute next codegen-mcp version (independent auto patch bump)
+      - name: Compute next backtest-mcp version (independent auto patch bump)
         if: steps.gate.outputs.proceed == 'true'
         id: ver
         run: |
@@ -91,7 +91,7 @@ jobs:
             pat=$((pat + 1)); next="${maj}.${min}.$((pat + 1))"
           done
           { echo "next=${next}"; echo "tag=v${next}"; } >> "$GITHUB_OUTPUT"
-          echo "codegen-mcp ${cur} -> ${next}"
+          echo "backtest-mcp ${cur} -> ${next}"
 
       - name: Setup Node
         if: steps.gate.outputs.proceed == 'true'

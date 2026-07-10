@@ -1,10 +1,10 @@
 {
-  "name": "@pineforge/codegen-mcp",
+  "name": "@pineforge/backtest-mcp",
   "version": "0.9.18",
   "description": "Local MCP server: PineScript v6 → C++ + Docker backtest runner with parameter sweeps + Binance OHLCV exporter. Fully local (transpiler bundled in the engine image), no API key.",
   "type": "module",
   "bin": {
-    "pineforge-codegen-mcp": "dist/index.js"
+    "pineforge-backtest-mcp": "dist/index.js"
   },
   "main": "dist/index.js",
   "files": [
@@ -41,13 +41,13 @@
     "backtest",
     "trading"
   ],
-  "homepage": "https://github.com/pineforge-4pass/pineforge-codegen-mcp",
+  "homepage": "https://github.com/pineforge-4pass/pineforge-backtest-mcp",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/pineforge-4pass/pineforge-codegen-mcp.git"
+    "url": "git+https://github.com/pineforge-4pass/pineforge-backtest-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/pineforge-4pass/pineforge-codegen-mcp/issues"
+    "url": "https://github.com/pineforge-4pass/pineforge-backtest-mcp/issues"
   },
   "license": "MIT"
 }

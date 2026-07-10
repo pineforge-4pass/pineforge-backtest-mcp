@@ -1,6 +1,6 @@
 # Legal information
 
-Summary of licensing, third-party components, and trademarks for `@pineforge/codegen-mcp`. **Not** legal advice; consult counsel for your use case.
+Summary of licensing, third-party components, and trademarks for `@pineforge/backtest-mcp`. **Not** legal advice; consult counsel for your use case.
 
 ## License
 

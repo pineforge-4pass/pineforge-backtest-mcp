@@ -128,8 +128,8 @@ jobs:
           build-args: |
             PINEFORGE_RELEASE_VERSION=${{ steps.base.outputs.release }}
           tags: |
-            ghcr.io/pineforge-4pass/pineforge-codegen-mcp:${{ github.ref_name }}
-            ghcr.io/pineforge-4pass/pineforge-codegen-mcp:latest
+            ghcr.io/pineforge-4pass/pineforge-backtest-mcp:${{ github.ref_name }}
+            ghcr.io/pineforge-4pass/pineforge-backtest-mcp:latest
 
   # Publish metadata to the official MCP Registry (registry.modelcontextprotocol.io).
   # Runs AFTER `image` so the pushed image carries the

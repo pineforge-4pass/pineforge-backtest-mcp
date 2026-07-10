@@ -1,4 +1,4 @@
-# `@pineforge/codegen-mcp`
+# `@pineforge/backtest-mcp`
 
 Self-contained stdio MCP server: an AI agent writes PineScript v6, and the
 bundled `pineforge-release` image transpiles it to C++ and backtests it against Binance
@@ -7,7 +7,7 @@ bundles the [`pineforge-codegen`](https://github.com/pineforge-4pass/pineforge-c
 transpiler, so Pine → C++ → backtest run with no host Docker daemon. **No API
 key, nothing leaves the box.**
 
-[![pineforge-codegen-mcp MCP server](https://glama.ai/mcp/servers/pineforge-4pass/pineforge-codegen-mcp/badges/card.svg)](https://glama.ai/mcp/servers/pineforge-4pass/pineforge-codegen-mcp)
+[![pineforge-backtest-mcp MCP server](https://glama.ai/mcp/servers/pineforge-4pass/pineforge-backtest-mcp/badges/card.svg)](https://glama.ai/mcp/servers/pineforge-4pass/pineforge-backtest-mcp)
 
 ![demo](assets/demo.gif)
 
@@ -33,7 +33,7 @@ host Docker daemon, no API key. Mount a working dir at `/work` so the server can
 read/write your CSVs:
 
 ```bash
-docker run --rm -i -v "$PWD:/work" ghcr.io/pineforge-4pass/pineforge-codegen-mcp:latest
+docker run --rm -i -v "$PWD:/work" ghcr.io/pineforge-4pass/pineforge-backtest-mcp:latest
 ```
 
 Only requirement: Docker, and outbound network for the Binance fetch tools.
@@ -65,12 +65,12 @@ JSON-RPC stream.)
 ```jsonc
 {
   "mcpServers": {
-    "pineforge-codegen": {
+    "pineforge-backtest": {
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
         "-v", "${workspaceFolder}:/work",
-        "ghcr.io/pineforge-4pass/pineforge-codegen-mcp:latest"
+        "ghcr.io/pineforge-4pass/pineforge-backtest-mcp:latest"
       ]
     }
   }
@@ -82,8 +82,8 @@ JSON-RPC stream.)
 ### Claude Code CLI
 
 ```bash
-claude mcp add pineforge-codegen \
-  -- docker run --rm -i -v "$PWD:/work" ghcr.io/pineforge-4pass/pineforge-codegen-mcp:latest
+claude mcp add pineforge-backtest \
+  -- docker run --rm -i -v "$PWD:/work" ghcr.io/pineforge-4pass/pineforge-backtest-mcp:latest
 ```
 
 ## For AI agents — use via MCP

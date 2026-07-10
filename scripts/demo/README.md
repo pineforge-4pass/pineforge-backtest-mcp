@@ -17,7 +17,7 @@ from the environment (Vertex / `ANTHROPIC_*` env vars).
 
 ```bash
 # 1. self-contained image (the MCP the session talks to)
-docker build -f docker/Dockerfile -t pineforge-codegen-mcp:local .   # or use ghcr :latest
+docker build -f docker/Dockerfile -t pineforge-backtest-mcp:local .   # or use ghcr :latest
 
 # 2. isolated HOME with only the pineforge MCP + tools pre-approved
 mkdir -p /tmp/pf-home/.claude /tmp/pf-sandbox
@@ -25,7 +25,7 @@ cat > /tmp/pf-home/.claude.json <<'JSON'
 { "numStartups": 50, "installMethod": "native",
   "hasCompletedOnboarding": true, "lastOnboardingVersion": "2.1.86", "theme": "dark",
   "mcpServers": { "pineforge": { "type": "stdio", "command": "docker",
-    "args": ["run","--rm","-i","-v","/tmp/pf-sandbox:/work","ghcr.io/pineforge-4pass/pineforge-codegen-mcp:latest"] } },
+    "args": ["run","--rm","-i","-v","/tmp/pf-sandbox:/work","ghcr.io/pineforge-4pass/pineforge-backtest-mcp:latest"] } },
   "projects": { "/private/tmp/pf-sandbox": { "hasTrustDialogAccepted": true, "hasCompletedProjectOnboarding": true } } }
 JSON
 cat > /tmp/pf-home/.claude/settings.json <<'JSON'

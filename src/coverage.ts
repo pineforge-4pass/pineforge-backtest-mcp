@@ -6,7 +6,7 @@
  * runtime fetch). This is the single source the MCP coverage tools serve.
  *
  * IMPORTANT: this is a hand-authored canonical copy. Updating it requires a
- * MANUAL re-sync across BOTH pineforge-codegen-mcp AND pineforge-mcp-public —
+ * MANUAL re-sync across BOTH pineforge-backtest-mcp AND pineforge-mcp-public —
  * the two MCP surfaces carry their own copy of this dataset and they must not
  * drift. When coverage.md / pine_v6_coverage_detail.md change, edit this file
  * here and mirror the identical change in pineforge-mcp-public.

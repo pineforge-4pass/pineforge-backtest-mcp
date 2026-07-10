@@ -1,5 +1,5 @@
 /**
- * @pineforge/codegen-mcp — docker engine primitives.
+ * @pineforge/backtest-mcp — docker engine primitives.
  *
  * Low-level Docker plumbing for the engine image: Pine → C++ transpile,
  * backtest invocation, image freshness/pull. Extracted from index.ts so a

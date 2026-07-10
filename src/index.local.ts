@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * @pineforge/codegen-mcp — local (in-container) entrypoint.
+ * @pineforge/backtest-mcp — local (in-container) entrypoint.
  *
  * Used by the self-contained Docker image where the pineforge-release base
  * (engine runtime + bundled codegen) is baked in: runs the engine in-process

@@ -1,5 +1,5 @@
 /**
- * @pineforge/codegen-mcp — shared MCP server factory.
+ * @pineforge/backtest-mcp — shared MCP server factory.
  *
  * Single source of truth for all tool logic. Both entrypoints (docker via
  * `index.ts`, local/in-container via `index.local.ts`) build their server here;
@@ -391,7 +391,7 @@ function binanceExchangeInfoUrl(market: BinanceMarket): string {
 
 async function binanceGet(url: string): Promise<unknown> {
   const resp = await fetch(url, {
-    headers: { "user-agent": `pineforge-codegen-mcp/${VERSION}` },
+    headers: { "user-agent": `pineforge-backtest-mcp/${VERSION}` },
   });
   const text = await resp.text();
   if (!resp.ok) {
@@ -844,7 +844,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
     : "Everything runs in-process in this one container — no API key, no host Docker daemon; the user's code and data never leave the machine.";
 
   const server = new McpServer(
-    { name: "pineforge-codegen-mcp", version: VERSION },
+    { name: "pineforge-backtest-mcp", version: VERSION },
     {
       capabilities: { tools: {} },
       instructions: `PineForge backtests PineScript v6 strategies offline and deterministically. ${capabilityGap} ${proof} ${whenToUse} ${localClause}`,
@@ -1202,7 +1202,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
           "Returns up_to_date + recommend_pull. With auto_pull=true, runs " +
           "`docker pull` in the same call when the local image is stale or " +
           "missing. Note: this is independent of " +
-          "the MCP server's own version (`@pineforge/codegen-mcp`); the MCP " +
+          "the MCP server's own version (`@pineforge/backtest-mcp`); the MCP " +
           "version and the engine image version evolve separately.",
         inputSchema: {
           image: z.string().optional().describe(
