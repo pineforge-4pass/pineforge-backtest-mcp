@@ -15,7 +15,7 @@
 ARG PINEFORGE_RELEASE_VERSION
 
 # --- build MCP dist + prod deps (reproducible: committed lockfile + npm ci) ---
-FROM node:22-slim AS mcp
+FROM node:26-slim AS mcp
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
