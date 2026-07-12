@@ -66,6 +66,13 @@ jobs:
           if [ "$cur" = "$REL" ]; then
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             echo "base already ${REL} at ${LATEST} — nothing to do (duplicate fan-out absorbed)."
+          elif [ -n "$cur" ] && [ "$(printf '%s\n%s\n' "$cur" "$REL" | sort -V | tail -1)" = "$cur" ]; then
+            # Downgrade guard: near-simultaneous upstream releases fan out in
+            # arrival order, not version order (observed 2026-07-12: base
+            # 0.1.14 arrived before 0.1.13 and the stale dispatch re-based the
+            # latest tag backward). Never move the base to a LOWER semver.
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "incoming base ${REL} < current ${cur} at ${LATEST} — out-of-order fan-out absorbed (downgrade guard)."
           else
             echo "proceed=true" >> "$GITHUB_OUTPUT"
             echo "bumping base pineforge-release ${cur:-∅} -> ${REL}"
