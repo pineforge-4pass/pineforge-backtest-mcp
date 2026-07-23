@@ -1,6 +1,6 @@
 {
   "name": "@pineforge/backtest-mcp",
-  "version": "0.9.25",
+  "version": "0.9.26",
   "description": "Local MCP server: PineScript v6 → C++ + Docker backtest runner with parameter sweeps + Binance OHLCV exporter. Fully local (transpiler bundled in the engine image), no API key.",
   "type": "module",
   "bin": {
