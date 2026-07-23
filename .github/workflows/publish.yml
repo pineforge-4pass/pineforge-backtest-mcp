@@ -12,7 +12,7 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Belt-and-suspenders: when triggered by a tag push, refuse to publish
       # if the tag (e.g. v0.3.0) doesn't match the committed VERSION file.
@@ -31,7 +31,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
@@ -54,7 +54,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -71,7 +71,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       # Third-party actions pinned to commit SHA (supply-chain hardening); the
@@ -92,7 +92,7 @@ jobs:
         run: |
           set -euo pipefail
           semver() { printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?$'; }
-          # actions/checkout@v4 re-points refs/tags/<tag> at the peeled COMMIT, so
+          # actions/checkout@v7 re-points refs/tags/<tag> at the peeled COMMIT, so
           # cat-file would see 'commit'. Re-fetch tags (forced) to restore the
           # annotated tag objects before reading the message.
           git fetch --force --tags origin >/dev/null 2>&1 || true
@@ -144,7 +144,7 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install mcp-publisher
         run: |
           curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher

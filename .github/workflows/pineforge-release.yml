@@ -28,13 +28,13 @@ jobs:
     steps:
       - name: Mint org App token
         id: app
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.PINEFORGE_APP_ID }}
           private-key: ${{ secrets.PINEFORGE_APP_PRIVATE_KEY }}
 
       - name: Checkout main (App token bypasses ruleset + re-fires publish.yml)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
@@ -102,7 +102,7 @@ jobs:
 
       - name: Setup Node
         if: steps.gate.outputs.proceed == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
