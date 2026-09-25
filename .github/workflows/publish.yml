@@ -78,6 +78,7 @@ jobs:
           PRERELEASE: ${{ needs.publish.outputs.prerelease }}
         run: |
           set -euo pipefail
+          case "$PRERELEASE" in true|false) ;; *) echo "::error::no prerelease flag from the publish job ('${PRERELEASE}')"; exit 1 ;; esac
           if [ "$PRERELEASE" = true ]; then
             gh release create "$TAG_NAME" --title "$TAG_NAME" --generate-notes --prerelease --latest=false
           else
@@ -152,6 +153,7 @@ jobs:
           PRERELEASE: ${{ needs.publish.outputs.prerelease }}
         run: |
           set -euo pipefail
+          case "$PRERELEASE" in true|false) ;; *) echo "::error::no prerelease flag from the publish job ('${PRERELEASE}')"; exit 1 ;; esac
           img=ghcr.io/pineforge-4pass/pineforge-backtest-mcp
           { echo "list<<EOF"; echo "${img}:${TAG_NAME}"; [ "$PRERELEASE" = true ] || echo "${img}:latest"; echo "EOF"; } >> "$GITHUB_OUTPUT"
       - name: Build and push

@@ -56,11 +56,13 @@ test("npm publish uses the dist-tag the VERSION gives (next for a prerelease)", 
 test("a prerelease GitHub release is never Latest", () => {
   const body = step(publish, "Create GitHub Release");
   assert.match(body, /PRERELEASE: \$\{\{ needs\.publish\.outputs\.prerelease \}\}/);
+  assert.ok(body.includes('case "$PRERELEASE" in true|false) ;;'), "an empty flag must fail, not publish a stable release");
   assert.ok(body.includes("--prerelease --latest=false"));
 });
 
 test("the latest image tag is for stable releases only", () => {
   const tags = step(publish, "Image tags");
+  assert.ok(tags.includes('case "$PRERELEASE" in true|false) ;;'), "an empty flag must fail, not tag latest");
   assert.ok(tags.includes('[ "$PRERELEASE" = true ] || echo "${img}:latest"'));
   assert.ok(job(publish, "image").includes("tags: ${{ steps.tags.outputs.list }}"));
   assert.ok(!job(publish, "image").includes("pineforge-backtest-mcp:latest\n"));
