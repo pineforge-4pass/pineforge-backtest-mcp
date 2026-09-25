@@ -39,10 +39,13 @@ docker run --rm -i -v "$PWD:/work" ghcr.io/pineforge-4pass/pineforge-backtest-mc
 Only requirement: Docker, and outbound network for the Binance fetch tools.
 Wire it into your MCP client below.
 
-`latest` and npm's `latest` always carry a stable release. Prereleases (built on a
-`pineforge-release` prerelease such as `1.0.0-rc.1`) are published only under
-their exact version — image `:vX.Y.Z-rc.N`, npm `@pineforge/backtest-mcp@next` —
-and are not listed in the MCP Registry.
+The image's `:latest` and npm's `latest` always carry a stable release. A
+`pineforge-release` prerelease (such as `1.0.0-rc.1`) produces a prerelease of this
+server (`X.Y.Z-alpha.N`, `-beta.N` or `-rc.N`): the image `:vX.Y.Z-rc.N`, built FROM
+that `pineforge-release` prerelease, and npm `@pineforge/backtest-mcp@next`, which,
+like any npm install, runs the engine image named by `PINEFORGE_IMAGE` (default
+`pineforge-release:latest`, the stable engine). Prereleases are not listed in the
+MCP Registry.
 
 ### Hosted (no-install) alternative
 
