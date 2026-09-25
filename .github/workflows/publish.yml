@@ -1,5 +1,10 @@
 name: Publish to npm
 
+# A prerelease VERSION (from a prerelease base pineforge-release) publishes on
+# npm dist-tag next, the exact-version image tag, and a GitHub prerelease; it
+# never moves npm latest, the latest image or GitHub's Latest release, and it is
+# not sent to the MCP Registry (scripts/release-version.mjs channel).
+
 on:
   push:
     tags: ["v*"]
@@ -11,6 +16,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    outputs:
+      prerelease: ${{ steps.channel.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
 
@@ -35,6 +42,12 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      # npm 11 refuses to publish a prerelease without --tag; ours is next.
+      - name: Release channel from VERSION
+        id: channel
+        run: |
+          set -euo pipefail
+          node scripts/release-version.mjs channel "$(tr -d '[:space:]' < VERSION)" | tee -a "$GITHUB_OUTPUT"
       # npm Trusted Publishing (OIDC) needs npm >= 11.5.0 — newer than the npm
       # bundled with Node 22. No NPM_TOKEN: the id-token below authenticates to
       # npm via the configured trusted publisher, and provenance is automatic.
@@ -42,7 +55,10 @@ jobs:
       - run: npm install -g npm@11.5.0
       - run: npm install --no-package-lock
       - run: npm run build
-      - run: npm publish --access=public
+      - name: Publish to npm
+        env:
+          DIST_TAG: ${{ steps.channel.outputs.npm_dist_tag }}
+        run: npm publish --access=public --tag "$DIST_TAG"
 
   # Publish a GitHub Release for the tag. Glama's "stable releases" check reads
   # the Releases API (not git tags), so a bare tag isn't enough. Runs only on a
@@ -59,7 +75,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.ref_name }}
-        run: gh release create "$TAG_NAME" --title "$TAG_NAME" --generate-notes
+          PRERELEASE: ${{ needs.publish.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if [ "$PRERELEASE" = true ]; then
+            gh release create "$TAG_NAME" --title "$TAG_NAME" --generate-notes --prerelease --latest=false
+          else
+            gh release create "$TAG_NAME" --title "$TAG_NAME" --generate-notes
+          fi
 
   # Build + push the self-contained MCP image so users can `docker pull` it
   # (Glama also builds from docker/Dockerfile directly). Tag pushes only.
@@ -89,6 +112,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REF: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.publish.outputs.prerelease }}
         run: |
           set -euo pipefail
           semver() { printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?$'; }
@@ -101,6 +125,9 @@ jobs:
           # tag (or workflow_dispatch's branch ref) leaks the commit body, not ours.
           if [ "$(git cat-file -t "$REF" 2>/dev/null || true)" = tag ]; then
             rel="$(git for-each-ref --format='%(contents:body)' "refs/tags/$REF" | sed -n 's/^release=//p' | head -1)"
+          fi
+          if ! semver "$rel" && [ "$PRERELEASE" = true ]; then
+            echo "::error::prerelease tag ${REF} has no release= base in its message; refusing to guess a stable base"; exit 1
           fi
           if ! semver "$rel"; then
             echo "::warning::no valid release= in tag ${REF} — resolving latest pineforge-release (may differ from this commit's intended base)"
@@ -118,6 +145,15 @@ jobs:
           [ -n "$ok" ] || { echo "::error::base image ${img} not available after wait"; exit 1; }
           echo "release=$rel" >> "$GITHUB_OUTPUT"
           echo "base pineforge-release=$rel"
+      - name: Image tags (latest for stable releases only)
+        id: tags
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.publish.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          img=ghcr.io/pineforge-4pass/pineforge-backtest-mcp
+          { echo "list<<EOF"; echo "${img}:${TAG_NAME}"; [ "$PRERELEASE" = true ] || echo "${img}:latest"; echo "EOF"; } >> "$GITHUB_OUTPUT"
       - name: Build and push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -127,9 +163,7 @@ jobs:
           push: true
           build-args: |
             PINEFORGE_RELEASE_VERSION=${{ steps.base.outputs.release }}
-          tags: |
-            ghcr.io/pineforge-4pass/pineforge-backtest-mcp:${{ github.ref_name }}
-            ghcr.io/pineforge-4pass/pineforge-backtest-mcp:latest
+          tags: ${{ steps.tags.outputs.list }}
 
   # Publish metadata to the official MCP Registry (registry.modelcontextprotocol.io).
   # Runs AFTER `image` so the pushed image carries the
@@ -137,8 +171,9 @@ jobs:
   # server.json `name`. GitHub OIDC authenticates the io.github.pineforge-4pass
   # namespace from this repo — no interactive login, no stored token.
   mcp-registry:
-    needs: image
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [publish, image]
+    # Stable releases only: a prerelease is never listed in the registry.
+    if: startsWith(github.ref, 'refs/tags/v') && needs.publish.outputs.prerelease == 'false'
     runs-on: ubuntu-latest
     permissions:
       contents: read
