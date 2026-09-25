@@ -22,7 +22,7 @@
     "predev": "npm run sync-version",
     "dev": "tsx src/index.ts",
     "prepublishOnly": "npm run build",
-    "test": "node --import tsx --test test/**/*.test.ts"
+    "test": "node --import tsx --test 'test/**/*.test.ts'"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

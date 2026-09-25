@@ -1,15 +1,20 @@
 name: pineforge-release
 
 # Fired by pineforge-release's publish.yml (repository_dispatch
-# event_type=pineforge-release, client_payload.release_version=X.Y.Z).
+# event_type=pineforge-release, client_payload {release_version: X.Y.Z,
+# prerelease: true|false, run_id}).
 #
 # Records the base pineforge-release version in the release TAG MESSAGE
 # (`release=`) — no committed pin. Auto patch-bumps THIS repo's own /VERSION
 # (independent lineage), runs sync-version, commits the tracked files to main, and
 # pushes v<VERSION> with the org GitHub App token. The App-token-pushed tag
-# re-fires the UNCHANGED publish.yml (npm + GHCR + MCP registry, OIDC) — the sole
+# re-fires publish.yml (npm + GHCR + MCP registry, OIDC) — the sole
 # publisher; this workflow never publishes inline. Idempotent: no-op if the base
-# already matches the latest release tag.
+# already matches the latest release tag. A prerelease base (1.0.0-rc.1) gives a
+# prerelease of the next patch (0.9.32-rc.1), which publish.yml keeps off npm
+# latest, the latest image, the MCP Registry and GitHub's Latest release; the
+# base's release then gets the same patch (0.9.32). Rules:
+# scripts/release-version.mjs.
 
 on:
   repository_dispatch:
@@ -40,16 +45,30 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.app.outputs.token }}
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
       - name: Validate release_version (untrusted payload)
         id: rel
         env:
           RAW: ${{ github.event.client_payload.release_version }}
+          RAW_PRERELEASE: ${{ github.event.client_payload.prerelease }}
         run: |
           set -euo pipefail
           if ! printf '%s' "${RAW:-}" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?$'; then
             echo "::error::rejected untrusted release_version '${RAW:-}'"; exit 1
           fi
-          echo "version=${RAW#v}" >> "$GITHUB_OUTPUT"
+          case "${RAW_PRERELEASE:-}" in
+            ''|true|false) ;;
+            *) echo "::error::rejected untrusted prerelease '${RAW_PRERELEASE}'"; exit 1 ;;
+          esac
+          # Emits version (bare) + prerelease; a flag that contradicts the
+          # version, or a version outside X.Y.Z[-{alpha,beta,rc}.N], fails here.
+          node scripts/release-version.mjs check-payload \
+            --release-version="$RAW" --prerelease-flag="${RAW_PRERELEASE:-}" | tee -a "$GITHUB_OUTPUT"
 
       - name: Idempotency — stop if the base already matches the last release
         id: gate
@@ -58,25 +77,16 @@ jobs:
         run: |
           set -euo pipefail
           # The base pineforge-release version is recorded in each release tag's
-          # message (`release=`), not in a committed pin. Compare against the latest.
+          # message (`release=`), not in a committed pin. Compare against the
+          # latest tag by semver (v0.9.32 outranks v0.9.32-rc.1). A duplicate is
+          # absorbed; so is a LOWER base (downgrade guard: near-simultaneous
+          # upstream releases fan out in arrival order, observed 2026-07-12).
           git fetch --tags --quiet
-          LATEST="$(git tag -l 'v*' --sort=-v:refname | head -1)"
+          LATEST="$(git tag -l 'v*' | node scripts/release-version.mjs latest-tag)"
           cur=""
           [ -n "$LATEST" ] && cur="$(git for-each-ref --format='%(contents:body)' "refs/tags/$LATEST" | sed -n 's/^release=//p' | head -1)"
-          if [ "$cur" = "$REL" ]; then
-            echo "proceed=false" >> "$GITHUB_OUTPUT"
-            echo "base already ${REL} at ${LATEST} — nothing to do (duplicate fan-out absorbed)."
-          elif [ -n "$cur" ] && [ "$(printf '%s\n%s\n' "$cur" "$REL" | sort -V | tail -1)" = "$cur" ]; then
-            # Downgrade guard: near-simultaneous upstream releases fan out in
-            # arrival order, not version order (observed 2026-07-12: base
-            # 0.1.14 arrived before 0.1.13 and the stale dispatch re-based the
-            # latest tag backward). Never move the base to a LOWER semver.
-            echo "proceed=false" >> "$GITHUB_OUTPUT"
-            echo "incoming base ${REL} < current ${cur} at ${LATEST} — out-of-order fan-out absorbed (downgrade guard)."
-          else
-            echo "proceed=true" >> "$GITHUB_OUTPUT"
-            echo "bumping base pineforge-release ${cur:-∅} -> ${REL}"
-          fi
+          echo "latest tag ${LATEST:-∅} records base ${cur:-∅}"
+          node scripts/release-version.mjs gate --current="$cur" --incoming="$REL" | tee -a "$GITHUB_OUTPUT"
 
       - name: Configure git identity
         if: steps.gate.outputs.proceed == 'true'
@@ -87,25 +97,15 @@ jobs:
       - name: Compute next backtest-mcp version (independent auto patch bump)
         if: steps.gate.outputs.proceed == 'true'
         id: ver
+        env:
+          REL: ${{ steps.rel.outputs.version }}
         run: |
           set -euo pipefail
           cur="$(tr -d '[:space:]' < VERSION)"
-          [[ "$cur" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || { echo "::error::VERSION malformed '$cur'"; exit 1; }
-          maj="${BASH_REMATCH[1]}"; min="${BASH_REMATCH[2]}"; pat="${BASH_REMATCH[3]}"
           git fetch --tags --quiet
-          next="${maj}.${min}.$((pat + 1))"
-          while git rev-parse -q --verify "refs/tags/v${next}" >/dev/null; do
-            pat=$((pat + 1)); next="${maj}.${min}.$((pat + 1))"
-          done
-          { echo "next=${next}"; echo "tag=v${next}"; } >> "$GITHUB_OUTPUT"
-          echo "backtest-mcp ${cur} -> ${next}"
-
-      - name: Setup Node
-        if: steps.gate.outputs.proceed == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
+          # Patch bump that skips burned tags; a prerelease base gives the same
+          # next patch as a prerelease (next, tag, prerelease).
+          git tag -l 'v*' | node scripts/release-version.mjs next --current="$cur" --release="$REL" | tee -a "$GITHUB_OUTPUT"
 
       - name: Bump VERSION + sync
         if: steps.gate.outputs.proceed == 'true'

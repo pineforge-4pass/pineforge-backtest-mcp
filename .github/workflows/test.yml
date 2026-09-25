@@ -1,0 +1,31 @@
+name: Test
+
+# Gate every pull request on the unit tests (test/*.test.ts, including the
+# release rules and the fan-out workflow checks) and on a type-check: tsx
+# runs the tests without checking types, and publish.yml's build is the next
+# place a type error would show, after the tag.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      # prebuild runs sync-version, which writes the gitignored src/version.ts the tests import.
+      - name: Type-check (tsc)
+        run: npm run build
+      - run: npm test
