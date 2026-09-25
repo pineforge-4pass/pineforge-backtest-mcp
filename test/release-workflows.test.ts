@@ -46,11 +46,15 @@ test("handler gate and next version come from the release rules", () => {
   assert.ok(handler.indexOf("- name: Setup Node") < handler.indexOf("- name: Validate release_version"));
 });
 
-test("npm publish uses the dist-tag the VERSION gives (next for a prerelease)", () => {
+test("npm publish names a dist-tag only for a prerelease (next)", () => {
+  // An explicit --tag, even latest, bypasses npm's refusal to move latest to a
+  // lower version, so a stable publish keeps the plain command.
   assert.ok(step(publish, "Release channel from VERSION").includes("node scripts/release-version.mjs channel"));
   const body = step(publish, "Publish to npm");
   assert.match(body, /DIST_TAG: \$\{\{ steps\.channel\.outputs\.npm_dist_tag \}\}/);
-  assert.ok(body.includes('npm publish --access=public --tag "$DIST_TAG"'));
+  assert.ok(body.includes('if [ "$DIST_TAG" != latest ]; then tag=(--tag "$DIST_TAG"); fi'));
+  assert.ok(body.includes('npm publish --access=public ${tag[@]+"${tag[@]}"}'));
+  assert.ok(!body.includes("--tag latest"));
 });
 
 test("a prerelease GitHub release is never Latest", () => {
@@ -71,6 +75,12 @@ test("the latest image tag is for stable releases only", () => {
 test("a prerelease tag never falls back to a guessed stable base", () => {
   const body = step(publish, "Resolve base pineforge-release version");
   assert.ok(body.includes("refusing to guess a stable base"));
+});
+
+test("a stable tag never builds latest on a prerelease base", () => {
+  const body = step(publish, "Resolve base pineforge-release version");
+  assert.ok(body.includes('node scripts/release-version.mjs channel "$rel"'));
+  assert.ok(body.includes("carries the prerelease base"));
 });
 
 test("the MCP Registry gets stable releases only", () => {

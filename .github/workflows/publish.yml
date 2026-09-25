@@ -58,7 +58,12 @@ jobs:
       - name: Publish to npm
         env:
           DIST_TAG: ${{ steps.channel.outputs.npm_dist_tag }}
-        run: npm publish --access=public --tag "$DIST_TAG"
+        run: |
+          # Only a prerelease names its dist-tag (next): an explicit --tag, even
+          # latest, would bypass npm's refusal to move latest to a lower version.
+          tag=()
+          if [ "$DIST_TAG" != latest ]; then tag=(--tag "$DIST_TAG"); fi
+          npm publish --access=public ${tag[@]+"${tag[@]}"}
 
   # Publish a GitHub Release for the tag. Glama's "stable releases" check reads
   # the Releases API (not git tags), so a bare tag isn't enough. Runs only on a
@@ -136,6 +141,11 @@ jobs:
             rel="${rel#v}"
           fi
           semver "$rel" || { echo "::error::bad base release version '$rel'"; exit 1; }
+          # A stable tag also gets :latest, so it must never be built on a prerelease base.
+          base_pre="$(node scripts/release-version.mjs channel "$rel" | sed -n 's/^prerelease=//p')"
+          if [ "$PRERELEASE" = false ] && [ "$base_pre" != false ]; then
+            echo "::error::stable tag ${REF} carries the prerelease base pineforge-release ${rel}; refusing to build :latest on it"; exit 1
+          fi
           # The base image must exist before we build FROM it.
           img="ghcr.io/pineforge-4pass/pineforge-release:${rel}"
           ok=
