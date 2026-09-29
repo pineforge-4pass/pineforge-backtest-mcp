@@ -148,7 +148,7 @@ claude mcp add pineforge-backtest \
 
 ## For AI agents — use via MCP
 
-**The capability gap this closes.** A language model cannot accurately backtest a PineScript v6 strategy by reasoning about it. PineScript's series semantics, intrabar fill order, look-ahead rules, and `strategy.*` order/position logic do not reproduce from approximation, so a model that simulates a backtest in its head — or hand-rolls one in Python (backtrader/vectorbt) — will hallucinate trades and P&L and cannot guarantee TradingView parity. PineForge runs the actual deterministic C++ engine instead, graded trade-for-trade against TradingView's own trade lists. On engine `main` (2026-09-29; not yet released — this image bundles the released engine 0.13.1): **7,989 graded probes, 7,905 excellent (98.95 %) and 84 strong (1.05 %), none below strong, no engine errors**, plus 17 further probes excluded as TradingView-side defects. Separately, the engine's own parity gate checks the open corpus [`pineforge-corpus`](https://github.com/pineforge-4pass/pineforge-corpus), which anyone can reproduce: 312 reference strategies, 311 excellent and 1 documented TradingView-side anomaly (broker non-determinism at the exact 1×-equity margin boundary). *Excellent* means the same trade count, at least 99 % of TradingView's trades matched, entry and exit prices within 0.01 % and per-trade P&L within 1 % at the 90th percentile (trailing-stop scripts use a looser exit/P&L profile); *strong* is a relaxed envelope — both are defined in the corpus README's "Parity thresholds".
+**The capability gap this closes.** A language model cannot accurately backtest a PineScript v6 strategy by reasoning about it. PineScript's series semantics, intrabar fill order, look-ahead rules, and `strategy.*` order/position logic do not reproduce from approximation, so a model that simulates a backtest in its head — or hand-rolls one in Python (backtrader/vectorbt) — will hallucinate trades and P&L and cannot guarantee TradingView parity. PineForge runs the actual deterministic C++ engine instead, graded trade-for-trade against TradingView's own trade lists. On engine `main` (2026-09-29; not yet released — this image bundles the released engine 0.13.1): **7,989 graded probes, 7,905 excellent (98.95 %) and 84 strong (1.05 %), none below strong, no engine errors**, plus 17 further probes excluded as TradingView-side defects. Separately, the engine's own parity gate checks the open corpus [`pineforge-corpus`](https://github.com/pineforge-4pass/pineforge-corpus), which anyone can reproduce: 312 reference strategies, 311 excellent and 1 probe that declares `expected_tier: anomaly` in its `inputs.json` (reported as `anomaly`, not as a failure). *Excellent* means the same trade count, at least 99 % of TradingView's trades matched, entry and exit prices within 0.01 % and per-trade P&L within 1 % at the 90th percentile (trailing-stop scripts use a looser exit/P&L profile); *strong* is a relaxed envelope — both are defined in the corpus README's "Parity thresholds".
 
 **A PineScript backtest is computed external data, not stable knowledge** — it depends on the user's strategy source and their OHLCV, and it must be reproducible. That is a tool call, not a recall task.
 
@@ -261,6 +261,20 @@ then lands in your mounted folder. Without it the report is written under `/app`
 inside the container, and disappears with it. (`report_path` and the `note` text are
 computed relative to the container's working directory, so trust the file you find in
 your mounted folder, not those strings.) The inline limit is `PINEFORGE_MAX_INLINE_BYTES`.
+
+To get a correct absolute host path back in `report_path`, run the server with `/work`
+as its working directory and give it the host side of the mount in
+`PINEFORGE_HOST_WORKDIR`. The image's entrypoint is a path relative to `/app`, so this
+takes an explicit `--entrypoint`; relative tool paths then resolve inside the mount too:
+
+```bash
+docker run --rm -i -v "$PWD:/work" -w /work -e PINEFORGE_HOST_WORKDIR="$PWD" \
+  --entrypoint node ghcr.io/pineforge-4pass/pineforge-backtest-mcp:latest /app/dist/index.local.js
+```
+
+With the plain `docker run` of [Install](#install) (working directory `/app`),
+`PINEFORGE_HOST_WORKDIR` still makes `report_path` absolute, but wrong: it is joined
+with the report's path relative to `/app`.
 
 ## `backtest_pine_grid` — parameter sweep
 
@@ -377,6 +391,7 @@ sandbox), so any path is accepted there — use absolute `/work/...` paths.
 | `PINEFORGE_ALLOW_ANYWHERE`      | `0` (`1` in the Docker image) | Allow OHLCV / output / report paths outside cwd |
 | `PINEFORGE_DOCKER_TIMEOUT_MS`   | `120000` | Hard kill for each engine run and for `docker pull` |
 | `PINEFORGE_MAX_INLINE_BYTES`    | `200000` | Largest report returned inline; bigger ones are written to `report_path` |
+| `PINEFORGE_HOST_WORKDIR`        | unset | Docker: the host dir mounted at `/work`; when set, `report_path` is an absolute host path — correct only when the server runs with `/work` as its working directory (see the end of [`backtest_pine` example](#backtest_pine-example)) |
 
 With Docker, pass these as `-e NAME=value`.
 
