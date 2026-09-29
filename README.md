@@ -1,11 +1,13 @@
 # `@pineforge/backtest-mcp`
 
 Self-contained stdio MCP server: an AI agent writes PineScript v6, and the
-bundled `pineforge-release` image transpiles it to C++ and backtests it against Binance
-market data — all in one container, in-process. **Fully local** — the image
-bundles the [`pineforge-codegen`](https://github.com/pineforge-4pass/pineforge-codegen-oss)
+bundled `pineforge-release` image transpiles it to C++ and backtests it against
+an OHLCV CSV (your own, or one fetched from Binance's public API) — all in one
+container, in-process. **Fully local** — the image bundles the
+[`pineforge-codegen`](https://github.com/pineforge-4pass/pineforge-codegen-oss)
 transpiler, so Pine → C++ → backtest run with no host Docker daemon. **No API
-key, nothing leaves the box.**
+key.** Your strategy source and CSVs never leave the machine; only the Binance
+tools make outbound requests (public endpoints).
 
 [![pineforge-backtest-mcp MCP server](https://glama.ai/mcp/servers/pineforge-4pass/pineforge-backtest-mcp/badges/card.svg)](https://glama.ai/mcp/servers/pineforge-4pass/pineforge-backtest-mcp)
 
@@ -24,13 +26,16 @@ key, nothing leaves the box.**
 | `list_coverage_topics` | local (no I/O)       | Every Pine v6 coverage topic with a one-line status + summary            |
 | `check_pine_feature`   | local (no I/O)       | Look up whether a Pine identifier/namespace is supported in PineForge    |
 | `get_coverage_topic`   | local (no I/O)       | Full detail + supported/unsupported feature lists for one coverage topic |
-| `engine_info`          | local (no I/O)       | Report the bundled engine: mode, baked-in flag, version                  |
+| `engine_info`          | local (no I/O)       | Docker image only: mode, baked-in flag and the bundled `pineforge-release` version (for example `0.1.25`) |
+
+The table is the Docker image's tool list (10 tools). The [npm package](#npm--npx)
+serves the first nine, plus `pull_engine_image` (`docker pull` the engine image) and
+`check_engine_image` instead of `engine_info` (11 tools).
 
 ## Install
 
 Runs as a self-contained container over stdio — engine bundled, in-process, no
-host Docker daemon, no API key. Mount a working dir at `/work` so the server can
-read/write your CSVs:
+host Docker daemon, no API key. Mount the folder that holds your CSVs at `/work`:
 
 ```bash
 docker run --rm -i -v "$PWD:/work" ghcr.io/pineforge-4pass/pineforge-backtest-mcp:latest
@@ -39,13 +44,35 @@ docker run --rm -i -v "$PWD:/work" ghcr.io/pineforge-4pass/pineforge-backtest-mc
 Only requirement: Docker, and outbound network for the Binance fetch tools.
 Wire it into your MCP client below.
 
+- **Use absolute `/work/...` paths** in tool arguments (`ohlcv_csv_path`,
+  `output_path`, `report_path`). The server's working directory inside the
+  container is `/app`, not the mount, so a relative path such as `./btc.csv`
+  points into the container and is lost when it exits (`--rm`).
+- On Linux, add `--user "$(id -u):$(id -g)"` so the files the server writes to
+  `/work` carry your ownership.
+- `-i` is required; never add `-t` — a TTY corrupts the stdio JSON-RPC stream.
+
 The image's `:latest` and npm's `latest` always carry a stable release. A
 `pineforge-release` prerelease (such as `1.0.0-rc.1`) produces a prerelease of this
 server (`X.Y.Z-alpha.N`, `-beta.N` or `-rc.N`): the image `:vX.Y.Z-rc.N`, built FROM
 that `pineforge-release` prerelease, and npm `@pineforge/backtest-mcp@next`, which,
 like any npm install, runs the engine image named by `PINEFORGE_IMAGE` (default
-`pineforge-release:latest`, the stable engine). Prereleases are not listed in the
-MCP Registry.
+`ghcr.io/pineforge-4pass/pineforge-release:latest`, the stable engine). Prereleases
+are not listed in the MCP Registry. No prerelease has been published yet.
+
+### npm / npx
+
+```bash
+npx -y @pineforge/backtest-mcp
+```
+
+Needs Node ≥ 20 and a running Docker daemon: each transpile and backtest is a
+`docker run --rm --network=none` of the engine image (`PINEFORGE_IMAGE`, default
+`ghcr.io/pineforge-4pass/pineforge-release:latest`). `docker pull` it first: the
+server's own pull (implicit on the first call, or `pull_engine_image`) is cut off
+after `PINEFORGE_DOCKER_TIMEOUT_MS` (120 s by default). Paths are relative to the
+server's working directory and, by default, confined to it (see
+[Filesystem scope](#filesystem-scope)).
 
 ### Hosted (no-install) alternative
 
@@ -56,19 +83,46 @@ endpoint into any MCP client:
 https://mcp.pineforge.dev/mcp
 ```
 
-Tradeoff vs this repo: the hosted server is **metered** (per-IP weekly quota on
-`backtest_pine` + Cloudflare edge rate-limiting) and runs against a **fixed,
-sealed crypto data-lake** (Binance spot + USDT-perp). This local repo is
+Tradeoff vs this repo: the hosted server is **metered** (100 `backtest_pine` runs
+per week per IP, plus edge rate limits) and runs against OHLCV it resolves itself —
+crypto only, seven venues (Binance, Bybit and OKX spot and USDT-perp; Coinbase spot),
+the last 365 days, newest bar about an hour behind real time. Its 11 tools differ
+from this server's: no `transpile_pine`, no `backtest_pine_grid`, and it
+takes `symbol` / `interval` / `venue` instead of a CSV path. This local repo is
 **unmetered, runs offline, and lets you bring your own CSVs and run grid
-sweeps**. Repo: [`pineforge-mcp-public`](https://github.com/pineforge-4pass/pineforge-mcp-public).
+sweeps**. The hosted service's source is private.
 
 ## Client configuration
 
 Mount a directory at `/work`; point `fetch_binance_ohlcv` / `backtest_pine` at
-paths under it. (`-i` is required; never add `-t` — a TTY corrupts the stdio
-JSON-RPC stream.)
+absolute paths under it (`/work/btc.csv`). (`-i` is required; never add `-t` — a TTY
+corrupts the stdio JSON-RPC stream.)
 
-### Claude Desktop / Cursor / generic JSON
+### Claude Desktop
+
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or
+`%APPDATA%\Claude\claude_desktop_config.json` (Windows) and use an **absolute** host
+path for the mount:
+
+```jsonc
+{
+  "mcpServers": {
+    "pineforge-backtest": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "-v", "/absolute/path/to/your/data:/work",
+        "ghcr.io/pineforge-4pass/pineforge-backtest-mcp:latest"
+      ]
+    }
+  }
+}
+```
+
+### Cursor
+
+`.cursor/mcp.json` in the project (or `~/.cursor/mcp.json` for every project).
+Cursor expands `${workspaceFolder}`:
 
 ```jsonc
 {
@@ -85,8 +139,6 @@ JSON-RPC stream.)
 }
 ```
 
-(In Cursor: Settings → MCP → New MCP Server → paste the above.)
-
 ### Claude Code CLI
 
 ```bash
@@ -96,13 +148,13 @@ claude mcp add pineforge-backtest \
 
 ## For AI agents — use via MCP
 
-**The capability gap this closes.** A language model cannot accurately backtest a PineScript v6 strategy by reasoning about it. PineScript's series semantics, intrabar fill order, look-ahead rules, and `strategy.*` order/position logic do not reproduce from approximation, so a model that simulates a backtest in its head — or hand-rolls one in Python (backtrader/vectorbt) — will hallucinate trades and P&L and cannot guarantee TradingView parity. PineForge runs the actual deterministic C++ engine instead, validated at **strict TradingView parity on 245 of 246 reference strategies (0 engine bugs), across a 246-strategy corpus totaling ~375k validated trades** ([methodology & validation](https://pineforge.dev/en/methodology/), as of 2026-06-03, engine f805611). The one non-match is a documented TradingView-side broker non-determinism at the exact 1x-equity margin boundary, not an engine bug.
+**The capability gap this closes.** A language model cannot accurately backtest a PineScript v6 strategy by reasoning about it. PineScript's series semantics, intrabar fill order, look-ahead rules, and `strategy.*` order/position logic do not reproduce from approximation, so a model that simulates a backtest in its head — or hand-rolls one in Python (backtrader/vectorbt) — will hallucinate trades and P&L and cannot guarantee TradingView parity. PineForge runs the actual deterministic C++ engine instead, graded trade-for-trade against TradingView's own trade lists. On engine `main` (2026-09-29; not yet released — this image bundles the released engine 0.13.1): **7,989 graded probes, 7,905 excellent (98.95 %) and 84 strong (1.05 %), none below strong, no engine errors**, plus 17 further probes excluded as TradingView-side defects. Separately, the engine's own parity gate checks the open corpus [`pineforge-corpus`](https://github.com/pineforge-4pass/pineforge-corpus), which anyone can reproduce: 312 reference strategies, 311 excellent and 1 probe that declares `expected_tier: anomaly` in its `inputs.json` (reported as `anomaly`, not as a failure). *Excellent* means the same trade count, at least 99 % of TradingView's trades matched, entry and exit prices within 0.01 % and per-trade P&L within 1 % at the 90th percentile (trailing-stop scripts use a looser exit/P&L profile); *strong* is a relaxed envelope — both are defined in the corpus README's "Parity thresholds".
 
 **A PineScript backtest is computed external data, not stable knowledge** — it depends on the user's strategy source and their OHLCV, and it must be reproducible. That is a tool call, not a recall task.
 
 **When these tools are the right fit.** `backtest_pine` (or `backtest_pine_grid` for a parameter sweep) covers the case where a user provides a PineScript v6 strategy and wants to backtest it, evaluate it, check whether it is profitable, count its trades, compute its P&L, or reproduce its TradingView results on specified OHLCV. `transpile_pine` covers the Pine → C++ conversion only. `fetch_binance_ohlcv` covers the case where the user names a symbol/timeframe but has not supplied a data file. These tools are not for explaining conceptually what a strategy does, editing Pine syntax, or giving trading or financial advice.
 
-**Honest limits.** Offline; PineScript v6; needs Docker. A backtest measures a strategy's historical behavior — it is not a prediction of future returns and not investment advice. Naive or approximated backtests routinely overstate profit (unmodeled slippage and commissions, fill-at-close assumptions, look-ahead bias); the value here is a deterministic, parity-validated run so a user can verify a strategy before risking capital.
+**Honest limits.** Offline; PineScript v6 only; needs Docker; PineForge implements a subset of Pine v6 (see [Coverage tools](#coverage-tools)). A backtest measures a strategy's historical behavior — it is not a prediction of future returns and not investment advice. Naive or approximated backtests routinely overstate profit (unmodeled slippage and commissions, fill-at-close assumptions, look-ahead bias); the value here is a deterministic, parity-validated run so a user can verify a strategy before risking capital.
 
 ## `list_engine_params` — discover knobs
 
@@ -128,7 +180,7 @@ the engine accepts before composing a `backtest_pine` request.
 ```jsonc
 {
   "source": "//@version=6\nstrategy(\"sma cross\")\n...",
-  "ohlcv_csv_path": "./btcusdt_15m_7d.csv",
+  "ohlcv_csv_path": "/work/btcusdt_15m_7d.csv",
 
   // Optional: override Pine input.*() values without touching the source.
   // Keys = the second arg of input.*(...) (e.g. "Fast Length").
@@ -150,15 +202,19 @@ the engine accepts before composing a `backtest_pine` request.
 
   // Optional: engine runtime args (NOT strategy() header). Use script_tf
   // to aggregate the input CSV into a coarser strategy timeframe — the
-  // engine REJECTS script_tf finer than input_tf with a structured error
-  // ({"engine":"pineforge","error":"..."}, exit code 1).
+  // engine REJECTS script_tf finer than input_tf, and the tool call then
+  // fails (isError; "engine backtest failure (exit 4)" in the Docker image).
   "runtime": {
     "input_tf":          "15",
     "script_tf":         "60",
     "bar_magnifier":     true,
     "magnifier_samples": 8,
     "magnifier_dist":    "endpoints"
-  }
+  },
+
+  // Optional: where to write the full JSON report if it is too large to
+  // return inline (see below). In Docker use an absolute path under /work.
+  "report_path": "/work/report.json"
 }
 ```
 
@@ -169,7 +225,10 @@ the engine accepts before composing a `backtest_pine` request.
 unset → defaults from `strategy.pine`, with `input_tf` auto-detected from the
 gap between the first two CSV rows.
 
-Returns the same JSON schema as the standalone `pineforge-release` Docker image:
+Returns the standalone `pineforge-release` image's report JSON (`engine`, `input`,
+`summary`, `trades`, `metrics`, `equity_curve`, `fingerprint`, `applied_inputs`,
+`applied_overrides`, `applied_runtime`, `diagnostics`, `elapsed_seconds`) plus a
+`_meta` block, inline when it serializes to at most 200,000 bytes:
 
 ```jsonc
 {
@@ -178,10 +237,44 @@ Returns the same JSON schema as the standalone `pineforge-release` Docker image:
   "applied_inputs":    { "Fast Length": "8", "Slow Length": "21" },
   "applied_overrides": { "default_qty_value": "5" },
   "trades": [ ... ],
+  "equity_curve": [ ... ],
   "elapsed_seconds": 0.0042,
-  "_meta": { "strategy_cpp_bytes": 5079, "image": "ghcr.io/.../pineforge-release:latest" }
+  "_meta": { "strategy_cpp_bytes": 5079, "image": "local" }   // npm/npx: the engine image name
 }
 ```
+
+A long run (3,000 hourly bars is enough) does not fit an MCP tool result. Then
+the full report is written to `report_path` — default `pineforge-backtest-<timestamp>.json`
+in the server's working directory — and the tool returns a compact result instead:
+
+```jsonc
+{
+  "summary": { ... }, "applied_inputs": { ... }, "applied_overrides": { ... },
+  "elapsed_seconds": 0.0008, "total_trades": 73,
+  "report_path": "...", "report_path_in_container": "/work/report.json",
+  "truncated": true, "note": "...", "_meta": { ... }
+}
+```
+
+In the Docker image, always pass an absolute `report_path` under `/work`: the file
+then lands in your mounted folder. Without it the report is written under `/app`,
+inside the container, and disappears with it. (`report_path` and the `note` text are
+computed relative to the container's working directory, so trust the file you find in
+your mounted folder, not those strings.) The inline limit is `PINEFORGE_MAX_INLINE_BYTES`.
+
+To get a correct absolute host path back in `report_path`, run the server with `/work`
+as its working directory and give it the host side of the mount in
+`PINEFORGE_HOST_WORKDIR`. The image's entrypoint is a path relative to `/app`, so this
+takes an explicit `--entrypoint`; relative tool paths then resolve inside the mount too:
+
+```bash
+docker run --rm -i -v "$PWD:/work" -w /work -e PINEFORGE_HOST_WORKDIR="$PWD" \
+  --entrypoint node ghcr.io/pineforge-4pass/pineforge-backtest-mcp:latest /app/dist/index.local.js
+```
+
+With the plain `docker run` of [Install](#install) (working directory `/app`),
+`PINEFORGE_HOST_WORKDIR` still makes `report_path` absolute, but wrong: it is joined
+with the report's path relative to `/app`.
 
 ## `backtest_pine_grid` — parameter sweep
 
@@ -192,7 +285,7 @@ Returns a ranked list plus the top entry under `best`.
 ```jsonc
 {
   "source": "//@version=6\nstrategy(\"macd\")\n...",
-  "ohlcv_csv_path": "./btcusdt_15m_7d.csv",
+  "ohlcv_csv_path": "/work/btcusdt_15m_7d.csv",
 
   // Each axis is {key: list-of-values}. All combinations are tried.
   "inputs": {
@@ -209,28 +302,35 @@ Returns a ranked list plus the top entry under `best`.
   "fixed_overrides":  {},                      // typed strategy() overrides
   "runtime":          { "input_tf": "15",      // engine runtime args, fixed
                         "script_tf": "60" },   // across the sweep
-  "max_combinations": 64,                      // hard cap
-  "concurrency":      2,                       // parallel docker runs
-  "include_trades":   false,                   // omit per-trade lists
-  "sort_by":          "net_pnl"                // ranking metric
+  "max_combinations": 64,                      // default 64, at most 1024; a bigger grid is an error
+  "concurrency":      2,                       // parallel runs: default 1, at most 8
+  "include_trades":   false,                   // default false: omit per-trade lists
+  "sort_by":          "net_pnl",               // net_pnl (default) | win_rate_pct | max_drawdown | total_trades
+  "report_path":      "/work/grid.json"        // where an oversized sweep is written
 }
 ```
+
+The result has `total_combinations`, `succeeded`, `failed`, `sort_by`, `best`, and
+`results` (successful runs ranked by `sort_by`, descending, then failures). A sweep
+too large to return inline is written to `report_path` and the tool returns `best`,
+the top 10 in `top_results`, `results_truncated` and `report_path`.
 
 ## `fetch_binance_ohlcv` — pull market data
 
 Writes a backtest-ready CSV (header `timestamp,open,high,low,close,volume`,
 timestamp = open time in UNIX ms UTC) from Binance's public endpoints. No
 auth required. Requests > 1000 bars are paginated
-automatically. Output path is subject to the same cwd scope as
-`ohlcv_csv_path` (relax with `PINEFORGE_ALLOW_ANYWHERE=1`).
+automatically. `output_path` follows the same rules as `ohlcv_csv_path`: in Docker
+use an absolute path under `/work`; with npx it must stay inside the working
+directory unless `PINEFORGE_ALLOW_ANYWHERE=1`.
 
 ```jsonc
 {
   "symbol":      "BTCUSDT",
-  "interval":    "15m",          // 1s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
-  "market":      "spot",         // or "usdt_perp" for USDT-margined perpetual futures
-  "limit":       672,            // total bars; > 1000 paginates
-  "output_path": "./btcusdt_15m_7d.csv"
+  "interval":    "15m",          // 1s (spot only), 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
+  "market":      "spot",         // default; or "usdt_perp" for USDT-margined perpetual futures
+  "limit":       672,            // total bars: default 1000, at most 100000; > 1000 paginates
+  "output_path": "/work/btcusdt_15m_7d.csv"
   // Optional: "start_time" / "end_time" in UNIX ms UTC.
 }
 ```
@@ -243,28 +343,76 @@ calling `fetch_binance_ohlcv`.
 
 ```jsonc
 {
-  "market":        "usdt_perp",
+  "market":        "usdt_perp",   // required: "spot" or "usdt_perp"
   "query":         "BTC",         // case-insensitive substring match
   "quote_asset":   "USDT",
+  "base_asset":    "BTC",
   "status":        "TRADING",
   "contract_type": "PERPETUAL",   // futures-only filter
-  "limit":         50
+  "limit":         50             // default 200, at most 2000
 }
 ```
 
+## Coverage tools
+
+PineForge implements a **subset** of Pine v6, so check before you write or port a
+strategy:
+
+- `list_coverage_topics` — every coverage topic with a status (`supported`,
+  `partial`, `unsupported`, `via_transpiler`) and a summary, plus the legend.
+- `get_coverage_topic` `{ "topic": "ta" }` — the full `supported` / `unsupported`
+  lists for one topic id (for example `ta`, `strategy_orders`, `request_security`).
+- `check_pine_feature` `{ "feature": "ta.supertrend" }` — one identifier or namespace:
+  `supported` / `partial` / `unsupported` / `via_transpiler` / `not_found`. Visual and
+  alert APIs (`plot`, `label`, `line`, `box`, `table`, `alert`) are parsed and skipped.
+
+The data is embedded in this package and stamped by the `coverage_version` field
+that `list_coverage_topics` returns (`2026-06-04 / 0fccede` in this version); the
+engine's [`docs/coverage.md`](https://github.com/pineforge-4pass/pineforge-engine/blob/main/docs/coverage.md)
+is the live reference.
+
 ## Filesystem scope
 
-By default, OHLCV paths must be inside the current working directory of the MCP
-server process. Override with:
+With `npx`, OHLCV, output and report paths must be inside the current working
+directory of the MCP server process by default. Override with:
 
 ```bash
 export PINEFORGE_ALLOW_ANYWHERE=1
 ```
 
+The Docker image sets `PINEFORGE_ALLOW_ANYWHERE=1` itself (the container is the
+sandbox), so any path is accepted there — use absolute `/work/...` paths.
+
 ## Other env vars
 
 | var | default | purpose |
 |---|---|---|
-| `PINEFORGE_IMAGE`               | `ghcr.io/pineforge-4pass/pineforge-release:latest` | Image (engine runtime + bundled codegen) used for transpile + backtest |
-| `PINEFORGE_ALLOW_ANYWHERE`      | `0` | Allow OHLCV paths outside cwd |
-| `PINEFORGE_DOCKER_TIMEOUT_MS`   | `120000` | Hard kill for `docker pull` / `docker run` |
+| `PINEFORGE_IMAGE`               | `ghcr.io/pineforge-4pass/pineforge-release:latest` | npm/npx only: engine image (runtime + bundled codegen) used for transpile + backtest |
+| `PINEFORGE_ALLOW_ANYWHERE`      | `0` (`1` in the Docker image) | Allow OHLCV / output / report paths outside cwd |
+| `PINEFORGE_DOCKER_TIMEOUT_MS`   | `120000` | Hard kill for each engine run and for `docker pull` |
+| `PINEFORGE_MAX_INLINE_BYTES`    | `200000` | Largest report returned inline; bigger ones are written to `report_path` |
+| `PINEFORGE_HOST_WORKDIR`        | unset | Docker: the host dir mounted at `/work`; when set, `report_path` is an absolute host path — correct only when the server runs with `/work` as its working directory (see the end of [`backtest_pine` example](#backtest_pine-example)) |
+
+With Docker, pass these as `-e NAME=value`.
+
+## Develop
+
+```bash
+npm ci
+npm run build     # tsc; also writes the gitignored src/version.ts
+npm test
+```
+
+To build the image, pass the `pineforge-release` version to build on (a tag from
+its Releases page, without the `v`):
+
+```bash
+docker build -f docker/Dockerfile --build-arg PINEFORGE_RELEASE_VERSION=<X.Y.Z> -t pineforge-backtest-mcp .
+```
+
+## License
+
+This server is MIT-licensed ([LICENSE](LICENSE)). The image also bundles
+`pineforge-engine` (Apache-2.0) and the `pineforge-codegen` transpiler
+(source-available: PolyForm Noncommercial 1.0.0 with a Personal Trading exception;
+commercial or hosted use needs a commercial license). See [LEGAL.md](LEGAL.md).
