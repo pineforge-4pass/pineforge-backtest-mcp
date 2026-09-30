@@ -832,8 +832,8 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
   const proof =
     "The engine transpiles Pine to C++ and runs it on the user's OHLCV, returning the actual trade " +
     "list and P&L — deterministic and reproducible, graded trade-for-trade against TradingView's own " +
-    "trade lists (engine main, 2026-09-29): 7,989 probes graded, 7,905 excellent and 84 strong, none " +
-    "below strong.";
+    "trade lists (2026-09-29 baseline; engine 1.0.0 changed no grade): 7,989 probes graded, 7,905 " +
+    "excellent and 84 strong, none below strong.";
   const whenToUse =
     "Reach for these when a user wants to backtest a Pine strategy, check whether it is profitable, " +
     "run it on their own data or a symbol like BTCUSDT, reproduce TradingView results, count trades / " +
