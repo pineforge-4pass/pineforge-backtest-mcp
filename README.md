@@ -26,7 +26,7 @@ tools make outbound requests (public endpoints).
 | `list_coverage_topics` | local (no I/O)       | Every Pine v6 coverage topic with a one-line status + summary            |
 | `check_pine_feature`   | local (no I/O)       | Look up whether a Pine identifier/namespace is supported in PineForge    |
 | `get_coverage_topic`   | local (no I/O)       | Full detail + supported/unsupported feature lists for one coverage topic |
-| `engine_info`          | local (no I/O)       | Docker image only: mode, baked-in flag and the bundled `pineforge-release` version (for example `0.1.25`) |
+| `engine_info`          | local (no I/O)       | Docker image only: mode, baked-in flag and the bundled `pineforge-release` version (for example `1.0.0`) |
 
 The table is the Docker image's tool list (10 tools). The [npm package](#npm--npx)
 serves the first nine, plus `pull_engine_image` (`docker pull` the engine image) and
@@ -58,7 +58,8 @@ server (`X.Y.Z-alpha.N`, `-beta.N` or `-rc.N`): the image `:vX.Y.Z-rc.N`, built 
 that `pineforge-release` prerelease, and npm `@pineforge/backtest-mcp@next`, which,
 like any npm install, runs the engine image named by `PINEFORGE_IMAGE` (default
 `ghcr.io/pineforge-4pass/pineforge-release:latest`, the stable engine). Prereleases
-are not listed in the MCP Registry. No prerelease has been published yet.
+are not listed in the MCP Registry. The first, 0.9.32-rc.1 on `pineforge-release`
+1.0.0-rc.1, was published on 2026-09-30 (image `:v0.9.32-rc.1`, npm `next`).
 
 ### npm / npx
 
@@ -148,7 +149,7 @@ claude mcp add pineforge-backtest \
 
 ## For AI agents — use via MCP
 
-**The capability gap this closes.** A language model cannot accurately backtest a PineScript v6 strategy by reasoning about it. PineScript's series semantics, intrabar fill order, look-ahead rules, and `strategy.*` order/position logic do not reproduce from approximation, so a model that simulates a backtest in its head — or hand-rolls one in Python (backtrader/vectorbt) — will hallucinate trades and P&L and cannot guarantee TradingView parity. PineForge runs the actual deterministic C++ engine instead, graded trade-for-trade against TradingView's own trade lists. On engine `main` (2026-09-29; not yet released — this image bundles the released engine 0.13.1): **7,989 graded probes, 7,905 excellent (98.95 %) and 84 strong (1.05 %), none below strong, no engine errors**, plus 17 further probes excluded as TradingView-side defects. Separately, the engine's own parity gate checks the open corpus [`pineforge-corpus`](https://github.com/pineforge-4pass/pineforge-corpus), which anyone can reproduce: 312 reference strategies, 311 excellent and 1 probe that declares `expected_tier: anomaly` in its `inputs.json` (reported as `anomaly`, not as a failure). *Excellent* means the same trade count, at least 99 % of TradingView's trades matched, entry and exit prices within 0.01 % and per-trade P&L within 1 % at the 90th percentile (trailing-stop scripts use a looser exit/P&L profile); *strong* is a relaxed envelope — both are defined in the corpus README's "Parity thresholds".
+**The capability gap this closes.** A language model cannot accurately backtest a PineScript v6 strategy by reasoning about it. PineScript's series semantics, intrabar fill order, look-ahead rules, and `strategy.*` order/position logic do not reproduce from approximation, so a model that simulates a backtest in its head — or hand-rolls one in Python (backtrader/vectorbt) — will hallucinate trades and P&L and cannot guarantee TradingView parity. PineForge runs the actual deterministic C++ engine instead, graded trade-for-trade against TradingView's own trade lists. At engine `35db01c8` (2026-09-29; engine 1.0.0 includes that commit and changed no grade): **7,989 graded probes, 7,905 excellent (98.95 %) and 84 strong (1.05 %), none below strong, no engine errors**, plus 17 further probes excluded as TradingView-side defects. Separately, the engine's own parity gate checks the open corpus [`pineforge-corpus`](https://github.com/pineforge-4pass/pineforge-corpus), which anyone can reproduce: 312 reference strategies, 311 excellent and 1 probe that declares `expected_tier: anomaly` in its `inputs.json` (reported as `anomaly`, not as a failure). *Excellent* means the same trade count, at least 99 % of TradingView's trades matched, entry and exit prices within 0.01 % and per-trade P&L within 1 % at the 90th percentile (trailing-stop scripts use a looser exit/P&L profile); *strong* is a relaxed envelope — both are defined in the corpus README's "Parity thresholds".
 
 **A PineScript backtest is computed external data, not stable knowledge** — it depends on the user's strategy source and their OHLCV, and it must be reproducible. That is a tool call, not a recall task.
 
