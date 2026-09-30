@@ -962,8 +962,8 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         "(e.g. 'try fast length 8/12/19', 'find the best commission/qty settings') rather than test " +
         "a single configuration — for one fixed configuration use backtest_pine. " +
         "Run a parameter sweep: " + gridWhere + ", " +
-        "then re-run the same compiled strategy against the OHLCV CSV across the " +
-        "cartesian product of `inputs` × `overrides` grids. Returns a ranked list " +
+        "then compile (g++) and backtest that C++ against the OHLCV CSV once per " +
+        "combination in the cartesian product of `inputs` × `overrides` grids. Returns a ranked list " +
         "of {inputs, overrides, summary, elapsed_seconds} entries sorted by `sort_by` " +
         "descending, plus the top entry under `best`. Cap: max_combinations (default " +
         "64). " + concurrencyHelp,
