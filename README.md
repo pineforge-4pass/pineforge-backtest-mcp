@@ -20,7 +20,7 @@ tools make outbound requests (public endpoints).
 | `transpile_pine`       | in-process           | Pine v6 → C++ translation unit (transpile-only)                          |
 | `list_engine_params`   | local (no I/O)       | Catalog of every `overrides` + `runtime` knob accepted by the backtests  |
 | `backtest_pine`        | in-process           | Single backtest of a Pine source against an OHLCV CSV                    |
-| `backtest_pine_grid`   | in-process           | Cartesian sweep of `inputs` × `overrides` reusing one compile            |
+| `backtest_pine_grid`   | in-process           | Cartesian sweep of `inputs` × `overrides`: one transpile, then a compile and a backtest per combination |
 | `fetch_binance_ohlcv`  | Binance public API   | Write a backtest-ready CSV from Binance spot or USDT-perp klines         |
 | `binance_symbols`      | Binance public API   | List / filter Binance symbols (5-min in-process cache)                   |
 | `list_coverage_topics` | local (no I/O)       | Every Pine v6 coverage topic with a one-line status + summary            |
@@ -279,9 +279,10 @@ with the report's path relative to `/app`.
 
 ## `backtest_pine_grid` — parameter sweep
 
-Transpiles the Pine source **once** (locally, in-container) then runs the same
-compiled binary against the cartesian product of `inputs` × `overrides`.
-Returns a ranked list plus the top entry under `best`.
+Transpiles the Pine source **once** (locally, in-container), then compiles and
+runs that C++ for each combination in the cartesian product of `inputs` ×
+`overrides`: every combination is a fresh `g++` build of the same translation
+unit, then its backtest. Returns a ranked list plus the top entry under `best`.
 
 ```jsonc
 {
