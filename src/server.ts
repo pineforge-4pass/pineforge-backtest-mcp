@@ -857,6 +857,9 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
     "run it on their own data or a symbol like BTCUSDT, reproduce TradingView results, count trades / " +
     "win rate / drawdown / profit factor, or compare parameter settings. A backtest is historical " +
     "measurement, not a prediction of future returns, and these tools give no trading or financial advice.";
+  const parityClause =
+    "check_tradingview_parity grades the user's own TradingView Strategy Tester export (List of trades " +
+    "CSV or XLSX report) against a PineForge run of the same script, trade by trade, with the same grader.";
   const localClause = runner.mode === "docker"
     ? "Transpile and backtest run locally via the pineforge-release Docker image; nothing leaves the box, no API key."
     : "Everything runs in-process in this one container — no API key, no host Docker daemon; the user's code and data never leave the machine.";
@@ -865,7 +868,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
     { name: "pineforge-backtest-mcp", version: VERSION },
     {
       capabilities: { tools: {} },
-      instructions: `PineForge backtests PineScript v6 strategies offline and deterministically. ${capabilityGap} ${proof} ${whenToUse} ${localClause}`,
+      instructions: `PineForge backtests PineScript v6 strategies offline and deterministically. ${capabilityGap} ${proof} ${whenToUse} ${parityClause} ${localClause}`,
     }
   );
 

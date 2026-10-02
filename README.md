@@ -7,7 +7,8 @@ container, in-process. **Fully local** — the image bundles the
 [`pineforge-codegen`](https://github.com/pineforge-4pass/pineforge-codegen-oss)
 transpiler, so Pine → C++ → backtest run with no host Docker daemon. **No API
 key.** Your strategy source and CSVs never leave the machine; only the Binance
-tools make outbound requests (public endpoints).
+tools, and `check_tradingview_parity` when you pass no bars, make outbound requests
+(public endpoints).
 
 [![pineforge-backtest-mcp MCP server](https://glama.ai/mcp/servers/pineforge-4pass/pineforge-backtest-mcp/badges/card.svg)](https://glama.ai/mcp/servers/pineforge-4pass/pineforge-backtest-mcp)
 
@@ -21,6 +22,7 @@ tools make outbound requests (public endpoints).
 | `list_engine_params`   | local (no I/O)       | Catalog of every `overrides` + `runtime` knob accepted by the backtests  |
 | `backtest_pine`        | in-process           | Single backtest of a Pine source against an OHLCV CSV                    |
 | `backtest_pine_grid`   | in-process           | Cartesian sweep of `inputs` × `overrides`: one transpile, then a compile and a backtest per combination |
+| `check_tradingview_parity` | in-process (Binance public API only without your bars) | Grade your TradingView Strategy Tester export against PineForge's run of the same script, trade by trade |
 | `fetch_binance_ohlcv`  | Binance public API   | Write a backtest-ready CSV from Binance spot or USDT-perp klines         |
 | `binance_symbols`      | Binance public API   | List / filter Binance symbols (5-min in-process cache)                   |
 | `list_coverage_topics` | local (no I/O)       | Every Pine v6 coverage topic with a one-line status + summary            |
@@ -28,9 +30,9 @@ tools make outbound requests (public endpoints).
 | `get_coverage_topic`   | local (no I/O)       | Full detail + supported/partial/via_transpiler/unsupported lists for one topic |
 | `engine_info`          | local (no I/O)       | Docker image only: mode, baked-in flag and the bundled `pineforge-release` version (for example `1.0.0`) |
 
-The table is the Docker image's tool list (10 tools). The [npm package](#npm--npx)
-serves the first nine, plus `pull_engine_image` (`docker pull` the engine image) and
-`check_engine_image` instead of `engine_info` (11 tools).
+The table is the Docker image's tool list (11 tools). The [npm package](#npm--npx)
+serves the first ten, plus `pull_engine_image` (`docker pull` the engine image) and
+`check_engine_image` instead of `engine_info` (12 tools).
 
 ## Install
 
@@ -153,7 +155,7 @@ claude mcp add pineforge-backtest \
 
 **A PineScript backtest is computed external data, not stable knowledge** — it depends on the user's strategy source and their OHLCV, and it must be reproducible. That is a tool call, not a recall task.
 
-**When these tools are the right fit.** `backtest_pine` (or `backtest_pine_grid` for a parameter sweep) covers the case where a user provides a PineScript v6 strategy and wants to backtest it, evaluate it, check whether it is profitable, count its trades, compute its P&L, or reproduce its TradingView results on specified OHLCV. `transpile_pine` covers the Pine → C++ conversion only. `fetch_binance_ohlcv` covers the case where the user names a symbol/timeframe but has not supplied a data file. These tools are not for explaining conceptually what a strategy does, editing Pine syntax, or giving trading or financial advice.
+**When these tools are the right fit.** `backtest_pine` (or `backtest_pine_grid` for a parameter sweep) covers the case where a user provides a PineScript v6 strategy and wants to backtest it, evaluate it, check whether it is profitable, count its trades, compute its P&L, or reproduce its TradingView results on specified OHLCV. `transpile_pine` covers the Pine → C++ conversion only. `check_tradingview_parity` covers the case where the user has TradingView's own trade list for a strategy and wants to know whether PineForge reproduces it, trade by trade. `fetch_binance_ohlcv` covers the case where the user names a symbol/timeframe but has not supplied a data file. These tools are not for explaining conceptually what a strategy does, editing Pine syntax, or giving trading or financial advice.
 
 **Honest limits.** Offline; PineScript v6 only; needs Docker; PineForge implements a subset of Pine v6 (see [Coverage tools](#coverage-tools)). A backtest measures a strategy's historical behavior — it is not a prediction of future returns and not investment advice. Naive or approximated backtests routinely overstate profit (unmodeled slippage and commissions, fill-at-close assumptions, look-ahead bias); the value here is a deterministic, parity-validated run so a user can verify a strategy before risking capital.
 
@@ -317,6 +319,97 @@ The result has `total_combinations`, `succeeded`, `failed`, `sort_by`, `best`, a
 too large to return inline is written to `report_path` and the tool returns `best`,
 the top 10 in `top_results`, `results_truncated` and `report_path`.
 
+## `check_tradingview_parity` — grade your TradingView results
+
+Give it a Pine v6 script and TradingView's own Strategy Tester export for it. It
+runs the script on the same market and window and grades the two trade lists
+trade by trade with the grader behind PineForge's published parity figures:
+`scripts/verify_corpus.py` of pineforge-engine v1.0.1 (sha256
+`de84d5150ac0a29b67906f1f8b6fe1f1f13ac66ed36be88ea2bc63d7280ed298`), run through
+the corpus gate's own harness (`scripts/run_strategy.py`). Both are vendored
+unchanged under [`parity/vendor/`](parity/vendor/SHA256SUMS).
+
+```jsonc
+{
+  "pine": "//@version=6\nstrategy(\"my strategy\")\n...",
+  // The "List of trades" CSV as TradingView exports it, or the Strategy Tester
+  // XLSX report base64-encoded (it starts with UEsDB).
+  "tradingview_trades": "Trade number,Type,Date and time,Signal,Price USDT,...",
+  "symbol": "BINANCE:ETHUSDT.P",          // TradingView ticker
+  "timeframe": "15",                      // TradingView resolution: 1, 5, 15, 60, 240, 1D, ...
+  "range_start": "2025-04-01T00:00:00Z",  // first bar TradingView computed (UTC unless an offset is given)
+  "chart_timezone": "Asia/Taipei",        // the timezone TradingView printed the trade times in
+
+  // Optional:
+  "range_end": "2025-10-01T00:00:00Z",    // default: the export's last row
+  "inputs": { "Fast Length": 8 },         // TradingView's Inputs tab, as in backtest_pine
+  "strategy_overrides": { "commission_value": 0.04 },  // TradingView's Properties tab (list_engine_params)
+  "runtime": { "bar_magnifier": true },   // list_engine_params runtime args
+  "max_mismatches": 10,                   // mismatching trades to list: default 10, at most 50
+  "ohlcv_csv_path": "/work/eth_15m.csv"   // or "ohlcv_csv": "<CSV text>": your own bars
+}
+```
+
+| input | notes |
+|---|---|
+| `pine` | Pine v6 source, at most 256 KiB |
+| `tradingview_trades` | "List of trades" CSV text (columns `Trade number`, `Type`, `Date and time`, a `Price` column), or the XLSX report as base64 |
+| `symbol` | TradingView ticker; required unless the XLSX states it or you pass bars |
+| `timeframe` | TradingView resolution; required unless the XLSX states it |
+| `range_start` | ISO 8601 date or datetime of the first bar of the backtest; required unless the XLSX states it |
+| `range_end` | optional; default: the export's last row (the result says so) |
+| `chart_timezone` | IANA name of the timezone the trade times are printed in (`UTC+8` style offsets are accepted); required unless the export states it; TradingView's "Exchange" setting is not guessed |
+| `inputs`, `strategy_overrides`, `runtime` | optional, the same keys as `backtest_pine` |
+| `max_mismatches` | optional, default 10, at most 50 |
+| `ohlcv_csv` / `ohlcv_csv_path` | your bars, so any market works: `timestamp,open,high,low,close,volume` (epoch ms) or TradingView's chart export `time,open,high,low,close,Volume` (epoch seconds or ISO 8601); paths follow the [`backtest_pine` rules](#filesystem-scope) |
+
+**Bars.** Your `ohlcv_csv` / `ohlcv_csv_path` when given. Otherwise `BINANCE:<SYMBOL>`
+is fetched as Binance spot klines and `BINANCE:<SYMBOL>.P` as USDT-M perpetual klines,
+from the public API, at most 100,000 bars. Any other symbol without bars is an error
+that asks for them.
+
+**XLSX report.** The "List of trades" sheet is read as the CSV would be (Excel dates
+become `YYYY-MM-DD HH:MM`). The "Properties" sheet supplies the symbol, timeframe,
+date range, initial capital, order size, pyramiding, commission, slippage and the fill
+options it states; you can pass the same settings explicitly, but a value that
+disagrees with the export is an error naming both. Strategy inputs listed in the
+export are reported, not applied: pass `inputs` for any you changed. TradingView does
+not document this layout, so sheet and key names are matched loosely and unknown keys
+are ignored.
+
+**Result.** A plain-text block and the same data as JSON (`structuredContent`): the
+tier and what it means, every check with its value and thresholds, how many trades
+matched and how many are TradingView-only or PineForge-only, the first mismatches side
+by side with a hint where the data shows one (window edge, a position open at the range
+end, size, commission or slippage, timezone), a timezone check, the window, and the
+engine, codegen and grader versions. Trades pair when they have the same direction, an
+entry within one hour and an entry price within $3. If most matched trades sit at the
+same non-zero offset, or another timezone matches clearly more trades, the result says
+so; the tier stays the one under the timezone you gave.
+
+**Tiers**, as `verify_corpus.py` v1.0.1 grades them. Count Δ is
+`|TradingView − PineForge| / max(TradingView, PineForge)` trades; the p90 values are
+90th percentiles of per-trade relative differences over matched trades; coverage is
+matched trades over all closed TradingView trades.
+
+| tier | rule |
+|---|---|
+| excellent | equal trade counts; coverage ≥ 99 % or at most 1 unmatched trade; entry price p90 < 0.01 %; exit price p90 < 0.01 % (production profile: < 0.05 %); P&L p90 < 1 % (production profile: < 100 %); where TradingView shows several entries at one time and price, PineForge has as many |
+| strong | coverage ≥ 95 % or at most 1 unmatched trade; count Δ < 6 %; entry price p90 < 0.1 %; exit price p90 < 0.5 %; P&L p90 < 100 % |
+| moderate | coverage ≥ 75 % and at least 90 % of TradingView's trades matched |
+| weak | at least one trade matched |
+| minimal | no trade matched |
+
+The production profile applies when the script sets `trail_points`, `trail_offset` or
+`trail_price` on `strategy.exit`; every other script is graded on the strict profile.
+Method: <https://pineforge.dev/en/methodology/>.
+
+**Retention.** Everything runs on your machine; market data is fetched from Binance
+only when you do not pass bars. The script, the trade list and the bars go to a
+temporary folder that is deleted when the check ends. With npm/npx the check runs in
+the engine image (`docker run --network=none`, the grading core and your bars mounted
+read-only).
+
 ## `fetch_binance_ohlcv` — pull market data
 
 Writes a backtest-ready CSV (header `timestamp,open,high,low,close,volume`,
@@ -403,6 +496,7 @@ sandbox), so any path is accepted there — use absolute `/work/...` paths.
 | `PINEFORGE_ALLOW_ANYWHERE`      | `0` (`1` in the Docker image) | Allow OHLCV / output / report paths outside cwd |
 | `PINEFORGE_DOCKER_TIMEOUT_MS`   | `120000` | Hard kill for each engine run and for `docker pull` |
 | `PINEFORGE_MAX_INLINE_BYTES`    | `200000` | Largest report returned inline; bigger ones are written to `report_path` |
+| `PINEFORGE_PARITY_TIMEOUT_MS`   | `600000` | Time limit of one `check_tradingview_parity` run (transpile, compile, backtest, grading) |
 | `PINEFORGE_HOST_WORKDIR`        | unset | Docker: the host dir mounted at `/work`; when set, `report_path` is an absolute host path — correct only when the server runs with `/work` as its working directory (see the end of [`backtest_pine` example](#backtest_pine-example)) |
 
 With Docker, pass these as `-e NAME=value`.
