@@ -358,10 +358,11 @@ def last_lines(text: str, n: int = 12) -> str:
 
 # --- mismatches -----------------------------------------------------------
 
-def replay(jail: Path, meta: dict, tz) -> dict:
+def replay(jail: Path, meta: dict, tz, eng_raw_all=None) -> dict:
     """analyze_strategy's pairing steps, with its own functions."""
     tv_raw_all = vc.parse_trades(jail / str(meta.get("tv_trades_csv", "tv_trades.csv")), tz=tz)
-    eng_raw_all = vc.parse_trades(jail / "engine_trades.csv", tz=timezone.utc)
+    if eng_raw_all is None:
+        eng_raw_all = vc.parse_trades(jail / "engine_trades.csv", tz=timezone.utc)
     distinct = vc.distinct_entry_fill_keys(tv_raw_all)
     marks, tv_raw, eng_raw = vc.pair_range_end_marks(tv_raw_all, eng_raw_all)
     tv = vc.consolidate_fragments(list(tv_raw), preserve_entry_keys=distinct)
@@ -374,8 +375,8 @@ def replay(jail: Path, meta: dict, tz) -> dict:
             "tv_raw_all": tv_raw_all}
 
 
-def matched_count_under(jail: Path, meta: dict, tz) -> int:
-    r = replay(jail, meta, tz)
+def matched_count_under(jail: Path, meta: dict, tz, eng_raw_all) -> int:
+    r = replay(jail, meta, tz, list(eng_raw_all))
     return len(r["matched"]) + len(r["marks"])
 
 
@@ -500,27 +501,28 @@ def timezone_check(jail: Path, meta: dict, given_name: str, rep: dict, tv_count:
             out["note"] = note
             warnings.append(note)
     given_matched = len(rep["matched"]) + len(rep["marks"])
-    if given_matched >= tv_count and out["offset_mode_seconds"] == 0:
+    # A candidate counts only when it matches `margin` more trades than the
+    # given zone; when fewer than that are unmatched no zone can.
+    margin = max(2, math.ceil(0.05 * tv_count))
+    if tv_count - given_matched < margin and out["offset_mode_seconds"] == 0:
         return out, warnings
     from zoneinfo import ZoneInfo
+    eng_raw_all = vc.parse_trades(jail / "engine_trades.csv", tz=timezone.utc)
     best = None
     for zone_name in CANDIDATE_ZONES:
         if zone_name == given_name:
             continue
         try:
-            n = matched_count_under(jail, meta, ZoneInfo(zone_name))
+            n = matched_count_under(jail, meta, ZoneInfo(zone_name), eng_raw_all)
         except Exception:
             continue
         if best is None or n > best[1]:
             best = (zone_name, n)
-    margin = max(2, math.ceil(0.05 * tv_count))
     if best and best[1] >= given_matched + margin:
-        zone = ZoneInfo(best[0])
-        given = vc.tv_tzinfo(meta)
-        sample = datetime.fromtimestamp(rep["tv_raw_all"][0].entry_time, tz=timezone.utc) \
-            if rep["tv_raw_all"] else datetime.now(timezone.utc)
-        shift = int((given.utcoffset(sample.replace(tzinfo=None).replace(tzinfo=given))
-                     - zone.utcoffset(sample.replace(tzinfo=None))).total_seconds())
+        # Seconds to add to a time read in the given zone to read it in the better one.
+        wall = datetime.fromtimestamp(rep["tv_raw_all"][0].entry_time, tz=timezone.utc).replace(tzinfo=None) \
+            if rep["tv_raw_all"] else datetime.now(timezone.utc).replace(tzinfo=None)
+        shift = int((vc.tv_tzinfo(meta).utcoffset(wall) - ZoneInfo(best[0]).utcoffset(wall)).total_seconds())
         out["better"] = {"zone": best[0], "matched": best[1], "matched_given": given_matched,
                          "shift_seconds": shift}
         warnings.append(f"Read in {best[0]}, {best[1]} trades match instead of {given_matched}: "
@@ -731,6 +733,11 @@ def grade(req: dict) -> dict:
 
 
 def main() -> int:
+    import hashlib
+    actual = hashlib.sha256((VENDOR / "verify_corpus.py").read_bytes()).hexdigest()
+    if actual != GRADER_SHA256:
+        sys.stderr.write(f"pf_parity: vendor/verify_corpus.py sha256 {actual} is not {GRADER_SHA256}\n")
+        return 2
     try:
         req = json.loads(sys.stdin.read())
     except ValueError as e:
