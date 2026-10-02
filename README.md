@@ -327,7 +327,11 @@ trade by trade with the grader behind PineForge's published parity figures:
 `scripts/verify_corpus.py` of pineforge-engine v1.0.1 (sha256
 `de84d5150ac0a29b67906f1f8b6fe1f1f13ac66ed36be88ea2bc63d7280ed298`), run through
 the corpus gate's own harness (`scripts/run_strategy.py`). Both are vendored
-unchanged under [`parity/vendor/`](parity/vendor/SHA256SUMS).
+unchanged under [`parity/vendor/`](parity/vendor/SHA256SUMS). Checked against the
+open [`pineforge-corpus`](https://github.com/pineforge-4pass/pineforge-corpus) at
+`a35c7c4`: inside this Docker image the grading core returns the published tier for
+all 309 probes the corpus gate grades, and the tool itself, called over stdio with
+only the inputs below, returns it for a stratified sample of 30.
 
 ```jsonc
 {
@@ -405,8 +409,9 @@ The production profile applies when the script sets `trail_points`, `trail_offse
 Method: <https://pineforge.dev/en/methodology/>.
 
 **Retention.** Everything runs on your machine; market data is fetched from Binance
-only when you do not pass bars. The script, the trade list and the bars go to a
-temporary folder that is deleted when the check ends. With npm/npx the check runs in
+only when you do not pass bars. The script and the trade list, and bars that had to
+be converted or fetched, go to temporary folders that are deleted when the check
+ends. With npm/npx the check runs in
 the engine image (`docker run --network=none`, the grading core and your bars mounted
 read-only).
 
