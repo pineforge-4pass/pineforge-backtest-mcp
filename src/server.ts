@@ -1120,10 +1120,11 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         "TradingView. Lists every coverage topic with a one-line status " +
         "(supported / partial / unsupported / via_transpiler) and summary, plus the " +
         "legend (note: via_transpiler still works end-to-end; unsupported means " +
-        "parsed-and-skipped or rejected) and the coverage version. Cheap, free, " +
-        "local — no engine run, no I/O. Then drill in with get_coverage_topic for " +
-        "one area's full supported/unsupported lists, or check_pine_feature to look " +
-        "up a single identifier.",
+        "refused, not compiling, or accepted with no effect) and the coverage " +
+        "version. Statuses describe what a backtest on THIS server can do. Cheap, " +
+        "free, local — no engine run, no I/O. Then drill in with get_coverage_topic " +
+        "for one area's per-feature lists, or check_pine_feature to look up a " +
+        "single identifier.",
       inputSchema: {},
     },
     async () => asTextResult(coverageIndex()),
@@ -1133,8 +1134,9 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
     "get_coverage_topic",
     {
       description:
-        "Returns the full detail plus the exact supported[] and unsupported[] " +
-        "feature lists for ONE coverage topic id (ids from list_coverage_topics, " +
+        "Returns the full detail plus the exact supported[], partial[], " +
+        "via_transpiler[] and unsupported[] feature lists for ONE coverage topic " +
+        "id (ids from list_coverage_topics, " +
         "e.g. 'ta', 'strategy_orders', 'request_security', " +
         "'drawing_plotting_alerts'). Use when you are about to work in a feature " +
         "area and need to know precisely which functions there are implemented vs " +
@@ -1159,12 +1161,15 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         "namespace (e.g. 'ta.supertrend', 'alert', 'array.new', " +
         "'request.financial'). Use it (a) BEFORE relying on any function you are " +
         "unsure about while writing a strategy, and (b) to DIAGNOSE a backtest that " +
-        "compiled but behaved wrong or empty — visual & alert APIs (plot, label, " +
-        "line, box, table, alert) are parsed-and-skipped and produce NO effect. " +
+        "compiled but behaved wrong or empty — plots, tables and alerts (plot, " +
+        "bgcolor, table, alert) are accepted and produce NO effect, while line, box " +
+        "and label objects are data the strategy can read back. " +
         "Resolves by exact feature match, then longest namespace prefix, then " +
         "alias, returning {query, status, topic, note} where status is " +
         "supported / partial / unsupported / via_transpiler / not_found " +
-        "(via_transpiler = works end-to-end; unsupported = skipped or rejected). " +
+        "(via_transpiler = works end-to-end; unsupported = refused, not compiling, " +
+        "or no effect) and the note quotes the catalog entry, which says what THIS " +
+        "server can and cannot do (e.g. request.security on another symbol). " +
         "Local, free, no engine run.",
       inputSchema: {
         feature: z.string().describe(

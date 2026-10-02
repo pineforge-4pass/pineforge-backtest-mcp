@@ -362,16 +362,26 @@ strategy:
 
 - `list_coverage_topics` — every coverage topic with a status (`supported`,
   `partial`, `unsupported`, `via_transpiler`) and a summary, plus the legend.
-- `get_coverage_topic` `{ "topic": "ta" }` — the full `supported` / `unsupported`
-  lists for one topic id (for example `ta`, `strategy_orders`, `request_security`).
+- `get_coverage_topic` `{ "topic": "ta" }` — the full `supported` / `partial` /
+  `via_transpiler` / `unsupported` lists for one topic id (for example `ta`,
+  `strategy_orders`, `request_security`).
 - `check_pine_feature` `{ "feature": "ta.supertrend" }` — one identifier or namespace:
-  `supported` / `partial` / `unsupported` / `via_transpiler` / `not_found`. Visual and
-  alert APIs (`plot`, `label`, `line`, `box`, `table`, `alert`) are parsed and skipped.
+  `supported` / `partial` / `unsupported` / `via_transpiler` / `not_found`, with a note
+  that quotes the catalog entry. Plots, tables and alerts (`plot`, `bgcolor`, `table`,
+  `alert`) are accepted and have no effect; `line`, `box` and `label` objects are data
+  the strategy can read back.
+
+Every status describes what a backtest through this server can do. The server
+installs no other symbol's bars, no recorded request data and no Pine library
+sources, so where the engine supports more, the entry says so: `request.security`
+on another symbol, for example, is supported by the engine, but here a request whose
+value can reach a trade stops the run.
 
 The data is embedded in this package and stamped by the `coverage_version` field
-that `list_coverage_topics` returns (`2026-06-04 / 0fccede` in this version); the
-engine's [`docs/coverage.md`](https://github.com/pineforge-4pass/pineforge-engine/blob/main/docs/coverage.md)
-is the live reference.
+that `list_coverage_topics` returns (`engine v1.0.1 + codegen 1.0.1 (2026-10-02)` in
+this version); the engine's
+[`docs/coverage.md`](https://github.com/pineforge-4pass/pineforge-engine/blob/v1.0.1/docs/coverage.md)
+at that tag is the reference it was checked against.
 
 ## Filesystem scope
 
