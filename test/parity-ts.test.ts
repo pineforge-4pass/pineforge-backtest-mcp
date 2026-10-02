@@ -391,7 +391,7 @@ test("XLSX cell references outside the grid, over-wide rows and the expanded-cel
   await inputError(readTradingViewExport(sheet('<row r="1"><c r="XFD1"><v>1</v></c></row>'), inflate), "bad_trades_csv", /wider than 256 columns/);
   const wide = Array.from({ length: 50 }, (_, i) => `<row r="${i + 1}"><c r="IV${i + 1}"><v>1</v></c></row>`).join("");
   const limits = { ...DEFAULT_EXPORT_LIMITS, maxCells: 10_000 };
-  await inputError(readTradingViewExport(sheet(wide), inflate, limits), "bad_trades_csv", /spans more than 10000 cells/);
+  await inputError(readTradingViewExport(sheet(wide), inflate, limits), "bad_trades_csv", /span more than 10000 cells together/);
 });
 
 test("a check the grader did not compute prints as not measured", () => {
@@ -501,4 +501,52 @@ test("no other part of the reader rescans: workbook, rels and shared strings of 
   // A character reference outside Unicode stays as written instead of failing the read.
   const b64 = oneSheet('<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>&#99999999;</t></is></c></row></sheetData></worksheet>');
   await inputError(readTradingViewExport(b64, inflate), "bad_trades_csv", /no header row/);
+});
+
+// A workbook with a valid "List of trades" (12 cells), a "Properties" sheet of
+// `propCells` filler cells (two per row) and `strings` shared-string entries.
+function twoSheetWorkbook(propCells: number, strings: number): string {
+  const inl = (ref: string, text: string) => `<c r="${ref}" t="inlineStr"><is><t>${text}</t></is></c>`;
+  const trades = "<worksheet><sheetData>" +
+    `<row r="1">${inl("A1", "Trade number")}${inl("B1", "Type")}${inl("C1", "Date and time")}${inl("D1", "Price USDT")}</row>` +
+    `<row r="2"><c r="A2"><v>1</v></c>${inl("B2", "Entry long")}${inl("C2", "2025-03-31 08:15")}<c r="D2"><v>100</v></c></row>` +
+    `<row r="3"><c r="A3"><v>1</v></c>${inl("B3", "Exit long")}${inl("C3", "2025-03-31 09:15")}<c r="D3"><v>101</v></c></row>` +
+    "</sheetData></worksheet>";
+  let props = "<worksheet><sheetData>";
+  for (let r = 1; r <= propCells / 2; r++) props += `<row r="${r}"><c r="A${r}"><v>${r}</v></c><c r="B${r}"><v>1</v></c></row>`;
+  props += "</sheetData></worksheet>";
+  return zip([
+    { name: "xl/workbook.xml", data: Buffer.from('<workbook><sheets><sheet name="List of trades" r:id="rId1"/><sheet name="Properties" r:id="rId2"/></sheets></workbook>') },
+    { name: "xl/_rels/workbook.xml.rels", data: Buffer.from('<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>') },
+    { name: "xl/sharedStrings.xml", data: Buffer.from("<sst>" + "<si><t>x</t></si>".repeat(strings) + "</sst>") },
+    { name: "xl/worksheets/sheet1.xml", data: Buffer.from(trades) },
+    { name: "xl/worksheets/sheet2.xml", data: Buffer.from(props) },
+  ]).toString("base64");
+}
+
+test("one cell budget per workbook: two sheets each under the budget but over it together are refused", async () => {
+  const limits = { ...DEFAULT_EXPORT_LIMITS, maxCells: 1_000, maxSharedStrings: 50 };
+  // 12 trade cells + 990 Properties cells = 1,002 > 1,000, while each sheet alone is under 1,000.
+  await inputError(readTradingViewExport(twoSheetWorkbook(990, 10), inflate, limits), "bad_trades_csv",
+    /sheets read from the XLSX have more than 1000 cells together/);
+});
+
+test("shared strings over the entry cap are refused before any is decoded", async () => {
+  const limits = { ...DEFAULT_EXPORT_LIMITS, maxCells: 1_000, maxSharedStrings: 50 };
+  await inputError(readTradingViewExport(twoSheetWorkbook(10, 51), inflate, limits), "bad_trades_csv",
+    /more than 50 shared strings/);
+  // The default cap applies when the limits do not name one.
+  const { maxSharedStrings: _omit, ...noCap } = DEFAULT_EXPORT_LIMITS;
+  assert.equal(DEFAULT_EXPORT_LIMITS.maxSharedStrings, 2_000_000);
+  const r = await readTradingViewExport(twoSheetWorkbook(10, 51), inflate, noCap);
+  assert.equal(r.closedTrades, 1);
+});
+
+test("a workbook just under both budgets reads", async () => {
+  const limits = { ...DEFAULT_EXPORT_LIMITS, maxCells: 1_000, maxSharedStrings: 50 };
+  // 12 + 988 = 1,000 cells exactly, 50 shared strings exactly.
+  const r = await readTradingViewExport(twoSheetWorkbook(988, 50), inflate, limits);
+  assert.equal(r.format, "xlsx");
+  assert.equal(r.closedTrades, 1);
+  assert.equal(r.properties.length, 494);
 });

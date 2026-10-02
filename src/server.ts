@@ -1105,8 +1105,8 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
           "file base64-encoded (it starts with UEsDB). The CSV needs the columns Trade number, Type, " +
           "Date and time and a Price column, as TradingView exports them. Limits: 33,554,432 characters " +
           "as passed; the trade list graded at most 32 MiB of UTF-8 and 400,000 rows; XLSX parts at most " +
-          "64 MiB each and 128 MiB together decompressed, sheets at most 400,000 rows, 256 columns and " +
-          "8,000,000 cells."
+          "64 MiB each and 128 MiB together decompressed, sheets at most 400,000 rows and 256 columns, " +
+          "the sheets read at most 8,000,000 cells together, at most 2,000,000 shared strings."
         ),
         symbol: z.string().optional().describe(
           "TradingView ticker the backtest ran on, e.g. 'BINANCE:ETHUSDT.P'. Required unless the XLSX " +

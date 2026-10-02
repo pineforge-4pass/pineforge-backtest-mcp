@@ -25,11 +25,23 @@ export interface ExportLimits {
   maxTotalBytes: number;
   /** Trade-list rows (two per closed trade). */
   maxRows: number;
-  /** Cells read from one sheet, empty cells inside a row's span included. */
+  /**
+   * Cells read from the whole workbook: the sheets read (List of trades and
+   * Properties) share one budget, empty cells inside a row's span included.
+   */
   maxCells: number;
   /** Columns of one sheet row (default 256; Excel's own limit is 16,384). */
   maxColumns?: number;
+  /** Entries of the shared-strings part, counted before any is decoded (default 2,000,000). */
+  maxSharedStrings?: number;
 }
+
+// A real TradingView export holds a few hundred distinct texts (types, signals,
+// the header, the Properties labels). The local cap follows the local byte caps
+// instead: a 64 MiB part holds at most about 4 million minimal (16-byte)
+// entries, and half of that keeps the decoded strings to roughly 100-200 MB in
+// the local process.
+const DEFAULT_MAX_SHARED_STRINGS = 2_000_000;
 
 export const DEFAULT_EXPORT_LIMITS: ExportLimits = {
   maxInputChars: 32 * 1024 * 1024,
@@ -37,6 +49,7 @@ export const DEFAULT_EXPORT_LIMITS: ExportLimits = {
   maxTotalBytes: 128 * 1024 * 1024,
   maxRows: 400_000,
   maxCells: 8_000_000,
+  maxSharedStrings: DEFAULT_MAX_SHARED_STRINGS,
 };
 
 /** Tool settings an export can state. Times are wall clock in the chart timezone. */
@@ -423,9 +436,16 @@ function badCell(): ParityInputError {
   return new ParityInputError("bad_trades_csv", "A sheet of the XLSX has a cell reference outside Excel's grid.");
 }
 
-function parseSheet(xml: string, shared: string[], dateStyles: Set<number>, limits: ExportLimits): Grid {
+/** Cells counted so far across every sheet read from one workbook. */
+interface CellBudget {
+  /** Cells written in the sheets' XML. */
+  parsed: number;
+  /** Cells spanned by the rows, empty ones included (what gridRows allocates). */
+  spanned: number;
+}
+
+function parseSheet(xml: string, shared: string[], dateStyles: Set<number>, limits: ExportLimits, budget: CellBudget): Grid {
   const grid: Grid = new Map();
-  let cells = 0;
   let rowNo = 0;
   for (const rm of xmlElements(xml, "row")) {
     const rAttr = attr(rm.attrs, "r");
@@ -437,8 +457,9 @@ function parseSheet(xml: string, shared: string[], dateStyles: Set<number>, limi
     const row = new Map<number, Cell>();
     let col = -1;
     for (const cm of xmlElements(rm.body ?? "", "c")) {
-      if (++cells > limits.maxCells) {
-        throw new ParityInputError("bad_trades_csv", `A sheet of the XLSX has more than ${limits.maxCells} cells.`);
+      if (++budget.parsed > limits.maxCells) {
+        throw new ParityInputError("bad_trades_csv",
+          `The sheets read from the XLSX have more than ${limits.maxCells} cells together.`);
       }
       const a = cm.attrs;
       const ref = attr(a, "r");
@@ -463,20 +484,20 @@ function parseSheet(xml: string, shared: string[], dateStyles: Set<number>, limi
 }
 
 /** Rows as arrays, after checking widths against the column cap and cell budget. */
-function gridRows(grid: Grid, limits: ExportLimits): Cell[][] {
+function gridRows(grid: Grid, limits: ExportLimits, budget: CellBudget): Cell[][] {
   const maxColumns = limits.maxColumns ?? DEFAULT_MAX_COLUMNS;
   const rowNos = [...grid.keys()].sort((a, b) => a - b);
   const widths = new Map<number, number>();
-  let cells = 0;
   for (const r of rowNos) {
     let width = 0;
     for (const c of grid.get(r)!.keys()) if (c + 1 > width) width = c + 1;
     if (width > maxColumns) {
       throw new ParityInputError("bad_trades_csv", `A sheet of the XLSX has a row wider than ${maxColumns} columns.`);
     }
-    cells += width;
-    if (cells > limits.maxCells) {
-      throw new ParityInputError("bad_trades_csv", `A sheet of the XLSX spans more than ${limits.maxCells} cells.`);
+    budget.spanned += width;
+    if (budget.spanned > limits.maxCells) {
+      throw new ParityInputError("bad_trades_csv",
+        `The sheets read from the XLSX span more than ${limits.maxCells} cells together.`);
     }
     widths.set(r, width);
   }
@@ -544,6 +565,14 @@ async function readXlsx(b64: string, inflate: InflateFn, limits: ExportLimits): 
   const shared: string[] = [];
   if (zip.has("xl/sharedStrings.xml")) {
     const sst = await zip.text("xl/sharedStrings.xml");
+    // Count the entries first, so an oversized part is refused before any string is decoded.
+    const maxShared = limits.maxSharedStrings ?? DEFAULT_MAX_SHARED_STRINGS;
+    let entries = 0;
+    for (const _si of xmlElements(sst, "si")) {
+      if (++entries > maxShared) {
+        throw new ParityInputError("bad_trades_csv", `The XLSX has more than ${maxShared} shared strings.`);
+      }
+    }
     for (const si of xmlElements(sst, "si")) shared.push(textRuns(si.body ?? ""));
   }
   const dateStyles = new Set<number>();
@@ -572,7 +601,9 @@ async function readXlsx(b64: string, inflate: InflateFn, limits: ExportLimits): 
     );
   }
 
-  const tradeCells = gridRows(parseSheet(await zip.text(tradesSheet.path), shared, dateStyles, limits), limits);
+  // One cell budget for the whole workbook: the trades sheet and the Properties sheet draw on it together.
+  const budget: CellBudget = { parsed: 0, spanned: 0 };
+  const tradeCells = gridRows(parseSheet(await zip.text(tradesSheet.path), shared, dateStyles, limits, budget), limits, budget);
   const headerIdx = tradeCells.findIndex((r) => r.some((c) => {
     const v = String(c.value ?? "");
     return v === "Trade number" || v === "Trade #";
@@ -602,7 +633,7 @@ async function readXlsx(b64: string, inflate: InflateFn, limits: ExportLimits): 
   let settings: ExportSettings = {};
   if (propsSheet) {
     let section = "";
-    const propCells = gridRows(parseSheet(await zip.text(propsSheet.path), shared, dateStyles, limits), limits);
+    const propCells = gridRows(parseSheet(await zip.text(propsSheet.path), shared, dateStyles, limits, budget), limits, budget);
     for (const r of propCells) {
       const texts = r.map((c) => cellText(c, date1904).trim()).filter((s, i) => s !== "" || i < 2);
       const name = texts[0] ?? "";

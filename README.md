@@ -374,7 +374,7 @@ only the inputs below, returns it for a stratified sample of 30.
 |---|---|
 | `pine` | 262,144 bytes (256 KiB) of UTF-8 |
 | `tradingview_trades` | 33,554,432 characters (32 × 1024²) as passed; the trade list the grader reads (the CSV, or the one rebuilt from the XLSX) at most 32 MiB of UTF-8 and 400,000 rows |
-| XLSX report | each decompressed part at most 64 MiB, all parts together at most 128 MiB; a sheet at most 400,000 rows, 256 columns, and 8,000,000 cells counting the empty cells inside each row |
+| XLSX report | each decompressed part at most 64 MiB, all parts together at most 128 MiB; a sheet at most 400,000 rows and 256 columns; the sheets read (List of trades and Properties) at most 8,000,000 cells together, counting the empty cells inside each row; at most 2,000,000 shared strings |
 | `ohlcv_csv` | 67,108,864 characters (64 × 1024²) |
 | `ohlcv_csv_path` | no size limit (a TradingView chart export is converted in memory) |
 | Binance fetch | 100,000 chart and magnifier bars combined |
