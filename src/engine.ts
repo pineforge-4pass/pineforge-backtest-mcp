@@ -6,15 +6,25 @@
  * second backend can live alongside it. No behavior change.
  */
 
-import { spawn } from "node:child_process";
-import { mkdtemp, writeFile, rm, readFile } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { randomBytes, randomUUID } from "node:crypto";
+import { mkdtemp, mkdir, writeFile, rm, readFile, readdir, readlink, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // ─── Config ───────────────────────────────────────────────────────────────
 
 export const DEFAULT_IMAGE = process.env.PINEFORGE_IMAGE ?? "ghcr.io/pineforge-4pass/pineforge-release:latest";
 export const DOCKER_TIMEOUT_MS = Number(process.env.PINEFORGE_DOCKER_TIMEOUT_MS ?? 120_000);
+// One parity check (transpile + compile + run + grade) inside the grading core.
+// The core's own deadline is PARITY_TIMEOUT_MS; the runner stops the driver only
+// PARITY_GRACE_MS later (SIGTERM, then SIGKILL after PARITY_KILL_GRACE_MS), so
+// the core reports its own timeout first and, when stopped, kills its children.
+export const PARITY_TIMEOUT_MS = Number(process.env.PINEFORGE_PARITY_TIMEOUT_MS ?? 600_000);
+const PARITY_GRACE_MS = 30_000;
+const PARITY_KILL_GRACE_MS = 5_000;
+const PARITY_STDOUT_CAP = 64 * 1024 * 1024;
 
 // ─── Local transpile (Pine → C++ via the engine container) ──────────────────
 
@@ -300,10 +310,21 @@ export interface BacktestCall {
   runtime?: RuntimeArgsLike;
 }
 
+export interface ParityCall {
+  /** The grading core's request (parity/pf_parity.py) without file paths. */
+  request: Record<string, unknown>;
+  /** The bars CSV on this machine (header timestamp,open,high,low,close,volume). */
+  barsPath: string;
+  /** Optional 1-minute magnifier feed on this machine. */
+  magnifierBarsPath?: string;
+}
+
 export interface EngineRunner {
   readonly mode: "docker" | "local";
   transpile(source: string, image?: string): Promise<string>;
   backtest(call: BacktestCall): Promise<unknown>;
+  /** Run the grading core once; resolves to its JSON response. */
+  parity(call: ParityCall): Promise<Record<string, unknown>>;
   engineInfo(): Promise<EngineInfo>;
   // Image freshness — meaningful only for docker; local returns a static note.
   checkImage(image: string, autoPull: boolean): Promise<ImageFreshness | EngineInfo>;
@@ -319,6 +340,39 @@ export class DockerRunner implements EngineRunner {
   }
   backtest(call: BacktestCall): Promise<unknown> {
     return dockerBacktest({ ...call, image: call.image ?? this.image });
+  }
+  // The engine image runs the grading core: no network, the core read-only,
+  // the bars read-only, a per-call jail for the core's work, the request on stdin.
+  async parity(call: ParityCall): Promise<Record<string, unknown>> {
+    const jail = await mkdtemp(join(tmpdir(), "pineforge-parity-"));
+    const name = `pineforge-parity-${randomBytes(6).toString("hex")}`;
+    try {
+      await mkdir(join(jail, "work"));
+      const args = [
+        "run", "--rm", "-i", "--network=none", "--name", name,
+        "--entrypoint", "python3",
+        "-e", `PF_PARITY_TIMEOUT_MS=${PARITY_TIMEOUT_MS}`,
+        "-e", "PYTHONDONTWRITEBYTECODE=1",
+        "-v", `${parityCoreDir()}:/opt/pf-parity:ro`,
+        "-v", `${jail}:/jail`,
+        "-v", `${call.barsPath}:/in/ohlcv.csv:ro`,
+      ];
+      if (call.magnifierBarsPath) args.push("-v", `${call.magnifierBarsPath}:/in/magnifier.csv:ro`);
+      // Run as the caller so the 0700 jail and the caller's files are readable.
+      if (typeof process.getuid === "function" && typeof process.getgid === "function") {
+        args.push("--user", `${process.getuid()}:${process.getgid()}`);
+      }
+      args.push(this.image, "/opt/pf-parity/pf_parity.py");
+      const request = { ...call.request, ohlcv_csv_path: "/in/ohlcv.csv", workdir: "/jail/work",
+        magnifier_ohlcv_csv_path: call.magnifierBarsPath ? "/in/magnifier.csv" : null };
+      return await runParityCore("docker", args, request, {
+        onTimeout: () => {
+          spawn("docker", ["kill", name], { stdio: "ignore" }).on("error", () => undefined);
+        },
+      });
+    } finally {
+      await rm(jail, { recursive: true, force: true }).catch(() => undefined);
+    }
   }
   async engineInfo(): Promise<EngineInfo> {
     return { mode: "docker", baked_in: false, version: null, image: this.image };
@@ -396,6 +450,35 @@ export class LocalRunner implements EngineRunner {
     }
   }
 
+  // The grading core copied into this image, on the baked-in engine.
+  // Every process of the request inherits PF_PARITY_REQUEST=<id> and starts in
+  // the jail; once the driver has exited (normally, by signal or by SIGKILL) the
+  // request is swept, compiler grandchildren included, before cleanup returns.
+  async parity(call: ParityCall): Promise<Record<string, unknown>> {
+    const jail = await mkdtemp(join(tmpdir(), "pineforge-parity-"));
+    const jailReal = await realpath(jail);
+    const id = randomUUID();
+    const marker = `PF_PARITY_REQUEST=${id}`;
+    try {
+      const request = { ...call.request, ohlcv_csv_path: call.barsPath, workdir: jail,
+        magnifier_ohlcv_csv_path: call.magnifierBarsPath ?? null };
+      return await runParityCore("python3", [join(parityCoreDir(), "pf_parity.py")], request, {
+        env: {
+          ...process.env,
+          PINEFORGE_PREFIX: this.prefix,
+          PF_PARITY_TIMEOUT_MS: String(PARITY_TIMEOUT_MS),
+          PYTHONDONTWRITEBYTECODE: "1",
+          PF_PARITY_REQUEST: id,
+        },
+        detached: true,
+        sweep: (driverPid) => sweepRequest(marker, jailReal, driverPid),
+      });
+    } finally {
+      await sweepRequest(marker, jailReal).catch(() => undefined);
+      await rm(jail, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
   async engineInfo(): Promise<EngineInfo> {
     return { mode: "local", baked_in: true, version: process.env.PINEFORGE_VERSION ?? null };
   }
@@ -407,4 +490,163 @@ export class LocalRunner implements EngineRunner {
   async pullImage(image: string) {
     return { image, pulled: false, output: "engine is baked into the image (local mode); nothing to pull" };
   }
+}
+
+// ─── Grading core process ─────────────────────────────────────────────────
+
+/** parity/ at the package root (npm `files` and the Docker image ship it). */
+export function parityCoreDir(): string {
+  return process.env.PINEFORGE_PARITY_DIR ?? fileURLToPath(new URL("../parity", import.meta.url));
+}
+
+/**
+ * Run the grading core with `request` on stdin. Exit 0 = a JSON answer (also
+ * for user errors); anything else is an internal failure. Past the timeout
+ * (plus grace) the process, or its whole group when detached, is killed and
+ * the answer is a plain timeout error.
+ */
+export function runParityCore(
+  cmd: string,
+  args: string[],
+  request: Record<string, unknown>,
+  opts: {
+    env?: NodeJS.ProcessEnv;
+    detached?: boolean;
+    onTimeout?: () => void;
+    /** Kills what is left of the request; run once the driver exits and awaited before settling. */
+    sweep?: (driverPid: number | undefined) => Promise<unknown>;
+  } = {},
+): Promise<Record<string, unknown>> {
+  return new Promise((resolveSettled, rejectSettled) => {
+    const child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"], env: opts.env, detached: opts.detached });
+    let sweeping: Promise<unknown> = Promise.resolve();
+    const sweep = () => {
+      if (opts.sweep) sweeping = sweeping.then(() => opts.sweep!(child.pid)).catch(() => undefined);
+    };
+    child.on("exit", () => sweep());
+    const resolveP = (v: Record<string, unknown>) => { void sweeping.then(() => resolveSettled(v)); };
+    const rejectP = (e: unknown) => { void sweeping.then(() => rejectSettled(e)); };
+    const out: Buffer[] = [];
+    let outBytes = 0;
+    let overflow = false;
+    let stderr = "";
+    let timedOut = false;
+    child.stdout.on("data", (d: Buffer) => {
+      outBytes += d.length;
+      if (outBytes > PARITY_STDOUT_CAP) overflow = true;
+      else out.push(d);
+    });
+    child.stderr.on("data", (d: Buffer) => { stderr = (stderr + d.toString()).slice(-8192); });
+    const signal = (sig: NodeJS.Signals) => {
+      try {
+        if (opts.detached && child.pid) process.kill(-child.pid, sig);
+        else child.kill(sig);
+      } catch { /* already gone */ }
+    };
+    // SIGTERM lets the driver kill and reap its children (they run in their own
+    // sessions); SIGKILL follows if it has not exited after the kill grace.
+    let hardKill: NodeJS.Timeout | undefined;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      opts.onTimeout?.();
+      signal("SIGTERM");
+      hardKill = setTimeout(() => {
+        signal("SIGKILL");
+        sweep();
+      }, PARITY_KILL_GRACE_MS);
+    }, PARITY_TIMEOUT_MS + PARITY_GRACE_MS);
+    child.on("error", (e) => { clearTimeout(timer); clearTimeout(hardKill); rejectP(e); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      clearTimeout(hardKill);
+      if (timedOut) {
+        resolveP({
+          ok: false,
+          error: "timeout",
+          message: `The parity check did not finish within ${Math.round(PARITY_TIMEOUT_MS / 1000)} s ` +
+            "(PINEFORGE_PARITY_TIMEOUT_MS) and was stopped.",
+        });
+        return;
+      }
+      if (overflow) {
+        rejectP(new Error(`grading core output exceeded ${PARITY_STDOUT_CAP} bytes`));
+        return;
+      }
+      const text = Buffer.concat(out).toString("utf8");
+      if (code !== 0) {
+        rejectP(new Error(`grading core failed (exit ${code}):\n${stderr.slice(-2048)}`));
+        return;
+      }
+      try {
+        resolveP(JSON.parse(text) as Record<string, unknown>);
+      } catch {
+        rejectP(new Error(`grading core printed non-JSON output (first 500 B):\n${text.slice(0, 500)}`));
+      }
+    });
+    child.stdin.on("error", () => undefined);
+    child.stdin.end(JSON.stringify(request));
+  });
+}
+
+// ─── Request sweep (LocalRunner) ──────────────────────────────────────────
+
+/**
+ * PIDs of one request, other than this process: those whose environment holds
+ * `marker` (NAME=value) or whose working directory is inside the request's jail.
+ * Linux reads /proc; elsewhere (macOS, the unit tests) lsof lists working
+ * directories, since process environments are not readable there.
+ */
+async function requestPids(marker: string, jailReal: string): Promise<number[]> {
+  const found: number[] = [];
+  const inJail = (p: string) => p === jailReal || p.startsWith(`${jailReal}/`);
+  if (process.platform === "linux") {
+    const needle = Buffer.from(`${marker}\0`);
+    for (const name of await readdir("/proc")) {
+      if (!/^\d+$/.test(name) || Number(name) === process.pid) continue;
+      try {
+        if ((await readFile(`/proc/${name}/environ`)).includes(needle)) {
+          found.push(Number(name));
+          continue;
+        }
+      } catch { /* exited, or not ours to read */ }
+      try {
+        if (inJail(await readlink(`/proc/${name}/cwd`))) found.push(Number(name));
+      } catch { /* exited, or not ours to read */ }
+    }
+    return found;
+  }
+  const lsof = spawnSync("lsof", ["-a", "-d", "cwd", "-u", String(process.getuid?.() ?? ""), "-F", "pn"], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  let pid = 0;
+  for (const line of (lsof.stdout ?? "").split("\n")) {
+    if (line.startsWith("p")) pid = Number(line.slice(1));
+    else if (line.startsWith("n") && pid && pid !== process.pid && inJail(line.slice(1))) found.push(pid);
+  }
+  return found;
+}
+
+/**
+ * SIGKILL every process of one request: the driver's group, then anything still
+ * marked as the request's (children in their own sessions, their compilers,
+ * orphans). Repeats until none is left; throws if some will not go.
+ */
+export async function sweepRequest(marker: string, jailReal: string, driverPid?: number): Promise<number> {
+  let killed = 0;
+  if (driverPid) {
+    try { process.kill(-driverPid, "SIGKILL"); } catch { /* the group is already empty */ }
+  }
+  for (let round = 0; round < 100; round++) {
+    const pids = await requestPids(marker, jailReal);
+    if (pids.length === 0) return killed;
+    for (const pid of pids) {
+      for (const target of [-pid, pid]) {
+        try { process.kill(target, "SIGKILL"); } catch { /* not a group leader, or gone */ }
+      }
+      killed++;
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error("processes of the parity check did not stop");
 }

@@ -9,6 +9,7 @@
   "main": "dist/index.js",
   "files": [
     "dist",
+    "parity",
     "README.md",
     "LICENSE"
   ],
@@ -22,7 +23,9 @@
     "predev": "npm run sync-version",
     "dev": "tsx src/index.ts",
     "prepublishOnly": "npm run build",
-    "test": "node --import tsx --test 'test/**/*.test.ts'"
+    "test": "node --import tsx --test 'test/**/*.test.ts'",
+    "test:e2e:parity": "node --import tsx --test test/e2e/parity-stdio.e2e.ts",
+    "test:e2e:parity-negative": "node --import tsx --test test/e2e/parity-negative.e2e.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

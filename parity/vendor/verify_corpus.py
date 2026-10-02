@@ -1,0 +1,1652 @@
+#!/usr/bin/env python3
+"""Verify a strategy in the corpus against TradingView's exported trades.
+
+Reads `tv_trades.csv` and `engine_trades.csv` from a strategy folder under
+`corpus/`, aligns trades by entry time + direction with a 1-hour window
+(matches the parent project's parity sweep), and reports the largest
+deviations in entry price, exit price, and per-trade P&L.
+
+This mirrors the canonical corpus summary used by the runtime docs:
+it applies common-window edge trimming, honours per-strategy metadata,
+and reports the five parity labels used in the corpus README.
+
+`--all` covers the reference-tier categories (`basic/`, `community/`,
+`validation/` — whichever exist in this checkout). The `parity-anomalies/` category is a home
+for probes that *deliberately* surface TV-side non-determinism (engine is
+correct, divergence is documented in `pineforge-utils/parity-anomalies/`);
+it is excluded from `--all` by default so it doesn't mask as a regression.
+Use `--include-anomalies` to fold it into the same sweep, or run it
+explicitly with `--category parity-anomalies`.
+
+Usage:
+  scripts/verify_corpus.py corpus/basic/greedy           # one strategy
+  scripts/verify_corpus.py --all                         # all reference strategies
+  scripts/verify_corpus.py --all --include-anomalies     # + parity-anomalies/
+  scripts/verify_corpus.py --category validation         # one category
+  scripts/verify_corpus.py --category parity-anomalies   # anomaly probes only
+  scripts/verify_corpus.py corpus/... --show-diffs 5     # show first 5 diffs
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import re
+import sys
+from collections import Counter
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+# THIS FILE IS THE CANONICAL PARITY RUBRIC (single source of truth).
+# pineforge-utils/validator/validate.py and any other comparator must track
+# THESE thresholds/semantics, not the other way around.
+# Two profiles available:
+#  - STRICT: tight on all four dims (indicator-style strategies whose exits
+#    land on deterministic OHLC levels).
+#  - PRODUCTION: relaxes exit (5x) and per-trade pnl (~100x) to absorb TV's
+#    broker-emulator sub-bar fill drift. Auto-applied when strategy.pine uses
+#    any trail_* parameter on strategy.exit.
+STRICT_COUNT_DELTA = 0.01      # 1.0%
+STRICT_ENTRY_DELTA = 0.0001    # 0.01%
+STRICT_EXIT_DELTA  = 0.0001    # 0.01%
+STRICT_PNL_DELTA   = 0.01      # 1.0%
+
+PRODUCTION_COUNT_DELTA = 0.01    # 1.0%   — same as strict
+PRODUCTION_ENTRY_DELTA = 0.0001  # 0.01%  — entries must stay tight
+PRODUCTION_EXIT_DELTA  = 0.0005  # 0.05%  — exits absorb sub-bar broker drift
+PRODUCTION_PNL_DELTA   = 1.0     # 100%   — gate only catastrophic divergence
+
+STRONG_COUNT_DELTA = 0.06
+STRONG_ENTRY_DELTA = 0.001
+STRONG_EXIT_DELTA  = 0.005
+STRONG_PNL_DELTA   = 1.0
+
+# Coverage gate — matched trades as a fraction of ALL closed TV trades (the
+# interior-trimmed full export, NOT the self-selected common match window).
+# Every other gated metric is computed inside a window derived from the
+# matches themselves, so without this gate a run that reproduces almost
+# nothing can grade top-tier on the sliver it happened to reproduce
+# (observed in production: 'excellent' at 0.9% real coverage). The
+# small-N alternative (<=1 unmatched TV trade) keeps single boundary-trade
+# cases fair for short exports.
+COVERAGE_EXCELLENT = 0.99
+COVERAGE_STRONG    = 0.95
+COVERAGE_MODERATE  = 0.75
+
+# The qty-normalized PnL comparison exists to absorb tiny equity-compounding
+# sizing drift between two independently compounded simulations. Unbounded,
+# it would also absorb arbitrarily large position-sizing bugs (any wrong qty
+# with correct prices rescales into a perfect PnL match), so the rescue only
+# applies when the sizing drift itself is small.
+QTY_NORM_BAND = 0.02  # |tv_qty/eng_qty - 1| <= 2%
+
+# Pine-source comment-strippers + trail_* matcher for profile auto-detect.
+# Matches canonical pineforge-utils/validator/validate.py::detect_parity_profile.
+_LINE_COMMENT_PATTERN = re.compile(r"//.*?$", re.MULTILINE)
+_BLOCK_COMMENT_PATTERN = re.compile(r"/\*.*?\*/", re.DOTALL)
+_TRAIL_PATTERN = re.compile(r"\btrail_(points|offset|price)\s*=", re.IGNORECASE)
+
+# Per-strategy near-zero PnL filter: trades whose |tv_pnl| < $0.01 are
+# excluded from pnl p90 so scratch trades don't blow up the per-trade ratio.
+# Mirrors canonical validate.py line ~1136.
+PNL_NEAR_ZERO_USD = 0.01
+# TradingView's exported Net PnL column is rounded to cents. For sub-dollar
+# trades, the last half-cent of CSV quantization can look like a multi-percent
+# relative PnL miss even when entry, exit, qty and commission are all exact.
+TV_PNL_ROUNDING_EPSILON_USD = 0.005
+
+# MAE and MFE are REPORT-ONLY (not gated). Both excursions depend on the
+# intrabar price path, which TV sources from finer (1m/tick) data than the
+# local OHLC feed can resolve — gating on them punishes data resolution,
+# not engine correctness. Regression classes a MAE gate would have caught
+# (sign flip ~200%, per-unit-vs-total qty ~50%) remain visible in the
+# report-only section; treat large report-only MAE/MFE drift as a
+# diagnostic lead, not a tier verdict.
+
+
+def detect_parity_profile(pine_source: str) -> str:
+    """Return 'production' if pine source uses any trail_* exit parameter, else 'strict'.
+
+    Backport of pineforge-utils/validator/validate.py::detect_parity_profile.
+    """
+    cleaned = _BLOCK_COMMENT_PATTERN.sub("", pine_source)
+    cleaned = _LINE_COMMENT_PATTERN.sub("", cleaned)
+    return "production" if _TRAIL_PATTERN.search(cleaned) else "strict"
+
+
+def parity_for_profile(profile: str) -> dict:
+    """Return a fresh threshold dict for the given profile name."""
+    if profile == "production":
+        return {
+            "count": PRODUCTION_COUNT_DELTA,
+            "entry": PRODUCTION_ENTRY_DELTA,
+            "exit":  PRODUCTION_EXIT_DELTA,
+            "pnl":   PRODUCTION_PNL_DELTA,
+        }
+    return {
+        "count": STRICT_COUNT_DELTA,
+        "entry": STRICT_ENTRY_DELTA,
+        "exit":  STRICT_EXIT_DELTA,
+        "pnl":   STRICT_PNL_DELTA,
+    }
+
+
+def resolve_profile(strategy_dir: Path, meta: dict) -> str:
+    """Resolve the parity profile for a strategy: inputs.json wins, then auto-detect."""
+    forced = str(meta.get("parity_profile", "")).lower()
+    if forced in {"strict", "production"}:
+        return forced
+    pine_path = strategy_dir / "strategy.pine"
+    if pine_path.is_file():
+        try:
+            return detect_parity_profile(pine_path.read_text(encoding="utf-8"))
+        except OSError:
+            return "strict"
+    return "strict"
+
+
+def interior_time_bounds(
+    trim_bars: int,
+    warmup_bars: int,
+    ohlcv_first_ms: int | None,
+    ohlcv_last_ms: int | None,
+    bar_ms: int,
+) -> tuple[int, int] | None:
+    """Return [lo_ms, hi_ms] window for 'interior' entries, or None if trivial.
+
+    Backport of pineforge-utils/validator/validate.py::interior_time_bounds.
+    ``trim_bars`` symmetrically excludes edge bars from BOTH ends; ``warmup_bars``
+    is an extra asymmetric lead pad. If the OHLCV span is unknown (no source
+    csv next to the probe), returns None — we then skip interior trimming and
+    rely on the headline stats.
+    """
+    if trim_bars <= 0 and warmup_bars <= 0:
+        return None
+    if ohlcv_first_ms is None or ohlcv_last_ms is None or bar_ms <= 0:
+        return None
+    lead_pad = (trim_bars + max(0, warmup_bars)) * bar_ms
+    tail_pad = trim_bars * bar_ms
+    lo = ohlcv_first_ms + lead_pad
+    hi = ohlcv_last_ms - tail_pad
+    if lo >= hi:
+        return None
+    return lo, hi
+
+
+def is_interior(entry_ms: int, bounds: tuple[int, int] | None) -> bool:
+    if bounds is None:
+        return True
+    lo, hi = bounds
+    return lo <= entry_ms <= hi
+
+
+def _ohlcv_span_ms(strategy_dir: Path) -> tuple[int | None, int | None, int]:
+    """Best-effort: read first/last timestamps + bar interval from an OHLCV csv.
+
+    Looks for ``ohlcv.csv`` (or ``data.csv``) next to strategy.pine. Honors a
+    ``bar_ms`` override in inputs.json. Returns (first_ms, last_ms, bar_ms);
+    any of these may be None/0 if unavailable, in which case interior trimming
+    is skipped.
+    """
+    candidates = [strategy_dir / n for n in ("ohlcv.csv", "data.csv", "candles.csv")]
+    csv_path = next((p for p in candidates if p.is_file()), None)
+    if csv_path is None:
+        return None, None, 0
+    try:
+        with csv_path.open(encoding="utf-8-sig") as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            if not header:
+                return None, None, 0
+            # Find a timestamp-like column.
+            ts_idx = None
+            for i, name in enumerate(header):
+                if name.strip().lower() in {"timestamp", "time", "ts", "open_time"}:
+                    ts_idx = i
+                    break
+            if ts_idx is None:
+                return None, None, 0
+            first = None
+            second = None
+            last = None
+            for row in reader:
+                if not row:
+                    continue
+                try:
+                    v = int(float(row[ts_idx]))
+                except (ValueError, IndexError):
+                    continue
+                if first is None:
+                    first = v
+                elif second is None:
+                    second = v
+                last = v
+            bar_ms = (second - first) if (first is not None and second is not None) else 0
+            # Normalize seconds to ms if it looks like seconds.
+            if first is not None and first < 10**12:
+                first *= 1000
+                if last is not None:
+                    last *= 1000
+                if bar_ms:
+                    bar_ms *= 1000
+            return first, last, bar_ms
+    except OSError:
+        return None, None, 0
+
+# Match window for time-based alignment (matches parent project's gate).
+MATCH_WINDOW_SECONDS = 3600    # 1 hour
+ENTRY_PRICE_GATE     = 3.00    # $3 — defends against same-bar duplicates
+
+# TradingView "Date and time" columns are bare wall-clock strings with no
+# timezone marker. They reflect the chart's display timezone at export.
+# The corpus in this repo was exported with the chart set to Asia/Taipei
+# (UTC+8). Engine CSVs are emitted in UTC. Override at parse time if your
+# own re-exports use a different chart timezone.
+TV_CSV_TZ_OFFSET_HOURS = 8     # Asia/Taipei
+ENGINE_CSV_TZ_OFFSET_HOURS = 0 # UTC
+
+TV_TZ_BY_NAME = {
+    "utc_plus_8": 8,
+    "asia_taipei": 8,
+    "utc": 0,
+}
+
+
+@dataclass
+class TradePair:
+    direction: str        # 'long' / 'short'
+    entry_time: int       # unix seconds
+    entry_price: float
+    exit_time: int        # unix seconds
+    exit_price: float
+    qty: float
+    pnl: float
+    trade_num: int = 0
+    # TradingView's entry-side ``Signal`` identifies the broker instruction
+    # that opened this physical trade.  It is intentionally report/oracle
+    # provenance rather than an alignment key: engine CSVs historically omit
+    # it, but distinct non-empty TV signals prove that equal-time/equal-price
+    # rows are independent entries and must not be fragment-consolidated.
+    entry_signal: str = ""
+    # Engine-only physical-entry provenance. New PineForge runners export the
+    # unique intent row incarnation that created the lot; every partial-close
+    # fragment of that lot retains the same value. This must not reuse Signal:
+    # TradingView's Signal column can contain a user-visible comment rather
+    # than the Pine entry ID. Empty means the engine artifact cannot prove
+    # physical multiplicity at a TV-proven collision key.
+    entry_identity: str = ""
+    # Report-only fields (compared but NOT gated — see the field-coverage
+    # disclosure). pnl_pct is in percent. mfe/mae are TOTAL USD excursions
+    # ((price diff) * qty, summed over pyramid entries) in TV's export
+    # convention: mfe (favorable) >= 0, mae (adverse) <= 0.
+    pnl_pct: float = 0.0
+    mfe: float = 0.0
+    mae: float = 0.0
+    # The exit leg is a mark of a position still open at the range's end,
+    # not a fill: TradingView's browser export says so with Signal "Open"
+    # on the exit row; the engine says so in the exit row's trailing
+    # ``Engine range-end`` column (ENGINE_RANGE_END_COLUMN; its range-end
+    # close, ``open_at_end``). pair_range_end_marks pairs the two marks of
+    # one lot before any other comparison sees them.
+    open_mark: bool = False
+
+
+@dataclass
+class VerificationResult:
+    """Canonical structured parity analysis for one corpus strategy.
+
+    ``verify_one`` is intentionally only a presentation wrapper around this
+    object.  Report generators must consume :func:`analyze_strategy` instead
+    of copying the rubric; otherwise a new gate can silently change CLI tiers
+    without changing the generated validation report.
+    """
+
+    strategy_dir: Path
+    rel: str
+    label: str
+    profile: str = "n/a"
+    notes: str = ""
+    tv_path: Path | None = None
+    eng_path: Path | None = None
+    tv_exists: bool = True
+    eng_exists: bool = True
+    no_aligned_trades: bool = False
+    tv_count: int = 0
+    eng_count: int = 0
+    tv_raw_count: int = 0
+    eng_raw_count: int = 0
+    matched_count: int = 0
+    gating_matched_count: int = 0
+    tv_gate_count: int = 0
+    eng_gate_count: int = 0
+    count_delta: float = 0.0
+    count_abs_delta: int = 0
+    entry_p90: float = 0.0
+    exit_p90: float = 0.0
+    pnl_p90: float = 0.0
+    coverage: float = 0.0
+    unmatched_total: int = 0
+    coverage_tv_count: int = 0
+    trim_bars: int = 0
+    warmup_bars: int = 0
+    bounds: tuple[int, int] | None = None
+    count_ok: bool = False
+    entry_ok: bool = False
+    exit_ok: bool = False
+    pnl_ok: bool = False
+    coverage_ok: bool = False
+    distinct_entry_identity_ok: bool = True
+    distinct_entry_mismatches: int = 0
+    unmatched_in_window: int = 0
+    # Range-end mark pairs (pair_range_end_marks): a TV "Open" row and the
+    # engine's marked range-end row of the same lot. Each pair is a matched
+    # trade — it counts, it covers, its entry is gated — but its exit and
+    # P&L are a mark against a mark and never enter a gated statistic or a
+    # percentile. The P&L agreement is reported at TradingView's precision
+    # (cents): how many pairs agree, and the largest miss in USD.
+    open_mark_pairs: int = 0
+    open_mark_pnl_cent_exact: int = 0
+    open_mark_pnl_max_abs_usd: float = 0.0
+    entry_p100: float = 0.0
+    exit_p100: float = 0.0
+    pnl_p100: float = 0.0
+    qty_p100: float = 0.0
+    pnlpct_p100: float = 0.0
+    mfe_p90: float = 0.0
+    mae_p90: float = 0.0
+    matched: list[tuple[TradePair, TradePair]] = field(default_factory=list, repr=False)
+    open_mark_matched: list[tuple[TradePair, TradePair]] = field(default_factory=list, repr=False)
+    entry_deltas: list[float] = field(default_factory=list, repr=False)
+    exit_deltas: list[float] = field(default_factory=list, repr=False)
+    pnl_deltas: list[float] = field(default_factory=list, repr=False)
+    qty_deltas: list[float] = field(default_factory=list, repr=False)
+    pnlpct_deltas: list[float] = field(default_factory=list, repr=False)
+
+    @property
+    def tier(self) -> str:
+        return self.label
+
+    def report_row(self) -> dict:
+        """Return the canonical report-facing fields without re-analysis."""
+        return {
+            "slug": self.strategy_dir.name,
+            "rel": self.rel,
+            "tier": self.label,
+            "tv": self.tv_count,
+            "eng": self.eng_count,
+            "matched": self.matched_count,
+            "count_delta": self.count_delta,
+            "count_abs_delta": self.count_abs_delta,
+            "entry_p90": self.entry_p90,
+            "exit_p90": self.exit_p90,
+            "pnl_p90": self.pnl_p90,
+            "distinct_entry_identity_ok": self.distinct_entry_identity_ok,
+            "distinct_entry_mismatches": self.distinct_entry_mismatches,
+            "profile": self.profile,
+            "notes": self.notes,
+        }
+
+
+def tv_tzinfo(meta: dict):
+    """Resolve the TV export timezone to a tzinfo.
+
+    Accepts the legacy fixed-offset aliases (utc / utc_plus_8 / asia_taipei) AND
+    any IANA zone name (e.g. 'America/New_York', 'Europe/London') so DST-bearing
+    exchanges parse correctly — a fixed integer offset silently mis-aligns trades
+    across a DST transition (e.g. US equities flip UTC-4 -> UTC-5 in November).
+    """
+    name = str(meta.get("tv_trades_csv_tz", "")).strip()
+    low = name.lower()
+    if low in TV_TZ_BY_NAME:
+        return timezone(timedelta(hours=TV_TZ_BY_NAME[low]))
+    if "/" in name:  # looks like an IANA zone -> DST-aware
+        try:
+            from zoneinfo import ZoneInfo
+            return ZoneInfo(name)
+        except Exception:
+            pass
+    return timezone(timedelta(hours=TV_CSV_TZ_OFFSET_HOURS))  # default Asia/Taipei
+
+
+def parse_dt(s: str, tz) -> int:
+    """Parse 'YYYY-MM-DD HH:MM' (wall time in tz) as unix seconds (UTC).
+
+    ``tz`` is any datetime.tzinfo — a fixed timezone(...) or a DST-aware
+    zoneinfo.ZoneInfo. localizing the naive wall clock then taking .timestamp()
+    yields the correct POSIX instant including DST.
+    """
+    return int(datetime.strptime(s, "%Y-%m-%d %H:%M").replace(tzinfo=tz).timestamp())
+
+
+# The engine's mark of a range-end close: the trailing column of
+# engine_trades.csv (run_strategy.py write_engine_trades_csv), "open" on the
+# exit row of a trade the engine booked as its range-end close of a position
+# still open after the final bar (pf_trade_t::open_at_end), empty elsewhere.
+# TradingView's browser export marks the same row Signal "Open"; its
+# ws-report-v1 export marks nothing and prices the row at the last bar's
+# close, which is exactly the engine's row, so an unmarked tape pairs the
+# engine's row as an ordinary closed trade and never sees this column.
+ENGINE_RANGE_END_COLUMN = "Engine range-end"
+
+
+def _is_open_mark(value) -> bool:
+    return str(value or "").strip().lower() == "open"
+
+
+def parse_trades(csv_path: Path, *, tz) -> list[TradePair]:
+    by_num: dict[int, dict] = {}
+    # TradingView exports include a UTF-8 BOM; utf-8-sig strips it.
+    with csv_path.open(encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            # TradingView renamed export columns over time: "Trade #" ->
+            # "Trade number", "Net P&L *" -> "Net PnL *", and the price column
+            # is quote-currency-suffixed ("Price USDT" / "Price USD" / bare
+            # "Price"). Accept all spellings so both legacy and current
+            # exports parse.
+            n = int(row.get("Trade #") or row["Trade number"])
+            r = by_num.setdefault(n, {})
+            kind = row["Type"]
+            time_field = row["Date and time"]
+            price_field = next(
+                (c for c in row if c == "Price" or c.startswith("Price ")),
+                None,
+            )
+            price = float(row[price_field])
+            qty = float(
+                row.get("Position size (qty)")
+                or row.get("Size (qty)")
+                or row.get("Qty")
+                or 0.0
+            )
+            # Quote-currency-suffixed columns ("... USD" / "... USDT" / ...),
+            # mirroring the price_field prefix match above. A perp export's
+            # "Net PnL USDT" / "Favorable excursion USDT" previously matched
+            # NONE of the exact "...USD" spellings below and silently fell
+            # back to 0.0, making pnl_p90/mfe/mae trivially "0.0% OK"
+            # regardless of real drift.
+            def _ccy_col(row: dict, *prefixes: str):
+                for c in row:
+                    # Exclude the "... %" variant (e.g. "Net P&L %") — that's
+                    # a separate, currency-less percent field, not a quote-
+                    # currency-suffixed amount, and must not be matched here.
+                    if c.endswith(" %"):
+                        continue
+                    if any(c == p or c.startswith(p + " ") for p in prefixes):
+                        return row[c]
+                return None
+            pnl = float(_ccy_col(row, "Net P&L", "Net PnL") or 0.0)
+            # Report-only fields (TV vs engine column spellings differ).
+            pnl_pct = float(
+                row.get("Net P&L %") or row.get("Net PnL %") or 0.0
+            )
+            mfe = float(_ccy_col(row, "Favorable excursion") or row.get("MFE") or 0.0)
+            # TV exports adverse excursion as a NEGATIVE USD value; current
+            # engine CSVs use the same name + convention. Legacy engine CSVs
+            # ("MAE" column) emitted the positive magnitude — normalize those
+            # to TV's sign so old artifacts still compare correctly.
+            adverse = _ccy_col(row, "Adverse excursion")
+            if adverse:
+                mae = float(adverse)
+            else:
+                mae = -abs(float(row.get("MAE") or 0.0)) or 0.0
+            direction = "long" if "long" in kind.lower() else "short"
+            r["direction"] = direction
+            r["qty"] = qty
+            r["pnl"] = pnl
+            r["pnl_pct"] = pnl_pct
+            r["mfe"] = mfe
+            r["mae"] = mae
+            if kind.startswith("Entry"):
+                r["entry_time"] = parse_dt(time_field, tz)
+                r["entry_price"] = price
+                r["entry_signal"] = str(row.get("Signal") or "").strip()
+                raw_identity = str(
+                    row.get("Engine entry incarnation")
+                    or row.get("Engine entry ID")
+                    or ""
+                ).strip()
+                r["entry_identity"] = (
+                    raw_identity if raw_identity not in {"", "0"} else "")
+            else:
+                r["exit_time"] = parse_dt(time_field, tz)
+                r["exit_price"] = price
+                r["open_mark"] = (_is_open_mark(row.get("Signal"))
+                                  or _is_open_mark(row.get(ENGINE_RANGE_END_COLUMN)))
+
+    pairs: list[TradePair] = []
+    for n in sorted(by_num):
+        r = by_num[n]
+        if "entry_price" not in r or "exit_price" not in r:
+            continue
+        pairs.append(TradePair(
+            direction=r["direction"],
+            entry_time=r["entry_time"],
+            entry_price=r["entry_price"],
+            exit_time=r["exit_time"],
+            exit_price=r["exit_price"],
+            qty=r["qty"],
+            pnl=r["pnl"],
+            trade_num=n,
+            entry_signal=r.get("entry_signal", ""),
+            entry_identity=r.get("entry_identity", ""),
+            pnl_pct=r.get("pnl_pct", 0.0),
+            mfe=r.get("mfe", 0.0),
+            mae=r.get("mae", 0.0),
+            open_mark=bool(r.get("open_mark", False)),
+        ))
+    pairs.sort(key=lambda t: t.entry_time)
+    return pairs
+
+
+def pair_range_end_marks(
+    tv: list[TradePair],
+    eng: list[TradePair],
+) -> tuple[list[tuple[TradePair, TradePair]], list[TradePair], list[TradePair]]:
+    """Pair the two marks of each lot still open at the range's end, and
+    return ``(pairs, tv_rest, eng_rest)`` — the raw rows of both sides with
+    the paired marks taken out.
+
+    A browser export prints a position still open at the range's end as a
+    trade whose exit row is Signal "Open", priced at the range end's last
+    close and netted of commission on both legs, to the cent (3commas-xlm
+    #615: qty 0.0912, entry 2189.13, mark 2261.44 -> 6.3511, TV 6.35). The
+    engine, fed to TradingView's range end, books the same lot as its
+    range-end close (open_at_end) — 6.351137 for that lot — and marks the
+    exit row in ENGINE_RANGE_END_COLUMN. The two rows are one lot marked
+    twice, so they are paired here, lot for lot, by the alignment every
+    other trade gets (:func:`align_by_time`: same direction, entry within
+    the match window and the entry-price gate; closest entry first) — and
+    only marks pair with marks: the tape's Open row is not a fill, and
+    neither is the engine's row.
+
+    What a pair means downstream (analyze_strategy): a matched trade — it
+    counts on both sides, it covers, its entry is gated like any other —
+    whose exit and P&L are compared nowhere that is gated. The engine's
+    P&L is exact and TradingView's is rounded to cents, and on a grid bot
+    with 22 open lots that rounding, summed into the schedule aggregate
+    that scores pnlP90 on such probes, moved the metric by itself (round
+    3, 2026-09-02: 0.5536 -> 0.6675 on 3commas-xlm). So the pairs leave
+    both raw lists before consolidation, alignment, the trim window, the
+    schedule path and every report-only percentile, and their P&L
+    agreement is reported at TradingView's own precision instead
+    (open_mark_pnl_cent_exact / open_mark_pnl_max_abs_usd).
+
+    Unpaired marks stay ordinary rows: a TV Open row the engine never
+    opened, or closed for real before the range end, keeps its place in
+    the coverage and the exit/pnl gates as before; an engine range-end row
+    for a lot the tape closed, or never opened, is an ordinary engine
+    trade — matched by entry with its deltas, or unmatched. A tape with no
+    Open rows, or an engine CSV without a marked row, pairs nothing and
+    passes through untouched.
+
+    >>> mk = lambda n, et, xt, xp, p, m: TradePair("long", et, 10.0, xt, xp, 1.0, p, n, open_mark=m)
+    >>> tv = [mk(1, 100, 200, 12.0, 2.0, False), mk(2, 300, 900, 13.0, 3.0, True)]
+    >>> eng = [mk(1, 100, 200, 12.0, 2.0, False), mk(2, 300, 900, 13.0, 3.0004, True)]
+    >>> pairs, tv_rest, eng_rest = pair_range_end_marks(tv, eng)
+    >>> [(t.trade_num, e.trade_num) for t, e in pairs], len(tv_rest), len(eng_rest)
+    ([(2, 2)], 1, 1)
+    >>> pair_range_end_marks(tv[:1], eng[:1]) == ([], tv[:1], eng[:1])
+    True
+    """
+    tv_marks = [t for t in tv if t.open_mark]
+    eng_marks = [e for e in eng if e.open_mark]
+    if not tv_marks or not eng_marks:
+        return [], tv, eng
+    pairs = align_by_time(tv_marks, eng_marks)
+    paired = {id(t) for t, _ in pairs} | {id(e) for _, e in pairs}
+    return (pairs,
+            [t for t in tv if id(t) not in paired],
+            [e for e in eng if id(e) not in paired])
+
+
+EntryFillKey = tuple[int, float, str]
+
+
+def distinct_entry_fill_keys(pairs: list[TradePair]) -> set[EntryFillKey]:
+    """Return entry keys proven to contain multiple physical broker entries.
+
+    TradingView can report independent trades at the same timestamp, price,
+    and direction.  The entry-side ``Signal`` is the only exported provenance
+    that separates those instructions.  Two or more distinct non-empty
+    signals therefore prove at least two physical entries even when one signal
+    also owns quantity/FIFO fragments. Callers project the TV-derived keys onto
+    the engine side, which must supply independent physical-incarnation
+    provenance rather than relying on raw row count.
+    """
+    signals_by_key: dict[EntryFillKey, list[str]] = {}
+    for trade in pairs:
+        key = (trade.entry_time, trade.entry_price, trade.direction)
+        signals_by_key.setdefault(key, []).append(trade.entry_signal)
+    return {
+        key
+        for key, signals in signals_by_key.items()
+        if len({signal for signal in signals if signal}) > 1
+    }
+
+
+def _project_entry_fill_keys(
+    observed_keys: Iterable[EntryFillKey],
+    proven_keys: set[EntryFillKey] | frozenset[EntryFillKey],
+) -> tuple[
+    dict[EntryFillKey, EntryFillKey],
+    dict[EntryFillKey, set[EntryFillKey]],
+]:
+    """Project observed entry-price keys onto unambiguous TV oracle keys.
+
+    Time and direction remain exact. Price alone may drift by less than the
+    strict entry-parity tolerance, using the same :func:`relative_max` metric as
+    the headline gate. Exact price equality wins. A non-exact observed key is
+    projected only when exactly one TV key in its time/direction scope is in
+    tolerance; overlapping tolerance neighborhoods are returned as ambiguous
+    so callers can fail closed instead of choosing a nearest key or allowing
+    one engine row to satisfy multiple distinct TV prices.
+    """
+    proven_by_scope: dict[tuple[int, str], list[EntryFillKey]] = {}
+    for key in proven_keys:
+        proven_by_scope.setdefault((key[0], key[2]), []).append(key)
+
+    projected: dict[EntryFillKey, EntryFillKey] = {}
+    ambiguous: dict[EntryFillKey, set[EntryFillKey]] = {}
+    for observed in set(observed_keys):
+        candidates = proven_by_scope.get((observed[0], observed[2]), [])
+        exact = next(
+            (candidate for candidate in candidates
+             if candidate[1] == observed[1]),
+            None,
+        )
+        if exact is not None:
+            projected[observed] = exact
+            continue
+        tolerant = {
+            candidate for candidate in candidates
+            if relative_max(candidate[1], observed[1]) < STRICT_ENTRY_DELTA
+        }
+        if len(tolerant) == 1:
+            projected[observed] = next(iter(tolerant))
+        elif len(tolerant) > 1:
+            ambiguous[observed] = tolerant
+    return projected, ambiguous
+
+
+def distinct_entry_fill_mismatches(
+    tv: list[TradePair],
+    eng: list[TradePair],
+    proven_keys: set[EntryFillKey] | frozenset[EntryFillKey],
+) -> int:
+    """Count physical-entry identity failures at TV-proven distinct keys.
+
+    TV's distinct non-empty Signals prove separate report buckets. Engine row
+    count is not evidence because one entry may fragment into several
+    closed-trade rows. Excellent certification therefore requires every engine
+    row projected to the key to carry a non-empty physical incarnation and
+    requires its distinct incarnation count to equal the oracle's provable
+    Signal buckets. Projection keeps time/direction exact and permits only an
+    unambiguous entry-price drift inside the strict parity tolerance.
+    This is intentionally conservative when repeated TV Signals are ambiguous:
+    it may refuse Excellent, but it cannot certify multiplicity from row count.
+    Missing identity or an engine price inside multiple TV-key tolerance
+    neighborhoods fails the affected keys closed even when raw row counts
+    happen to match.
+    """
+    tv_signals: dict[EntryFillKey, set[str]] = {}
+    engine_identities: dict[EntryFillKey, set[str]] = {}
+    engine_rows: dict[EntryFillKey, list[TradePair]] = {}
+    for trade in tv:
+        key = (trade.entry_time, trade.entry_price, trade.direction)
+        if trade.entry_signal:
+            tv_signals.setdefault(key, set()).add(trade.entry_signal)
+    observed_engine_rows: dict[EntryFillKey, list[TradePair]] = {}
+    for trade in eng:
+        key = (trade.entry_time, trade.entry_price, trade.direction)
+        observed_engine_rows.setdefault(key, []).append(trade)
+
+    projected, ambiguous = _project_entry_fill_keys(
+        observed_engine_rows, proven_keys)
+    ambiguous_proven_keys = {
+        candidate
+        for candidates in ambiguous.values()
+        for candidate in candidates
+    }
+    for observed, rows in observed_engine_rows.items():
+        key = projected.get(observed)
+        if key is None:
+            continue
+        engine_rows.setdefault(key, []).extend(rows)
+        engine_identities.setdefault(key, set()).update(
+            trade.entry_identity for trade in rows if trade.entry_identity)
+
+    mismatches = 0
+    for key in proven_keys:
+        expected = len(tv_signals.get(key, set()))
+        rows = engine_rows.get(key, [])
+        if expected < 2:
+            continue
+        if key in ambiguous_proven_keys:
+            mismatches += 1
+            continue
+        if not rows or any(not trade.entry_identity for trade in rows):
+            mismatches += 1
+            continue
+        mismatches += abs(expected - len(engine_identities.get(key, set())))
+    return mismatches
+
+
+def consolidate_fragments(
+    pairs: list[TradePair],
+    *,
+    preserve_entry_keys: set[EntryFillKey] | frozenset[EntryFillKey] = frozenset(),
+    identity_field: str = "entry_signal",
+) -> list[TradePair]:
+    """Reunite the fragment rows that split a single logical fill into one trade.
+
+    TradingView's "List of Trades" (and the engine, mirroring it) splits one
+    entry FILL across several ``Trade #`` rows whenever that position is closed
+    in lots — either a tiny ``qty_step`` rounding remainder that shares the
+    SAME entry time AND price, or FIFO partial-close fragments of a grid bot
+    where one entry is drained by several exit orders. Every such fragment is a
+    *different exit lot of the same entry*, so the entry side is identical
+    across the group: same bar timestamp, same fill price, same direction.
+
+    Left raw, these fragments break the entry-time pairing in
+    :func:`align_by_time`: two fragments share one entry instant, so the greedy
+    matcher cross-pairs a TV lot with the wrong engine lot and reports spurious
+    count + exit-price deltas (the tell-tale ~90% qty-p90 is the fingerprint).
+    This helper merges each fill back into one trade and is applied
+    SYMMETRICALLY to the TV and engine lists, so a genuinely fragmented
+    strategy still pairs 1:1.
+
+    Merge key = ``(entry_time, entry_price, direction)`` compared EXACTLY.
+    That key is sufficient only when every member has the same entry
+    provenance.  TradingView can execute independent instructions at one
+    broker tick and price; two or more distinct non-empty entry Signals prove
+    that the key contains multiple physical entries.  For TV rows, repeated
+    members of the same signal are consolidated within that signal only.
+    Engine rows use the separate ``entry_identity`` incarnation field for the
+    same operation. A row missing the appropriate identity cannot be assigned
+    safely to a bucket, so the TV-proven key stays raw and the identity gate
+    fails closed. Engine keys may project onto one TV key when time/direction
+    match exactly and price drift is unambiguously inside the strict entry
+    tolerance. Overlapping price neighborhoods remain identity-sensitive but
+    fail the gate as ambiguous. This can retain extra fragment detail, but it
+    cannot merge independent entries into a false Excellent result.
+
+    The merged trade keeps the shared entry (time + price) and direction, sums
+    the per-lot qty / pnl / excursions, and represents the exit by the lots'
+    qty-weighted-average price at the final close time — the way TradingView
+    aggregates a multi-lot deal. When every fragment shares one exit (pure
+    qty_step rounding) that average IS the shared exit price, kept exactly so
+    the comparison stays bit-for-bit unchanged.
+
+    >>> mk = lambda n, et, ep, xt, xp, q, p: TradePair("long", et, ep, xt, xp, q, p, n)
+    >>> # two qty_step rounding fragments of one fill: same entry AND same exit
+    >>> a = mk(1, 100, 10.0, 200, 12.0, 0.01, 0.02)
+    >>> b = mk(2, 100, 10.0, 200, 12.0, 0.99, 1.98)
+    >>> # a distinct later trade (different entry bar + price) must NOT merge
+    >>> c = mk(3, 300, 11.0, 400, 13.0, 1.00, 2.00)
+    >>> out = consolidate_fragments([a, b, c])
+    >>> [(round(t.qty, 4), round(t.pnl, 4), t.exit_price) for t in out]
+    [(1.0, 2.0, 12.0), (1.0, 2.0, 13.0)]
+    >>> # FIFO grid: ONE entry drained by two DIFFERENT exit lots -> one deal,
+    >>> # exit = qty-weighted average price at the final close time
+    >>> d = mk(4, 100, 10.0, 150, 12.0, 0.5, 1.0)
+    >>> e = mk(5, 100, 10.0, 250, 14.0, 0.5, 2.0)
+    >>> g = consolidate_fragments([d, e])
+    >>> len(g), g[0].qty, g[0].exit_price, g[0].exit_time
+    (1, 1.0, 13.0, 250)
+    """
+    groups: dict[EntryFillKey, list[TradePair]] = {}
+    order: list[EntryFillKey] = []
+    for t in pairs:
+        key = (t.entry_time, t.entry_price, t.direction)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(t)
+
+    preserved = set(preserve_entry_keys)
+    preserved.update(distinct_entry_fill_keys(pairs))
+    projected, ambiguous = _project_entry_fill_keys(groups, preserved)
+    identity_sensitive_keys = set(projected) | set(ambiguous)
+    out: list[TradePair] = []
+    for key in order:
+        members = groups[key]
+        if key in identity_sensitive_keys:
+            identities = [
+                getattr(member, identity_field) for member in members]
+            if all(identities):
+                signal_groups: dict[str, list[TradePair]] = {}
+                signal_order: list[str] = []
+                for member, identity in zip(members, identities):
+                    if identity not in signal_groups:
+                        signal_groups[identity] = []
+                        signal_order.append(identity)
+                    signal_groups[identity].append(member)
+                for signal in signal_order:
+                    bucket = signal_groups[signal]
+                    if len(bucket) == 1:
+                        out.append(bucket[0])
+                    else:
+                        out.extend(consolidate_fragments(
+                            bucket, identity_field=identity_field))
+            else:
+                out.extend(members)
+            continue
+        if len(members) == 1:
+            out.append(members[0])
+            continue
+        qty = sum(m.qty for m in members)
+        denom = qty if qty else 1.0
+        rep = members[0]
+        if len({m.exit_price for m in members}) == 1:
+            # Shared-exit fragments (pure qty_step rounding): keep the exact
+            # shared exit so the merge is bit-for-bit identical to a single fill.
+            exit_price = rep.exit_price
+            exit_time = rep.exit_time
+        else:
+            # FIFO partial-close lots: blend like a TV deal — qty-weighted
+            # average exit price, settled at the final close time.
+            exit_price = sum(m.exit_price * m.qty for m in members) / denom
+            exit_time = max(m.exit_time for m in members)
+        out.append(TradePair(
+            direction=rep.direction,
+            entry_time=rep.entry_time,
+            entry_price=rep.entry_price,
+            exit_time=exit_time,
+            exit_price=exit_price,
+            qty=qty,
+            pnl=sum(m.pnl for m in members),
+            trade_num=min(m.trade_num for m in members),
+            entry_signal=rep.entry_signal,
+            entry_identity=rep.entry_identity,
+            pnl_pct=sum(m.pnl_pct * m.qty for m in members) / denom,
+            mfe=sum(m.mfe for m in members),
+            mae=sum(m.mae for m in members),
+        ))
+    out.sort(key=lambda t: t.entry_time)
+    return out
+
+
+def has_cross_entry_fifo_allocation(pairs: list[TradePair]) -> bool:
+    """Return whether raw rows expose a genuinely ambiguous FIFO schedule.
+
+    A repeated entry key alone is not enough.  Margin calls and other partial
+    exits split one ordinary (pyramiding=0) position into several rows too,
+    but there is no cross-entry allocation ambiguity in that shape.  The
+    schedule-level rescue is justified only when BOTH facts are present:
+
+    1. one entry fill drains through multiple distinct exit events; and
+    2. one exact exit event closes quantity owned by multiple distinct entry
+       fills (the defining FIFO-grid allocation collision).
+
+    Exit identity deliberately matches :func:`schedule_exit_metrics` so the
+    eligibility predicate and the metric it enables cannot disagree about
+    which broker event is shared.
+    """
+    entry_exits: dict[
+        tuple[int, float, str], set[tuple[int, float, str]]
+    ] = {}
+    exit_owners: dict[
+        tuple[int, float, str], set[tuple[int, float, str]]
+    ] = {}
+    for trade in pairs:
+        entry_key = (trade.entry_time, trade.entry_price, trade.direction)
+        exit_key = (trade.exit_time, round(trade.exit_price, 6), trade.direction)
+        entry_exits.setdefault(entry_key, set()).add(exit_key)
+        exit_owners.setdefault(exit_key, set()).add(entry_key)
+
+    multi_exit_entries = {
+        entry_key for entry_key, exits in entry_exits.items() if len(exits) > 1
+    }
+    return any(
+        len(owners) > 1 and bool(owners & multi_exit_entries)
+        for owners in exit_owners.values()
+    )
+
+
+def schedule_rows_for_gate(
+    tv_raw: list[TradePair],
+    eng_raw: list[TradePair],
+    tv_gate: list[TradePair],
+    eng_gate: list[TradePair],
+    gating_matched: list[tuple[TradePair, TradePair]],
+) -> tuple[list[TradePair], list[TradePair]]:
+    """Select the scored raw-entry groups for schedule comparison.
+
+    Canonical alignment permits a TV/engine entry pair to differ by up to the
+    match window.  Bounding both raw schedules only by independently gated
+    entry times can then drop one half of an already scored boundary pair.
+    Select each side's gate entries plus its half of every scored match.  Exact
+    entry keys preserve every raw fragment without re-importing unrelated
+    out-of-gate rows that happen to lie between two boundary timestamps.
+    """
+    def entry_key(trade: TradePair) -> tuple[int, float, str]:
+        return (trade.entry_time, trade.entry_price, trade.direction)
+
+    tv_keys = {entry_key(trade) for trade in tv_gate}
+    eng_keys = {entry_key(trade) for trade in eng_gate}
+    for tv_trade, eng_trade in gating_matched:
+        tv_keys.add(entry_key(tv_trade))
+        eng_keys.add(entry_key(eng_trade))
+    if not tv_keys and not eng_keys:
+        return tv_raw, eng_raw
+    return (
+        [trade for trade in tv_raw if entry_key(trade) in tv_keys],
+        [trade for trade in eng_raw if entry_key(trade) in eng_keys],
+    )
+
+
+def schedule_exit_metrics(tv_raw: list[TradePair], eng_raw: list[TradePair]) -> tuple[list[float], list[float]]:
+    """Position-level exit schedule metrics for fragmented FIFO drains.
+
+    Entry-group consolidation is useful for true split rows, but for dense
+    FIFO grid exits the exact same position-level close schedule can be sliced
+    across entry lots differently.  Compare the exit schedule directly:
+    exact (time, rounded price, side) qty matches contribute 0 exit delta;
+    unmatched schedule qty contributes a conservative 100% miss.  PnL is
+    compared in aggregate over the same raw window, with TV cent-rounding
+    tolerated by the normal epsilon.
+    """
+    def build(rows: list[TradePair]) -> dict[tuple[int, float, str], float]:
+        out: dict[tuple[int, float, str], float] = {}
+        for t in rows:
+            key = (t.exit_time, round(t.exit_price, 6), t.direction)
+            out[key] = out.get(key, 0.0) + t.qty
+        return out
+
+    tv_sched = build(tv_raw)
+    eng_sched = build(eng_raw)
+    exit_deltas: list[float] = []
+    for key, tv_qty in tv_sched.items():
+        eng_qty = eng_sched.get(key, 0.0)
+        matched_qty = min(tv_qty, eng_qty)
+        if matched_qty > 1e-9:
+            exit_deltas.append(0.0)
+        if tv_qty - matched_qty > 1e-9:
+            exit_deltas.append(1.0)
+        if eng_qty - matched_qty > 1e-9:
+            exit_deltas.append(1.0)
+    for key, eng_qty in eng_sched.items():
+        if key not in tv_sched and eng_qty > 1e-9:
+            exit_deltas.append(1.0)
+
+    tv_pnl = sum(t.pnl for t in tv_raw)
+    eng_pnl = sum(e.pnl for e in eng_raw)
+    pnl_deltas: list[float] = []
+    if abs(tv_pnl) >= PNL_NEAR_ZERO_USD:
+        abs_diff = abs(tv_pnl - eng_pnl)
+        pnl_deltas.append(0.0 if abs_diff < TV_PNL_ROUNDING_EPSILON_USD else abs_diff / abs(tv_pnl))
+    return exit_deltas, pnl_deltas
+
+
+def load_strategy_metadata(strategy_dir: Path) -> dict:
+    inputs_path = strategy_dir / "inputs.json"
+    if not inputs_path.exists():
+        return {}
+    import json
+    with inputs_path.open(encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _apply_declared_tier_override(label: str, meta: dict) -> str:
+    """Apply documented-divergence metadata without masking a real TV match.
+
+    ``expected_tier`` owns explicit anomaly/engine-only declarations.  The
+    canonical ``validation_overrides.expect_tv_match=false`` spelling then
+    resolves to engine-only, matching the historical precedence when both are
+    present.  Metadata is evaluated before the excellent guards, preserving
+    the normal path's fail-closed behavior for malformed override objects.
+    """
+    expected_tier = str(meta.get("expected_tier", "")).strip().lower()
+    if expected_tier in {"anomaly", "engine_only"} and label != "excellent":
+        label = expected_tier
+
+    val_overrides = meta.get("validation_overrides") or {}
+    if (not bool(val_overrides.get("expect_tv_match", True))
+            and label != "excellent"):
+        label = "engine_only"
+    return label
+
+
+def tv_timezone_offset(meta: dict) -> int:
+    tz_name = str(meta.get("tv_trades_csv_tz", "")).lower()
+    return TV_TZ_BY_NAME.get(tz_name, TV_CSV_TZ_OFFSET_HOURS)
+
+
+def align_by_time(tv: list[TradePair], eng: list[TradePair]) -> list[tuple[TradePair, TradePair]]:
+    """Greedy time-window alignment: pair TV[i] with the closest engine trade
+    that has the same direction and an entry within MATCH_WINDOW_SECONDS.
+    """
+    matched: list[tuple[TradePair, TradePair]] = []
+    used_eng: set[int] = set()
+    j_start = 0
+    for tv_t in tv:
+        # Advance the engine cursor to the first plausibly-matching candidate.
+        while j_start < len(eng) and eng[j_start].entry_time < tv_t.entry_time - MATCH_WINDOW_SECONDS:
+            j_start += 1
+        best_j = -1
+        best_dt = MATCH_WINDOW_SECONDS + 1
+        for j in range(j_start, len(eng)):
+            if j in used_eng:
+                continue
+            e = eng[j]
+            if e.entry_time > tv_t.entry_time + MATCH_WINDOW_SECONDS:
+                break
+            if e.direction != tv_t.direction:
+                continue
+            if abs(e.entry_price - tv_t.entry_price) > ENTRY_PRICE_GATE:
+                continue
+            dt = abs(e.entry_time - tv_t.entry_time)
+            if dt < best_dt:
+                best_dt = dt
+                best_j = j
+        if best_j >= 0:
+            matched.append((tv_t, eng[best_j]))
+            used_eng.add(best_j)
+    return matched
+
+
+def trim_to_common_match_window(
+    tv: list[TradePair],
+    eng: list[TradePair],
+    matched: list[tuple[TradePair, TradePair]],
+) -> tuple[list[TradePair], list[TradePair]]:
+    """Drop leading/trailing edge trades outside the mutually matched window.
+
+    The canonical parity sweep compares the common in-window trade region.
+    This avoids failing a strategy because one engine has an extra bootstrap or
+    terminal trade just outside the overlapping validation window.
+    """
+    if not matched:
+        return tv, eng
+    lo = min(min(t.entry_time, e.entry_time) for t, e in matched) - MATCH_WINDOW_SECONDS
+    hi = max(max(t.entry_time, e.entry_time) for t, e in matched) + MATCH_WINDOW_SECONDS
+    tv_trim = [t for t in tv if lo <= t.entry_time <= hi]
+    eng_trim = [e for e in eng if lo <= e.entry_time <= hi]
+    return tv_trim, eng_trim
+
+
+def relative_max(a: float, b: float) -> float:
+    denom = max(abs(a), abs(b), 1e-9)
+    return abs(a - b) / denom
+
+
+def percentile(xs: list[float], p: float) -> float:
+    if not xs: return 0.0
+    s = sorted(xs)
+    k = (len(s) - 1) * p
+    f, c = int(k), min(int(k) + 1, len(s) - 1)
+    if f == c: return s[f]
+    return s[f] * (c - k) + s[c] * (k - f)
+
+
+def analyze_strategy(strategy_dir: Path) -> VerificationResult:
+    """Analyze one strategy using the canonical parity rubric.
+
+    This is the single structured API for both the CLI and generated reports.
+    Keep all tier-affecting and metric-affecting logic inside this function.
+    """
+    rel = strategy_dir.name
+    if strategy_dir.parent.name in {"basic", "community", "validation", "parity-anomalies"}:
+        rel = f"{strategy_dir.parent.name}/{strategy_dir.name}"
+    meta = load_strategy_metadata(strategy_dir)
+    tv_path = strategy_dir / str(meta.get("tv_trades_csv", "tv_trades.csv"))
+    eng_path = strategy_dir / "engine_trades.csv"
+    if not tv_path.exists() or not eng_path.exists():
+        return VerificationResult(
+            strategy_dir=strategy_dir,
+            rel=rel,
+            label="missing",
+            notes="tv_trades.csv or engine_trades.csv missing",
+            tv_path=tv_path,
+            eng_path=eng_path,
+            tv_exists=tv_path.exists(),
+            eng_exists=eng_path.exists(),
+        )
+
+    tv_raw_all = parse_trades(tv_path, tz=tv_tzinfo(meta))
+    eng_raw_all = parse_trades(eng_path, tz=timezone.utc)
+    # The entry keys TradingView proves to hold two or more physical entries
+    # (distinct non-empty Signals at one time/price/direction) are read from
+    # the tape as exported, BEFORE the marks pair off below: an Open row's
+    # entry is a fill with a Signal like any other, and a key it helps prove
+    # stays proven when its lot leaves the list as a mark pair. The same
+    # pre-pairing keys steer consolidation, as they did before pairing
+    # existed, so a preserved key's remaining fragments are not reunited
+    # merely because the lot that proved it is now a pair.
+    distinct_tv_entry_keys = distinct_entry_fill_keys(tv_raw_all)
+    # A lot still open at the range's end is marked twice — TV's "Open" row
+    # and the engine's range-end row — and the two marks pair lot for lot
+    # BEFORE anything else looks at the rows (pair_range_end_marks). Each
+    # pair is a matched trade with a gated entry and nothing else gated; the
+    # rows themselves leave both sides here, so no consolidation, alignment,
+    # trim, schedule aggregate or percentile ever sees a mark's cent-rounded
+    # P&L or its exit. Nothing pairs on a tape without Open rows or an
+    # engine CSV without a marked row, and the lists pass through as read.
+    mark_pairs, tv_raw_all, eng_raw_all = pair_range_end_marks(tv_raw_all, eng_raw_all)
+    tv = list(tv_raw_all)
+    eng = list(eng_raw_all)
+    # Reunite TradingView/engine fragment rows (qty_step rounding remainders or
+    # FIFO partial-close lots of one fill) into a single logical trade BEFORE
+    # pairing, symmetrically on both sides, so the entry-time matcher does not
+    # cross-pair same-entry lots. No-op for un-fragmented strategies.
+    tv = consolidate_fragments(
+        tv, preserve_entry_keys=distinct_tv_entry_keys)
+    eng = consolidate_fragments(
+        eng, preserve_entry_keys=distinct_tv_entry_keys,
+        identity_field="entry_identity")
+    matched = align_by_time(tv, eng)
+    # A mark pair anchors the common window like any other match: the lots
+    # open at the range's end are its trailing edge, and a TV trade closed
+    # between the last interior match and those lots stays in the window,
+    # unmatched, as it did when the marks paired through the matcher.
+    tv_cmp, eng_cmp = trim_to_common_match_window(tv, eng, matched + mark_pairs)
+    matched = align_by_time(tv_cmp, eng_cmp)
+
+    if not matched and not mark_pairs:
+        label = "excellent" if len(tv_cmp) == 0 and len(eng_cmp) == 0 else "minimal"
+        # The historical both-empty Excellent branch returned before reading
+        # override metadata. Keep that exact behavior while fixing declared
+        # divergence for the non-excellent zero-alignment branch.
+        if label != "excellent":
+            label = _apply_declared_tier_override(label, meta)
+        return VerificationResult(
+            strategy_dir=strategy_dir,
+            rel=rel,
+            label=label,
+            profile=resolve_profile(strategy_dir, meta),
+            notes=str(meta.get("notes", "")).strip() or "no aligned trades",
+            tv_path=tv_path,
+            eng_path=eng_path,
+            no_aligned_trades=True,
+            tv_count=len(tv_cmp),
+            eng_count=len(eng_cmp),
+            tv_raw_count=len(tv),
+            eng_raw_count=len(eng),
+            count_delta=relative_max(len(tv_cmp), len(eng_cmp)),
+            count_abs_delta=abs(len(tv_cmp) - len(eng_cmp)),
+            count_ok=len(tv_cmp) == len(eng_cmp),
+        )
+
+    # Resolve parity profile (strict vs production) per probe.
+    profile = resolve_profile(strategy_dir, meta)
+    thresh = parity_for_profile(profile)
+
+    # Optional interior trim: drop edge / warmup bars from the headline stats.
+    trim_bars = int(meta.get("trim_bars", 0) or 0)
+    warmup_bars = int(meta.get("warmup_bars", 0) or 0)
+    first_ms, last_ms, bar_ms = _ohlcv_span_ms(strategy_dir)
+    bounds = interior_time_bounds(trim_bars, warmup_bars, first_ms, last_ms, bar_ms)
+
+    def _split_interior(pairs: list[tuple[TradePair, TradePair]]) -> list[tuple[TradePair, TradePair]]:
+        if bounds is None:
+            return pairs
+        return [(t, e) for (t, e) in pairs if is_interior(t.entry_time * 1000, bounds)]
+
+    interior_matched = _split_interior(matched)
+    # Use interior-only matched pairs for headline gating when bounds are set.
+    gating_matched = interior_matched if (bounds is not None and interior_matched) else matched
+    # Interior-aware count totals: trim the tv/eng pools too when bounds given.
+    if bounds is not None:
+        tv_gate = [t for t in tv_cmp if is_interior(t.entry_time * 1000, bounds)]
+        eng_gate = [e for e in eng_cmp if is_interior(e.entry_time * 1000, bounds)]
+    else:
+        tv_gate, eng_gate = tv_cmp, eng_cmp
+    # The mark pairs are matched trades on both sides of every count: the
+    # gate pools, the gated matches, the coverage numerator and denominator.
+    # Their rows left the lists above, so they are added back as a number —
+    # the same number on each side, interior-trimmed like the pools.
+    gate_marks = _split_interior(mark_pairs)
+    n_gate_marks = len(gate_marks)
+    tv_gate_n = len(tv_gate) + n_gate_marks
+    eng_gate_n = len(eng_gate) + n_gate_marks
+    gating_matched_n = len(gating_matched) + n_gate_marks
+
+    count_abs_delta = abs(tv_gate_n - eng_gate_n)
+    count_delta = relative_max(tv_gate_n, eng_gate_n)
+    # A mark pair's entry is a fill on both sides, so the identity gate
+    # sees it with the others: the engine's range-end row must carry an
+    # entry incarnation at a TV-proven multi-entry key exactly as any
+    # closed trade's entry must. The pairs are added back to the gate
+    # pools they left, trimmed like them.
+    distinct_entry_mismatches = distinct_entry_fill_mismatches(
+        tv_gate + [t for t, _ in gate_marks],
+        eng_gate + [e for _, e in gate_marks],
+        distinct_tv_entry_keys)
+    distinct_entry_identity_ok = distinct_entry_mismatches == 0
+    # The entry of a mark pair is a fill on both sides and is gated with the
+    # others; appended after the matched pairs so the diagnostic display
+    # (zip with ``matched``) keeps its alignment.
+    entry_deltas = ([relative_max(t.entry_price, e.entry_price) for t, e in gating_matched]
+                    + [relative_max(t.entry_price, e.entry_price) for t, e in gate_marks])
+    # A TV Open row with no engine mark to pair with (the engine never
+    # opened the lot, or closed it for real before the range's end) is an
+    # ordinary row from here on: matched by entry, it carries its exit and
+    # P&L deltas — TV held the position to the end and the engine did not,
+    # which is a real divergence; unmatched, it leaves the coverage
+    # denominator below, as it always has.
+    _open_keys = {(t.entry_time, t.entry_price, t.direction)
+                  for t in tv_raw_all if t.open_mark}
+    exit_deltas  = [relative_max(t.exit_price,  e.exit_price)  for t, e in gating_matched]
+    # PnL p90 uses *relative-to-tv_pnl*, with near-zero trades excluded so
+    # scratch trades don't blow up the ratio. Mirrors canonical line ~1136.
+    pnl_deltas: list[float] = []
+    for t, e in gating_matched:
+        if abs(t.pnl) < PNL_NEAR_ZERO_USD:
+            continue
+        abs_diff = abs(t.pnl - e.pnl)
+        if (t.qty > 1e-9 and e.qty > 1e-9
+                and abs(t.qty / e.qty - 1.0) <= QTY_NORM_BAND):
+            # Qty-normalized comparison isolates per-unit price/commission
+            # parity from tiny equity-derived sizing drift between two
+            # independently compounded simulations — but ONLY inside
+            # QTY_NORM_BAND: a large sizing divergence is a bug the PnL gate
+            # must surface, not rescale away.
+            abs_diff = min(abs_diff, abs(t.pnl - e.pnl * (t.qty / e.qty)))
+        if abs_diff < TV_PNL_ROUNDING_EPSILON_USD:
+            pnl_deltas.append(0.0)
+            continue
+        # Mechanistic exit-coupled forgiveness (replaces the former heuristic
+        # escape hatches): a per-trade PnL miss is forgiven ONLY when it is
+        # arithmetically explained by this same trade's exit-price drift AND
+        # that drift is itself inside the profile's exit tolerance. The exit
+        # gate owns exit-price correctness; the PnL gate then fails only on
+        # UNEXPLAINED money differences (commission, funding, sizing,
+        # rounding) — each gate points at a distinct bug class.
+        exit_rel = relative_max(t.exit_price, e.exit_price)
+        explained_bound = (max(t.qty, e.qty) * abs(t.exit_price - e.exit_price)
+                           + TV_PNL_ROUNDING_EPSILON_USD)
+        if exit_rel < thresh["exit"] and abs_diff <= explained_bound:
+            pnl_deltas.append(0.0)
+            continue
+        pnl_deltas.append(abs_diff / abs(t.pnl))
+
+    entry_p90 = percentile(entry_deltas, 0.90)
+    exit_p90  = percentile(exit_deltas,  0.90)
+    pnl_p90   = percentile(pnl_deltas,   0.90) if pnl_deltas else 0.0
+
+    # Fragmented FIFO grids can have exact entry/count parity and exact
+    # position-level close events while entry-grouped consolidation smears exit
+    # prices across different FIFO lot boundaries. Under a strict guard, score
+    # exit/PnL on the raw exit schedule instead of the consolidated deal blend.
+    tv_sched_rows, eng_sched_rows = schedule_rows_for_gate(
+        tv_raw_all, eng_raw_all, tv_gate, eng_gate, gating_matched
+    )
+    fragmented_fifo = (
+        has_cross_entry_fifo_allocation(tv_sched_rows)
+        or has_cross_entry_fifo_allocation(eng_sched_rows)
+    )
+    if fragmented_fifo and entry_p90 < 1e-12 and count_delta < STRONG_COUNT_DELTA:
+        sched_exit_deltas, sched_pnl_deltas = schedule_exit_metrics(tv_sched_rows, eng_sched_rows)
+        if sched_exit_deltas:
+            sched_exit_p90 = percentile(sched_exit_deltas, 0.90)
+            if sched_exit_p90 <= exit_p90:
+                exit_deltas = sched_exit_deltas
+                exit_p90 = sched_exit_p90
+        if sched_pnl_deltas:
+            sched_pnl_p90 = percentile(sched_pnl_deltas, 0.90)
+            if sched_pnl_p90 <= pnl_p90:
+                pnl_deltas = sched_pnl_deltas
+                pnl_p90 = sched_pnl_p90
+
+    # --- Report-only field-coverage deltas (NOT gated) ---
+    # Extends the historical 4-dimension gate (count/entry/exit/pnl) to qty,
+    # pnl_pct, MFE, MAE, plus p100 worst-case and an unmatched-in-window count,
+    # so tail / masked divergences are surfaced rather than absorbed. These do
+    # NOT affect the tier label (report-only field coverage). A mark pair's
+    # qty is a fill's and is compared; its pnl_pct / MFE / MAE are the mark's
+    # and stay out, like its P&L, which is reported at TradingView's precision
+    # below: the engine's exact P&L rounded to cents against TV's cents.
+    qty_deltas    = ([relative_max(t.qty, e.qty) for t, e in gating_matched]
+                     + [relative_max(t.qty, e.qty) for t, e in gate_marks])
+    pnlpct_deltas = [abs(t.pnl_pct - e.pnl_pct) for t, e in gating_matched]  # pct-points
+    open_mark_pnl_misses = [abs(round(e.pnl, 2) - t.pnl) for t, e in mark_pairs]
+    open_mark_pnl_cent_exact = sum(
+        1 for miss in open_mark_pnl_misses if miss < TV_PNL_ROUNDING_EPSILON_USD)
+    open_mark_pnl_max_abs_usd = max(open_mark_pnl_misses, default=0.0)
+    mfe_deltas    = [relative_max(t.mfe, e.mfe) for t, e in gating_matched if abs(t.mfe) > 1e-9]
+    mae_deltas    = [relative_max(t.mae, e.mae) for t, e in gating_matched if abs(t.mae) > 1e-9]
+    entry_p100  = max(entry_deltas)  if entry_deltas  else 0.0
+    exit_p100   = max(exit_deltas)   if exit_deltas   else 0.0
+    pnl_p100    = max(pnl_deltas)    if pnl_deltas    else 0.0
+    qty_p100    = max(qty_deltas)    if qty_deltas    else 0.0
+    pnlpct_p100 = max(pnlpct_deltas) if pnlpct_deltas else 0.0
+    mfe_p90     = percentile(mfe_deltas, 0.90) if mfe_deltas else 0.0
+    mae_p90     = percentile(mae_deltas, 0.90) if mae_deltas else 0.0
+    unmatched_in_window = max(tv_gate_n, eng_gate_n) - gating_matched_n
+
+    entry_ok = entry_p90  < thresh["entry"]
+    # Count mismatch is a primary reproduction signal. Percent thresholds can
+    # hide dozens of missing/extra trades in large strategies, so excellent
+    # requires exact gated TV/engine count parity. Any non-zero absolute count
+    # mismatch is an engine/codegen gap unless separately proven as a TV/export
+    # anomaly.
+    count_ok = count_abs_delta == 0
+    # HARD GATES ONLY. The former heuristic escape hatches (tiny_exit_pnl_noise,
+    # strong_exit_pnl_coupling, pnl_validated_exit_noise, and the mae_* waivers)
+    # are gone. Every remaining tolerance is principled and visible:
+    #   - the declared per-class profile (strict/production, printed in the
+    #     report) absorbs TV's sub-bar broker-emulator drift for trail_* exits;
+    #   - the mechanistic exit-coupled PnL forgiveness (pnl_deltas loop above)
+    #     stops double-counting a tolerated exit drift as a PnL failure;
+    #   - TV-side impossibilities go through the documented anomaly pipeline
+    #     (inputs.json expected_tier + ANOMALY.md proof), never hidden gates.
+    # A failing gate therefore names a distinct bug class:
+    #   count    -> missing/extra trades (signal logic, order lifecycle)
+    #   entry    -> entry fill semantics
+    #   exit     -> exit fill semantics
+    #   pnl      -> UNEXPLAINED money drift (commission, funding, sizing, rounding)
+    #   coverage -> engine reproduces only a slice of TV's trading history
+    exit_ok  = exit_p90 < thresh["exit"]
+    pnl_ok   = pnl_p90 < thresh["pnl"]
+
+    # Coverage: matched fraction of ALL closed TV trades (interior-trimmed when
+    # declared), NOT of the self-selected common match window — the
+    # anti-window-collapse gate.
+    # VARIANT: drop STILL-OPEN TV trades from the coverage denominator ONLY
+    # when they are UNMATCHED (no engine trade opened at that entry). A matched
+    # open row (engine opened AND closed the position for real past window) is
+    # a legitimate matched trade and is kept. This never touches the matcher,
+    # the count gate, or entry/exit/pnl -- only the coverage denominator.
+    # (_open_keys — the UNPAIRED Open rows — is resolved above, with the
+    # exit/pnl deltas; a paired mark is a matched trade on both sides.)
+    _matched_tv_ids = {id(t) for t, _ in matched}
+    def _is_dropped_open(t):
+        return ((t.entry_time, t.entry_price, t.direction) in _open_keys
+                and id(t) not in _matched_tv_ids)
+    if bounds is not None:
+        tv_cov_denom = [t for t in tv
+                        if is_interior(t.entry_time * 1000, bounds) and not _is_dropped_open(t)]
+        cov_matched = gating_matched_n
+        cov_denom_n = len(tv_cov_denom) + n_gate_marks
+    else:
+        tv_cov_denom = [t for t in tv if not _is_dropped_open(t)]
+        cov_matched = len(matched) + len(mark_pairs)
+        cov_denom_n = len(tv_cov_denom) + len(mark_pairs)
+    unmatched_total = max(cov_denom_n - cov_matched, 0)
+    coverage = (cov_matched / cov_denom_n) if cov_denom_n else 1.0
+    cov_excellent = coverage >= COVERAGE_EXCELLENT or unmatched_total <= 1
+    cov_strong    = coverage >= COVERAGE_STRONG or unmatched_total <= 1
+    cov_moderate  = coverage >= COVERAGE_MODERATE
+
+    all_ok = (
+        count_ok
+        and entry_ok
+        and exit_ok
+        and pnl_ok
+        and cov_excellent
+        and distinct_entry_identity_ok
+    )
+    if all_ok:
+        label = "excellent"
+    elif (
+        cov_strong
+        and count_delta < STRONG_COUNT_DELTA
+        and entry_p90 < STRONG_ENTRY_DELTA
+        and exit_p90 < STRONG_EXIT_DELTA
+        and pnl_p90 < STRONG_PNL_DELTA
+    ):
+        label = "strong"
+    elif cov_moderate and gating_matched_n / max(tv_gate_n, 1) >= 0.90:
+        label = "moderate"
+    elif gating_matched_n:
+        label = "weak"
+    else:
+        label = "minimal"
+
+    # Documented-divergence metadata is shared with the no-alignment path.
+    # Keeping the precedence in one helper prevents an early-return branch
+    # from silently turning declared engine-only/anomaly probes into Minimal.
+    label = _apply_declared_tier_override(label, meta)
+
+    notes = ""
+    if label != "excellent":
+        notes = str(meta.get("notes", "")).strip()
+        if not notes:
+            failures = []
+            if not count_ok:
+                failures.append(f"count Δ {count_delta*100:.2f}%")
+            if not entry_ok:
+                failures.append(f"entry p90 {entry_p90*100:.4f}%")
+            if not exit_ok:
+                failures.append(f"exit p90 {exit_p90*100:.4f}%")
+            if not pnl_ok:
+                failures.append(f"pnl p90 {pnl_p90*100:.4f}%")
+            if not cov_excellent:
+                failures.append(f"coverage {coverage*100:.1f}%")
+            if not distinct_entry_identity_ok:
+                failures.append(
+                    "distinct-entry multiplicity Δ "
+                    f"{distinct_entry_mismatches}")
+            notes = "; ".join(failures) if failures else "non-excellent"
+
+    return VerificationResult(
+        strategy_dir=strategy_dir,
+        rel=rel,
+        label=label,
+        profile=profile,
+        notes=notes,
+        tv_path=tv_path,
+        eng_path=eng_path,
+        tv_count=len(tv_cmp) + len(mark_pairs),
+        eng_count=len(eng_cmp) + len(mark_pairs),
+        tv_raw_count=len(tv) + len(mark_pairs),
+        eng_raw_count=len(eng) + len(mark_pairs),
+        matched_count=len(matched) + len(mark_pairs),
+        gating_matched_count=gating_matched_n,
+        tv_gate_count=tv_gate_n,
+        eng_gate_count=eng_gate_n,
+        count_delta=count_delta,
+        count_abs_delta=count_abs_delta,
+        entry_p90=entry_p90,
+        exit_p90=exit_p90,
+        pnl_p90=pnl_p90,
+        coverage=coverage,
+        unmatched_total=unmatched_total,
+        coverage_tv_count=cov_denom_n,
+        trim_bars=trim_bars,
+        warmup_bars=warmup_bars,
+        bounds=bounds,
+        count_ok=count_ok,
+        entry_ok=entry_ok,
+        exit_ok=exit_ok,
+        pnl_ok=pnl_ok,
+        coverage_ok=cov_excellent,
+        distinct_entry_identity_ok=distinct_entry_identity_ok,
+        distinct_entry_mismatches=distinct_entry_mismatches,
+        unmatched_in_window=unmatched_in_window,
+        open_mark_pairs=len(mark_pairs),
+        open_mark_pnl_cent_exact=open_mark_pnl_cent_exact,
+        open_mark_pnl_max_abs_usd=open_mark_pnl_max_abs_usd,
+        entry_p100=entry_p100,
+        exit_p100=exit_p100,
+        pnl_p100=pnl_p100,
+        qty_p100=qty_p100,
+        pnlpct_p100=pnlpct_p100,
+        mfe_p90=mfe_p90,
+        mae_p90=mae_p90,
+        matched=matched,
+        open_mark_matched=mark_pairs,
+        entry_deltas=entry_deltas,
+        exit_deltas=exit_deltas,
+        pnl_deltas=pnl_deltas,
+        qty_deltas=qty_deltas,
+        pnlpct_deltas=pnlpct_deltas,
+    )
+
+
+def _print_verification(result: VerificationResult, *, show_diffs: int = 0) -> None:
+    if result.label == "missing":
+        print(
+            f"{result.rel}\n"
+            f"  MISSING (tv: {result.tv_exists}, engine: {result.eng_exists})"
+        )
+        return
+    if result.no_aligned_trades:
+        print(
+            f"{result.rel}: TV={result.tv_raw_count} engine={result.eng_raw_count} "
+            f"matched=0  (no aligned trades)\n  -> {result.label}"
+        )
+        return
+
+    check = lambda b: "OK" if b else "X"
+    match_pct = 100.0 * result.matched_count / max(result.tv_raw_count, 1)
+    interior_line = ""
+    if result.bounds is not None:
+        interior_line = (
+            f"  Interior-only: tv={result.tv_gate_count} eng={result.eng_gate_count} "
+            f"matched={result.gating_matched_count} "
+            f"(trim_bars={result.trim_bars}, warmup_bars={result.warmup_bars})\n"
+        )
+    print(
+        f"{result.rel}\n"
+        f"  Profile:       {result.profile}\n"
+        f"  TV trades:     {result.tv_count}  (raw {result.tv_raw_count})\n"
+        f"  Engine trades: {result.eng_count}  (raw {result.eng_raw_count})\n"
+        f"  Matched:       {result.matched_count} ({match_pct:.1f}% of TV)\n"
+        f"{interior_line}"
+        f"  Count delta:           {result.count_delta * 100:8.4f}%  ({check(result.count_ok)}; abs={result.count_abs_delta})\n"
+        f"  Entry-price p90 delta: {result.entry_p90  * 100:8.4f}%  ({check(result.entry_ok)})\n"
+        f"  Exit-price  p90 delta: {result.exit_p90   * 100:8.4f}%  ({check(result.exit_ok)})\n"
+        f"  PnL         p90 delta: {result.pnl_p90    * 100:8.4f}%  ({check(result.pnl_ok)})\n"
+        f"  Coverage:              {result.coverage * 100:8.1f}%  ({check(result.coverage_ok)}; unmatched={result.unmatched_total} of {result.coverage_tv_count} TV)\n"
+        f"  -- report-only (not gated; MAE/MFE are intrabar-path-limited) --\n"
+        f"  Entry/Exit  p99 delta:  {percentile(result.entry_deltas,0.99)*100:.4f}% / {percentile(result.exit_deltas,0.99)*100:.4f}%\n"
+        f"  Entry/Exit/PnL p100:   {result.entry_p100*100:.4f}% / {result.exit_p100*100:.4f}% / {result.pnl_p100*100:.4f}%\n"
+        f"  Qty   p90/p100 delta:  {percentile(result.qty_deltas,0.90)*100:.4f}% / {result.qty_p100*100:.4f}%\n"
+        f"  PnL%  p90/p100 (pts):  {percentile(result.pnlpct_deltas,0.90):.4f} / {result.pnlpct_p100:.4f}\n"
+        f"  MFE/MAE p90 delta:     {result.mfe_p90*100:.4f}% / {result.mae_p90*100:.4f}%\n"
+        f"  Unmatched-in-window:   {result.unmatched_in_window}\n"
+        f"  Range-end mark pairs:  {result.open_mark_pairs}  (TV 'Open' row <-> engine range-end row of one lot; "
+        f"matched, entry gated, exit/pnl not; P&L at cents: {result.open_mark_pnl_cent_exact}/{result.open_mark_pairs} exact, "
+        f"max miss ${result.open_mark_pnl_max_abs_usd:.2f})\n"
+        f"  -> {result.label}"
+    )
+    if show_diffs > 0:
+        # Preserve the historical diagnostic display. Metrics and the tier are
+        # already fixed in ``result``; this formatting cannot affect grading.
+        ranked = sorted(
+            zip(result.matched, result.entry_deltas, result.exit_deltas, result.pnl_deltas),
+            key=lambda x: -max(x[1], x[2], x[3]),
+        )
+        print(f"\n  worst {show_diffs} matched trades by max-of-(entry, exit, pnl) delta:")
+        for (tv_t, e_t), ed, xd, pd in ranked[:show_diffs]:
+            print(
+                f"    TV  #{tv_t.trade_num:4d} {tv_t.direction:5s} "
+                f"@{datetime.fromtimestamp(tv_t.entry_time, tz=timezone.utc):%Y-%m-%d %H:%M} "
+                f"entry={tv_t.entry_price:10.4f} exit={tv_t.exit_price:10.4f} pnl={tv_t.pnl:+10.4f}"
+            )
+            print(
+                f"    eng #{e_t.trade_num:4d} {e_t.direction:5s} "
+                f"@{datetime.fromtimestamp(e_t.entry_time, tz=timezone.utc):%Y-%m-%d %H:%M} "
+                f"entry={e_t.entry_price:10.4f} exit={e_t.exit_price:10.4f} pnl={e_t.pnl:+10.4f}"
+            )
+            print(
+                f"           deltas: entry={ed*100:.4f}% exit={xd*100:.4f}% pnl={pd*100:.4f}%"
+            )
+
+
+def verify_one(strategy_dir: Path, *, verbose: bool = True, show_diffs: int = 0) -> str:
+    """Compatibility wrapper returning the tier and optionally printing it."""
+    result = analyze_strategy(strategy_dir)
+    if verbose:
+        _print_verification(result, show_diffs=show_diffs)
+    return result.label
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("strategy_dir", nargs="?", help="Single strategy folder, e.g. corpus/basic/greedy")
+    ap.add_argument("--all", action="store_true",
+                    help="Verify all reference-tier strategies (basic/, community/, validation/). "
+                         "parity-anomalies/ is excluded unless --include-anomalies is given.")
+    ap.add_argument("--category", choices=["basic", "community", "validation", "parity-anomalies"],
+                    help="Verify all strategies in one category")
+    ap.add_argument("--include-anomalies", action="store_true",
+                    help="With --all, also include parity-anomalies/ probes. These deliberately "
+                         "surface TV-side non-determinism and are documented in "
+                         "pineforge-utils/parity-anomalies/. Folding them in degrades the headline "
+                         "tier counts, so off by default.")
+    ap.add_argument("--show-diffs", type=int, default=0,
+                    help="With single-strategy mode, show this many worst-deviation matched trades")
+    ap.add_argument("--quiet", action="store_true", help="Print only summary")
+    args = ap.parse_args()
+
+    repo_root = Path(__file__).resolve().parent.parent
+    corpus_root = repo_root / "corpus"
+
+    if args.strategy_dir:
+        label = verify_one(Path(args.strategy_dir).resolve(),
+                           show_diffs=args.show_diffs)
+        # `anomaly` and `engine_only` are documented success outcomes
+        # (probe is meeting its declared expected_tier).
+        return 0 if label in {"excellent", "strong", "anomaly", "engine_only"} else 1
+
+    if args.all or args.category:
+        if args.category:
+            cats = [args.category]
+        else:
+            cats = ["basic", "community", "validation"]
+            if args.include_anomalies:
+                cats.append("parity-anomalies")
+        n_total = 0
+        counts = {k: 0 for k in ("excellent", "strong", "moderate", "weak",
+                                  "minimal", "anomaly", "engine_only", "missing")}
+        n_fail: list[str] = []
+        for cat in cats:
+            cat_root = corpus_root / cat
+            if not cat_root.is_dir():
+                continue
+            for strat in sorted(cat_root.iterdir()):
+                if not strat.is_dir():
+                    continue
+                # Skip the symbol-specified/ container — its children
+                # require non-default OHLCV + per-symbol syminfo (pending
+                # pineforge-data). Excluded from corpus headline; engine
+                # correctness for those surfaces is validated via ctest.
+                if (strat / "strategy.pine").is_file() is False and \
+                   strat.name == "symbol-specified":
+                    continue
+                label = verify_one(strat, verbose=not args.quiet)
+                if not args.quiet:
+                    print()
+                n_total += 1
+                counts[label] = counts.get(label, 0) + 1
+                # `anomaly` and `engine_only` are documented success outcomes
+                # (declared via inputs.json::expected_tier) — not failures.
+                if label not in {"excellent", "strong", "anomaly", "engine_only"}:
+                    n_fail.append(f"{cat}/{strat.name}")
+        print()
+        print(
+            "Verified "
+            f"{n_total} strategies — "
+            f"excellent={counts['excellent']}, strong={counts['strong']}, "
+            f"moderate={counts['moderate']}, weak={counts['weak']}, "
+            f"minimal={counts['minimal']}, anomaly={counts['anomaly']}, "
+            f"engine_only={counts['engine_only']}, missing={counts['missing']}"
+        )
+        # Emit a one-liner about parity-anomalies/ when --all skipped them, so
+        # the user knows there's more to inspect on demand.
+        anomaly_dir = corpus_root / "parity-anomalies"
+        if args.all and not args.include_anomalies and anomaly_dir.is_dir():
+            n_anomaly = sum(1 for d in anomaly_dir.iterdir() if d.is_dir())
+            if n_anomaly:
+                print(
+                    f"(skipped {n_anomaly} probe(s) in parity-anomalies/ — these surface "
+                    "TV-side non-determinism, see corpus/parity-anomalies/README.md; "
+                    "rerun with --include-anomalies to fold them in)"
+                )
+        if n_fail:
+            print()
+            print("Below strong tier:")
+            for s in n_fail:
+                print(f"  {s}")
+        return 0 if not n_fail else 1
+
+    ap.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

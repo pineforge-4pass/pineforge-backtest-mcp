@@ -9,11 +9,12 @@ This MCP server is distributed under the **MIT License** — see [LICENSE](LICEN
 It is a thin local bridge. The components it drives have **their own** licenses:
 
 - The **PineForge engine** Docker image it runs is **Apache-2.0** ([`pineforge-engine`](https://github.com/pineforge-4pass/pineforge-engine)).
+- `parity/vendor/` holds three unmodified `scripts/` files of pineforge-engine v1.0.1 (`verify_corpus.py`, `run_strategy.py`, `derive_corpus_feeds.py`), **Apache-2.0**, used by `check_tradingview_parity`.
 - The **transpiler** bundled inside that image, [`pineforge-codegen`](https://github.com/pineforge-4pass/pineforge-codegen-oss), is **source-available** under the **PolyForm Noncommercial License 1.0.0** (free for personal trading; commercial license for funds/products/hosted use). Running the local loop for your own trading is covered by that license's Personal Trading exception; commercial or hosted use requires a commercial license — email **luis@4pass.com.tw**.
 
 ## How it runs (data handling)
 
-Fully local. The server bridges an MCP client to the user's **own** Docker daemon and to **Binance's public market-data API**. No API key; transpile and backtest run on the user's machine. OHLCV file paths are scoped to the working directory by default. The server does not transmit user source or data to PineForge.
+Fully local. The server bridges an MCP client to the user's **own** Docker daemon and to **Binance's public market-data API**. No API key; transpile, backtest and parity grading run on the user's machine (the TradingView trade list passed to `check_tradingview_parity` included). OHLCV file paths are scoped to the working directory by default. The server does not transmit user source or data to PineForge.
 
 ## Third-party components
 
