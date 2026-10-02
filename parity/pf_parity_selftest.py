@@ -61,6 +61,8 @@ def main() -> int:
             "bad_trades_csv")
     refused("csv with a bad time", {**base, "tradingview_trades_csv": TAPE.replace("2025-04-02 10:00", "02/04/2025")},
             "bad_trades_csv")
+    refused("csv with a year out of range", {**base, "tradingview_trades_csv": TAPE.replace("2025-04-02 10:00", "9999-12-31 23:59")},
+            "bad_trades_csv")
     refused("csv with a bad price", {**base, "tradingview_trades_csv": TAPE.replace("1810.5", "abc")},
             "bad_trades_csv")
     refused("csv with a ragged row", {**base, "tradingview_trades_csv": TAPE + "2,Entry long\n"},
