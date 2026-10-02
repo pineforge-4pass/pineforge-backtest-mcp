@@ -451,3 +451,54 @@ test("the hosted retention sentence names the 512 KiB offload threshold and the 
   assert.match(RETENTION_HOSTED, /deleted after 7 days/);
   assert.match(RETENTION_HOSTED, /deleted when grading ends/);
 });
+
+test("tag-name scanning is linear: '<' x 1,000,000, '<a' x 500,000, '<row' x 300,000 without '>' each end in under 1 s", async () => {
+  const cases: Array<[string, string]> = [
+    ["< x 1,000,000", "<".repeat(1_000_000)],
+    ["<a x 500,000", "<a".repeat(500_000)],
+    ["<row x 300,000, no >", "<row".repeat(300_000)],
+    ["<row> x 320,000, unclosed", "<worksheet><sheetData>" + "<row>".repeat(320_000)],
+    ["a 100-character name x 100,000", ("<" + "n".repeat(100)).repeat(100_000)],
+  ];
+  for (const [label, sheet] of cases) {
+    const t0 = performance.now();
+    await inputError(readTradingViewExport(oneSheet(sheet), inflate), "bad_trades_csv",
+      /never closed|no header row with 'Trade number'/);
+    const ms = performance.now() - t0;
+    assert.ok(ms < 1000, `${label}: ${ms.toFixed(0)} ms`);
+  }
+});
+
+test("no other part of the reader rescans: workbook, rels and shared strings of '<' x 1,000,000; ranges with long blank runs", async () => {
+  const lt = "<".repeat(1_000_000);
+  const parts: Array<[string, Array<{ name: string; data: Buffer }>]> = [
+    ["workbook", [{ name: "xl/workbook.xml", data: Buffer.from(lt) }]],
+    ["rels", [
+      { name: "xl/workbook.xml", data: Buffer.from('<workbook><sheets><sheet name="List of trades" r:id="rId1"/></sheets></workbook>') },
+      { name: "xl/_rels/workbook.xml.rels", data: Buffer.from(lt) },
+    ]],
+    ["shared strings", [
+      { name: "xl/workbook.xml", data: Buffer.from('<workbook><sheets><sheet name="List of trades" r:id="rId1"/></sheets></workbook>') },
+      { name: "xl/_rels/workbook.xml.rels", data: Buffer.from('<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>') },
+      { name: "xl/sharedStrings.xml", data: Buffer.from("<sst><si>" + lt + "</si></sst>") },
+      { name: "xl/styles.xml", data: Buffer.from("<styleSheet><cellXfs>" + lt + "</cellXfs></styleSheet>") },
+      { name: "xl/worksheets/sheet1.xml", data: Buffer.from("<worksheet><sheetData/></worksheet>") },
+    ]],
+  ];
+  for (const [label, files] of parts) {
+    const t0 = performance.now();
+    await assert.rejects(readTradingViewExport(zip(files).toString("base64"), inflate),
+      (e: unknown) => e instanceof ParityInputError && e.kind === "bad_trades_csv", label);
+    assert.ok(performance.now() - t0 < 1000, label);
+  }
+  const t1 = performance.now();
+  const blank = settingsFromProperties([
+    { section: "", name: "Trading range", value: "2025-01-01" + " ".repeat(200_000) + "x" },
+    { section: "", name: "Date range", value: " ".repeat(200_000) },
+  ]);
+  assert.ok(performance.now() - t1 < 1000);
+  assert.equal(blank.settings.range_start_wall, undefined);
+  // A character reference outside Unicode stays as written instead of failing the read.
+  const b64 = oneSheet('<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>&#99999999;</t></is></c></row></sheetData></worksheet>');
+  await inputError(readTradingViewExport(b64, inflate), "bad_trades_csv", /no header row/);
+});

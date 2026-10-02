@@ -300,7 +300,8 @@ function xmlDecode(s: string): string {
     if (e === "quot") return '"';
     if (e === "apos") return "'";
     const code = e[1] === "x" ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
-    return String.fromCodePoint(code);
+    // A reference outside Unicode stays as written instead of throwing.
+    return Number.isInteger(code) && code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : `&${e};`;
   });
 }
 
@@ -316,7 +317,11 @@ interface XmlElement {
   body: string | null;
 }
 
-const NAME_END = /[\s/>]/;
+// A tag name ends at whitespace, "/", ">" or another "<"; names the reader
+// looks for are short, so a longer run is not one of its tags and is not read
+// further. Together with indexOf this keeps every scan linear in the input.
+const NAME_END = /[\s/<>]/;
+const MAX_TAG_NAME = 64;
 
 /**
  * Every `<name ...>...</name>` and `<name .../>` element of `xml` in order, the
@@ -332,7 +337,12 @@ function* xmlElements(xml: string, name: string): Generator<XmlElement> {
     const lt = xml.indexOf("<", pos);
     if (lt < 0) return;
     let end = lt + 1;
-    while (end < xml.length && !NAME_END.test(xml[end]!)) end++;
+    const stop = Math.min(xml.length, lt + 1 + MAX_TAG_NAME);
+    while (end < stop && !NAME_END.test(xml[end]!)) end++;
+    if (end === lt + 1 || (end < xml.length && !NAME_END.test(xml[end]!)) || xml[end] === "<") {
+      pos = lt + 1; // no name, a name too long for any tag read here, or "<" inside it
+      continue;
+    }
     const qname = xml.slice(lt + 1, end);
     const colon = qname.lastIndexOf(":");
     if ((colon < 0 ? qname : qname.slice(colon + 1)) !== name) {
@@ -653,11 +663,23 @@ export function parseWallText(s: string): string | null {
   return null;
 }
 
+// Range separators: a dash ("—", "–") with or without spaces, or " - " / " to "
+// between spaces. Found with indexOf (a split regex over long whitespace runs
+// backtracks quadratically); exactly one separator makes a range.
+const RANGE_SEPARATORS = ["—", "–", " - ", " to "];
+
 function parseRange(value: string): [string, string] | null {
-  const parts = value.split(/\s+(?:—|–|-|to)\s+|\s*[—–]\s*/);
-  if (parts.length !== 2) return null;
-  const a = parseWallText(parts[0]!);
-  const b = parseWallText(parts[1]!);
+  const v = value.replace(/\s/g, " ");
+  let found: { at: number; len: number } | null = null;
+  for (const sep of RANGE_SEPARATORS) {
+    const at = v.indexOf(sep);
+    if (at < 0) continue;
+    if (found || v.indexOf(sep, at + sep.length) >= 0) return null;
+    found = { at, len: sep.length };
+  }
+  if (!found) return null;
+  const a = parseWallText(v.slice(0, found.at));
+  const b = parseWallText(v.slice(found.at + found.len));
   return a && b ? [a, b] : null;
 }
 
