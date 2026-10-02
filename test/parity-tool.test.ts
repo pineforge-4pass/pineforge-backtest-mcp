@@ -93,6 +93,10 @@ test("bars: TradingView chart export is converted; other symbols without bars ar
   const out = await parityToolResult(r, { ...base, ohlcv_csv_path: tv }, deps);
   assert.equal(out.isError, false, out.content[0]!.text);
   assert.equal(r.bars[0], "timestamp,open,high,low,close,volume\n1743379200000,10,11,9,10.5,100\n1743380100000,10.5,12,10,11,50\n");
+  const bom = await barsFile("\uFEFFtimestamp,open,high,low,close,volume\n1743379200000,1,1,1,1,1\n");
+  const withBom = await parityToolResult(r, { ...base, ohlcv_csv_path: bom }, deps);
+  assert.equal(withBom.isError, false, withBom.content[0]!.text);
+  assert.equal(r.bars.at(-1), "timestamp,open,high,low,close,volume\n1743379200000,1,1,1,1,1\n");
   const aapl = await parityToolResult(r, { ...base, symbol: "NASDAQ:AAPL" }, deps);
   assert.equal(aapl.structuredContent.error, "no_bars");
   assert.match(String(aapl.structuredContent.message), /NASDAQ:AAPL has no bars source here.*ohlcv_csv/);

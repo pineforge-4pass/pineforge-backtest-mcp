@@ -134,7 +134,7 @@ async function findBars(
     if (args.ohlcv_csv.length > MAX_INLINE_BARS_CHARS) {
       throw noBars(`ohlcv_csv is larger than ${MAX_INLINE_BARS_CHARS} characters; pass ohlcv_csv_path instead.`);
     }
-    const text = args.ohlcv_csv;
+    const text = args.ohlcv_csv.replace(/^\uFEFF/, "");
     const csv = barsFormat(text.split(/\r?\n/)[0] ?? "") === "engine" ? text : fromTradingViewChart(text);
     const path = join(work, "ohlcv.csv");
     await writeFile(path, csv, "utf8");
@@ -149,8 +149,14 @@ async function findBars(
     }
     const st = await stat(abs).catch(() => null);
     if (!st || !st.isFile()) throw new ParityInputError("no_bars", `OHLCV file not found: ${abs}`);
-    if (barsFormat(await firstLine(abs)) === "engine") return { path: abs, source: `your file ${abs}` };
+    const head = await firstLine(abs);
     const path = join(work, "ohlcv.csv");
+    if (barsFormat(head) === "engine") {
+      if (!head.startsWith("\uFEFF")) return { path: abs, source: `your file ${abs}` };
+      // The grading core reads the header without a byte-order mark.
+      await writeFile(path, (await readFile(abs, "utf8")).replace(/^\uFEFF/, ""), "utf8");
+      return { path, source: `your file ${abs}` };
+    }
     await writeFile(path, fromTradingViewChart(await readFile(abs, "utf8")), "utf8");
     return { path, source: `your file ${abs} (TradingView chart export, converted)` };
   }
