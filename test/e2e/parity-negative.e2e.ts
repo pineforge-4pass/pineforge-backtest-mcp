@@ -306,9 +306,32 @@ test("a cwd-scoped server refuses bars paths that leave its cwd ('..', symlink)"
       assert.equal(fine.data?.error, "no_bars");
       assert.match(String(fine.data?.message), /outside cwd/);
     }
+    // A dangling link: its target does not exist, so a write through it would land outside cwd.
+    symlinkSync(join(tmpdir(), `e2e-parity-missing-${Date.now()}.csv`), join(cwd, "dangle.csv"));
+    const dangling = await callParity(scoped, { ...a, ohlcv_csv_path: join(cwd, "dangle.csv") });
+    report("scoped server, dangling symlink", dangling);
+    assert.equal(dangling.data?.error, "no_bars");
+    assert.match(String(dangling.data?.message), /symbolic link whose target does not exist/);
   } finally {
     await scoped.close();
   }
+});
+
+test("320,000 unclosed <row> tags: a plain error at once over stdio, and the server keeps serving", async () => {
+  const a = args(SMALL);
+  a.tradingview_trades = zip([
+    { name: "xl/workbook.xml", data: Buffer.from('<workbook><sheets><sheet name="List of trades" r:id="rId1"/></sheets></workbook>') },
+    { name: "xl/_rels/workbook.xml.rels", data: Buffer.from('<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>') },
+    { name: "xl/worksheets/sheet1.xml", data: Buffer.from("<worksheet><sheetData>" + "<row>".repeat(320_000)) },
+  ]).toString("base64");
+  const t0 = Date.now();
+  const out = await callParity(client, a);
+  const ms = Date.now() - t0;
+  report(`XLSX with 320,000 unclosed rows (${ms} ms)`, out);
+  assert.equal(out.data?.error, "bad_trades_csv");
+  assert.match(String(out.data?.message), /<row> tag that is never closed/);
+  assert.ok(ms < 5_000, `${ms} ms`);
+  await stillServes();
 });
 
 test("after all of that the server still grades", async () => {
