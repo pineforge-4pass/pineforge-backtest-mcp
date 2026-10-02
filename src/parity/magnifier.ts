@@ -89,6 +89,38 @@ export function declaresMagnifier(pine: string): boolean {
   return false;
 }
 
+/**
+ * Seconds of a Pine timeframe as the harness reads it (run_strategy._tf_seconds):
+ * minutes for a bare number, n days / weeks for "nD" / "nW", n seconds for
+ * "nS", -1 for a calendar month ("nM"), 0 for an empty or unreadable string.
+ */
+function tfSeconds(raw: string): number {
+  const tf = String(raw ?? "").trim();
+  if (!tf) return 0;
+  const unit = tf[tf.length - 1]!;
+  const count = "DWMS".includes(unit) ? tf.slice(0, -1) : tf;
+  if (count !== "" && !/^[+-]?\d+$/.test(count.trim())) return 0;
+  const n = count ? parseInt(count, 10) : 1;
+  if (unit === "M") return -1;
+  if (unit === "D") return n * 86_400;
+  if (unit === "W") return n * 604_800;
+  if (unit === "S") return count ? n : 0;
+  return n * 60;
+}
+
+/**
+ * Whether the harness runs a magnifier-declaring script magnified on this chart
+ * timeframe (run_strategy._declared_magnifier_plan): only charts coarser than
+ * one minute and no coarser than one day. 1-minute and seconds charts, and
+ * multi-day, weekly and monthly charts, run without it, so they need no
+ * 1-minute feed. `chartTf` is the script timeframe the harness reads
+ * (runtime.script_tf, else the chart timeframe).
+ */
+export function magnifiesChart(chartTf: string): boolean {
+  const seconds = tfSeconds(chartTf);
+  return seconds > 60 && seconds <= 86_400;
+}
+
 /** The harness's line when a script declares the bar magnifier but its run had none. */
 export function magnifierNotRun(harnessLog: unknown): string | null {
   if (!Array.isArray(harnessLog)) return null;

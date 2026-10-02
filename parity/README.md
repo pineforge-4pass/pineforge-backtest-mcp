@@ -57,14 +57,23 @@ must:
 1. Start `python3 pf_parity.py` in its own process group (Node:
    `spawn(..., { detached: true })`), the request on stdin, and read stdout
    until the process closes. Its own working folder goes in `workdir`.
-2. Set `PF_PARITY_TIMEOUT_MS` (the driver's deadline) and stop the driver only
-   later: at least 30 s after that deadline, send SIGTERM to the driver's
-   process group, then SIGKILL to the group if it has not exited 5 s later.
-   SIGKILL first would leave the driver no chance to kill its children (the
-   Linux backstop still takes the direct children, not their descendants).
-3. Treat exit 0 as an answer (`ok` true or false) and anything else as an
+2. Set `PF_PARITY_TIMEOUT_MS` (the driver's deadline) at least 15 s before
+   the runner's stop. At the stop, send SIGTERM to the driver's process group,
+   then SIGKILL to the group if it has not exited 5 s later. SIGKILL first
+   would leave the driver no chance to kill its children (the Linux backstop
+   still takes the direct children, not their descendants). The hosted
+   container uses a 40 s deadline, SIGTERM at 55 s and SIGKILL at 60 s; the
+   local MCP stops the driver 30 s after `PINEFORGE_PARITY_TIMEOUT_MS`.
+3. Mark the request: give the driver an environment value unique to the
+   request (`PF_PARITY_REQUEST=<id>`, inherited by every descendant; each child
+   also starts in the request's folder). Once the driver has exited, by any
+   signal or none, kill every process that carries the value or works in the
+   folder, until none is left. This takes compiler grandchildren a SIGKILLed
+   driver could not.
+4. Treat exit 0 as an answer (`ok` true or false) and anything else as an
    internal failure; after a stop, answer `timeout` itself.
-4. Remove `workdir` after the driver has closed, not before.
+5. Remove `workdir` after the driver has closed and the request is swept, not
+   before.
 
 Under Docker the container is the boundary instead: `docker kill` on the
 container ends every process in it (the DockerRunner does this past the

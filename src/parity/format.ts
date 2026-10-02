@@ -11,9 +11,9 @@ export const RETENTION_LOCAL =
   "Everything runs on your machine; market data is fetched from Binance only when you do not pass bars.";
 
 export const RETENTION_HOSTED =
-  "The script and trade list are written to a temporary folder in the sandbox and deleted when grading ends; " +
-  "nothing is stored. If a result is larger than the offload threshold it is kept under an unguessable link " +
-  "for up to 7 days, then deleted.";
+  "The script and trade list are written to a temporary folder in the sandbox and deleted when grading ends. " +
+  "Nothing else is kept, except a result larger than 512 KiB: that is stored under an unguessable link and " +
+  "deleted after 7 days.";
 
 type Json = Record<string, unknown>;
 

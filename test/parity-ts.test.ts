@@ -17,6 +17,7 @@ import {
   settingsFromProperties,
   formatParityResult,
   RETENTION_LOCAL,
+  RETENTION_HOSTED,
   resolveSettings,
   DEFAULT_EXPORT_LIMITS,
   type InflateFn,
@@ -404,4 +405,49 @@ test("a check the grader did not compute prints as not measured", () => {
   }, { retention: RETENTION_LOCAL });
   assert.match(text, /\| trade count \| TradingView 1, PineForge 1 Δ 0 \|/);
   assert.match(text, /\| coverage \| not measured: no trade lined up \| - \| - \|  \|/);
+});
+
+// One sheet, its rels and a workbook naming it "List of trades".
+function oneSheet(sheet: string, workbook = '<workbook><sheets><sheet name="List of trades" r:id="rId1"/></sheets></workbook>'): string {
+  return zip([
+    { name: "xl/workbook.xml", data: Buffer.from(workbook) },
+    { name: "xl/_rels/workbook.xml.rels", data: Buffer.from('<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>') },
+    { name: "xl/worksheets/sheet1.xml", data: Buffer.from(sheet) },
+  ]).toString("base64");
+}
+
+test("tag scanning is linear: 320,000 unclosed <row> tags end in a plain error within 1 s", async () => {
+  const b64 = oneSheet("<worksheet><sheetData>" + "<row>".repeat(320_000));
+  const t0 = performance.now();
+  await inputError(readTradingViewExport(b64, inflate), "bad_trades_csv", /<row> tag that is never closed/);
+  const ms = performance.now() - t0;
+  assert.ok(ms < 1000, `${ms.toFixed(0)} ms`);
+  // Opening tags without '>' and unclosed cells, strings and runs stop just as fast.
+  for (const [sheet, wb, re] of [
+    ["<worksheet><sheetData><row>" + "<c>".repeat(320_000) + "</row></sheetData></worksheet>", undefined, /<c> tag that is never closed/],
+    ["<worksheet/>", "<workbook><sheets>" + "<sheet name='x' ".repeat(100_000), /<sheet> tag that is never closed/],
+  ] as Array<[string, string | undefined, RegExp]>) {
+    const t1 = performance.now();
+    await inputError(readTradingViewExport(oneSheet(sheet, wb), inflate), "bad_trades_csv", re);
+    assert.ok(performance.now() - t1 < 1000);
+  }
+});
+
+test("the review's 5,000 x 200-cell sheet: a plain error, refused before allocation under tighter limits", async () => {
+  const row = "<row>" + "<c><v>1</v></c>".repeat(200) + "</row>";
+  const b64 = oneSheet("<worksheet><sheetData>" + row.repeat(5_000) + "</sheetData></worksheet>");
+  const t0 = performance.now();
+  await inputError(readTradingViewExport(b64, inflate), "bad_trades_csv", /no header row with 'Trade number'/);
+  assert.ok(performance.now() - t0 < 10_000);
+  const hosted = { maxInputChars: 8 * 1024 * 1024, maxPartBytes: 16 * 1024 * 1024, maxTotalBytes: 24 * 1024 * 1024,
+    maxRows: 20_000, maxCells: 300_000, maxColumns: 32 };
+  const t1 = performance.now();
+  await inputError(readTradingViewExport(b64, inflate, hosted), "bad_trades_csv", /more than 300000 cells|wider than 32 columns/);
+  assert.ok(performance.now() - t1 < 2_000);
+});
+
+test("the hosted retention sentence names the 512 KiB offload threshold and the 7 days", () => {
+  assert.match(RETENTION_HOSTED, /larger than 512 KiB/);
+  assert.match(RETENTION_HOSTED, /deleted after 7 days/);
+  assert.match(RETENTION_HOSTED, /deleted when grading ends/);
 });

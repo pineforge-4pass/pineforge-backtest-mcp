@@ -252,3 +252,25 @@ test("feed selection: a multiline title keeps the declared magnifier; bar_magnif
   assert.equal(fromXlsx.r.calls[0]!.request.runtime && (fromXlsx.r.calls[0]!.request.runtime as Record<string, unknown>).bar_magnifier, false);
   assert.deepEqual(fromXlsx.fetched.map((a) => a[2]), ["15m"]);
 });
+
+test("a declaring script on a chart the harness does not magnify (1 minute, weekly) fetches and budgets no minute bars", async () => {
+  const start = Date.UTC(2025, 2, 31);
+  for (const [timeframe, days] of [["1W", 700], ["1", 2]] as Array<[string, number]>) {
+    const r = fakeRunner();
+    const fetched: unknown[][] = [];
+    const out = await parityToolResult(r, {
+      ...base, pine: 'strategy("x", use_bar_magnifier=true)', symbol: "BINANCE:ETHUSDT.P", timeframe,
+      range_end: new Date(start + days * 86_400_000).toISOString(),
+    }, {
+      ...deps,
+      async fetchBinanceCsv(...a) {
+        fetched.push(a);
+        return { csv: `timestamp,open,high,low,close,volume\n${start},1,1,1,1,1\n`, bars: 100 };
+      },
+    });
+    assert.equal(out.isError, false, `${timeframe}: ${out.content[0]!.text}`);
+    assert.equal(fetched.length, 1, `${timeframe}: only the chart feed`);
+    assert.equal(fetched[0]![2], timeframe === "1W" ? "1w" : "1m", "the chart's own interval");
+    assert.equal(r.calls[0]!.magnifierBarsPath, undefined);
+  }
+});

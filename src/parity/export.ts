@@ -309,10 +309,73 @@ function attr(tag: string, name: string): string | undefined {
   return m ? xmlDecode(m[1] ?? m[2] ?? "") : undefined;
 }
 
+interface XmlElement {
+  /** Text between the tag name and `>` (or `/>`). */
+  attrs: string;
+  /** Text between the opening and the closing tag; null for `<name .../>`. */
+  body: string | null;
+}
+
+const NAME_END = /[\s/>]/;
+
+/**
+ * Every `<name ...>...</name>` and `<name .../>` element of `xml` in order, the
+ * name matched with or without a namespace prefix (`x:row`). One left-to-right
+ * pass driven by indexOf, so the cost is linear in the input. The first opening
+ * tag without a closing tag ends the scan with an error: nothing after it is
+ * read, and nothing is searched twice. Same-name nesting is not expected (the
+ * first closing tag closes the element).
+ */
+function* xmlElements(xml: string, name: string): Generator<XmlElement> {
+  let pos = 0;
+  for (;;) {
+    const lt = xml.indexOf("<", pos);
+    if (lt < 0) return;
+    let end = lt + 1;
+    while (end < xml.length && !NAME_END.test(xml[end]!)) end++;
+    const qname = xml.slice(lt + 1, end);
+    const colon = qname.lastIndexOf(":");
+    if ((colon < 0 ? qname : qname.slice(colon + 1)) !== name) {
+      pos = lt + 1;
+      continue;
+    }
+    const gt = xml.indexOf(">", end);
+    if (gt < 0) throw unclosed(name);
+    if (xml[gt - 1] === "/") {
+      yield { attrs: xml.slice(end, gt - 1), body: null };
+      pos = gt + 1;
+      continue;
+    }
+    const closing = `</${qname}`;
+    let at = gt + 1;
+    let close = -1;
+    let after = -1;
+    for (;;) {
+      close = xml.indexOf(closing, at);
+      if (close < 0) throw unclosed(name);
+      after = close + closing.length;
+      while (after < xml.length && /\s/.test(xml[after]!)) after++;
+      if (xml[after] === ">") break;
+      at = close + closing.length;
+    }
+    yield { attrs: xml.slice(end, gt), body: xml.slice(gt + 1, close) };
+    pos = after + 1;
+  }
+}
+
+function firstElement(xml: string, name: string): XmlElement | undefined {
+  for (const el of xmlElements(xml, name)) return el;
+  return undefined;
+}
+
+function unclosed(name: string): ParityInputError {
+  return new ParityInputError("bad_trades_csv", `The XLSX has a <${name}> tag that is never closed.`);
+}
+
 /** All <t> text inside a fragment (shared string or inline string, rich runs joined). */
 function textRuns(fragment: string): string {
   let out = "";
-  for (const m of fragment.matchAll(/<(?:\w+:)?t(?:\s[^>]*)?>([\s\S]*?)<\/(?:\w+:)?t>/g)) out += xmlDecode(m[1]!);
+  for (const t of xmlElements(fragment, "t")) out += xmlDecode(t.body ?? "");
   return out;
 }
 
@@ -354,8 +417,8 @@ function parseSheet(xml: string, shared: string[], dateStyles: Set<number>, limi
   const grid: Grid = new Map();
   let cells = 0;
   let rowNo = 0;
-  for (const rm of xml.matchAll(/<(?:\w+:)?row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/(?:\w+:)?row>)/g)) {
-    const rAttr = attr(rm[1] ?? "", "r");
+  for (const rm of xmlElements(xml, "row")) {
+    const rAttr = attr(rm.attrs, "r");
     rowNo = rAttr ? Number(rAttr) : rowNo + 1;
     if (!Number.isInteger(rowNo) || rowNo < 1 || rowNo > EXCEL_MAX_ROWS) throw badCell();
     if (rowNo > limits.maxRows + 1) {
@@ -363,19 +426,19 @@ function parseSheet(xml: string, shared: string[], dateStyles: Set<number>, limi
     }
     const row = new Map<number, Cell>();
     let col = -1;
-    for (const cm of (rm[2] ?? "").matchAll(/<(?:\w+:)?c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/(?:\w+:)?c>)/g)) {
+    for (const cm of xmlElements(rm.body ?? "", "c")) {
       if (++cells > limits.maxCells) {
         throw new ParityInputError("bad_trades_csv", `A sheet of the XLSX has more than ${limits.maxCells} cells.`);
       }
-      const a = cm[1] ?? "";
+      const a = cm.attrs;
       const ref = attr(a, "r");
       const at = ref ? colIndex(ref) : col + 1;
       if (at === null || at >= EXCEL_MAX_COLUMNS) throw badCell();
       col = at;
       const t = attr(a, "t") ?? "n";
       const style = Number(attr(a, "s") ?? 0);
-      const body = cm[2] ?? "";
-      const v = /<(?:\w+:)?v>([\s\S]*?)<\/(?:\w+:)?v>/.exec(body)?.[1];
+      const body = cm.body ?? "";
+      const v = firstElement(body, "v")?.body ?? undefined;
       let value: Cell["value"] = null;
       if (t === "s") value = shared[Number(v)] ?? "";
       else if (t === "inlineStr") value = textRuns(body);
@@ -451,39 +514,39 @@ async function readXlsx(b64: string, inflate: InflateFn, limits: ExportLimits): 
     throw new ParityInputError("bad_trades_csv", "The file is a ZIP but not an XLSX workbook (no xl/workbook.xml).");
   }
   const workbook = await zip.text("xl/workbook.xml");
-  const date1904 = /<(?:\w+:)?workbookPr\b[^>]*\bdate1904\s*=\s*["'](1|true)["']/i.test(workbook);
+  const date1904 = /^(1|true)$/i.test(attr(firstElement(workbook, "workbookPr")?.attrs ?? "", "date1904") ?? "");
   const rels = zip.has("xl/_rels/workbook.xml.rels") ? await zip.text("xl/_rels/workbook.xml.rels") : "";
   const targets = new Map<string, string>();
-  for (const m of rels.matchAll(/<(?:\w+:)?Relationship\b([^>]*)\/?>/g)) {
-    const id = attr(m[1]!, "Id");
-    const target = attr(m[1]!, "Target");
+  for (const rel of xmlElements(rels, "Relationship")) {
+    const id = attr(rel.attrs, "Id");
+    const target = attr(rel.attrs, "Target");
     if (id && target) {
       targets.set(id, target.startsWith("/") ? target.slice(1) : `xl/${target.replace(/^\.\//, "")}`);
     }
   }
   const sheets: Array<{ name: string; path: string }> = [];
-  for (const m of workbook.matchAll(/<(?:\w+:)?sheet\b([^>]*)\/?>/g)) {
-    const name = attr(m[1]!, "name") ?? "";
-    const rid = attr(m[1]!, "r:id") ?? attr(m[1]!, "id");
+  for (const sheet of xmlElements(workbook, "sheet")) {
+    const name = attr(sheet.attrs, "name") ?? "";
+    const rid = attr(sheet.attrs, "r:id") ?? attr(sheet.attrs, "id");
     const path = rid ? targets.get(rid) : undefined;
     if (path) sheets.push({ name, path });
   }
   const shared: string[] = [];
   if (zip.has("xl/sharedStrings.xml")) {
     const sst = await zip.text("xl/sharedStrings.xml");
-    for (const m of sst.matchAll(/<(?:\w+:)?si>([\s\S]*?)<\/(?:\w+:)?si>/g)) shared.push(textRuns(m[1]!));
+    for (const si of xmlElements(sst, "si")) shared.push(textRuns(si.body ?? ""));
   }
   const dateStyles = new Set<number>();
   if (zip.has("xl/styles.xml")) {
     const styles = await zip.text("xl/styles.xml");
     const custom = new Map<number, string>();
-    for (const m of styles.matchAll(/<(?:\w+:)?numFmt\b([^>]*)\/?>/g)) {
-      custom.set(Number(attr(m[1]!, "numFmtId")), attr(m[1]!, "formatCode") ?? "");
+    for (const fmt of xmlElements(styles, "numFmt")) {
+      custom.set(Number(attr(fmt.attrs, "numFmtId")), attr(fmt.attrs, "formatCode") ?? "");
     }
-    const xfs = /<(?:\w+:)?cellXfs\b[^>]*>([\s\S]*?)<\/(?:\w+:)?cellXfs>/.exec(styles)?.[1] ?? "";
+    const xfs = firstElement(styles, "cellXfs")?.body ?? "";
     let i = 0;
-    for (const m of xfs.matchAll(/<(?:\w+:)?xf\b([^>]*?)(?:\/>|>)/g)) {
-      const id = Number(attr(m[1]!, "numFmtId") ?? 0);
+    for (const xf of xmlElements(xfs, "xf")) {
+      const id = Number(attr(xf.attrs, "numFmtId") ?? 0);
       if (BUILTIN_DATE_FORMATS.has(id) || (custom.has(id) && isDateFormatCode(custom.get(id)!))) dateStyles.add(i);
       i++;
     }

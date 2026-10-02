@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { declaresMagnifier, magnifierEndMs, magnifierWindow, magnifierNotRun, formatParityResult } from "../src/parity/index.js";
+import { declaresMagnifier, magnifiesChart, magnifierEndMs, magnifierWindow, magnifierNotRun, formatParityResult } from "../src/parity/index.js";
 
 test("magnifier declaration follows codegen's literal keyword argument", () => {
   const cases: Array<[string, boolean]> = [
@@ -77,4 +77,13 @@ test("a string that never ends: a literal use_bar_magnifier = true counts as dec
   assert.equal(declaresMagnifier('strategy("""x", use_bar_magnifier = ( true ))'), true);
   assert.equal(declaresMagnifier('strategy("x, use_bar_magnifier=false)'), false);
   assert.equal(declaresMagnifier('strategy("x)'), false);
+});
+
+test("the harness magnifies only charts coarser than 1 minute and at most 1 day (run_strategy._tf_seconds)", () => {
+  const cases: Array<[string, boolean]> = [
+    ["1", false], ["30S", false], ["S", false], ["", false], ["x", false],
+    ["2", true], ["15", true], ["240", true], ["1D", true], ["D", true], ["1440", true],
+    ["1441", false], ["2D", false], ["W", false], ["1W", false], ["M", false], ["1M", false],
+  ];
+  for (const [tf, magnified] of cases) assert.equal(magnifiesChart(tf), magnified, tf);
 });

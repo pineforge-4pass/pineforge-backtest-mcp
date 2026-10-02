@@ -12,6 +12,7 @@ import type { EngineRunner, ParamMap, RuntimeArgsLike } from "./engine.js";
 import {
   ParityInputError,
   declaresMagnifier,
+  magnifiesChart,
   exportSpan,
   magnifierWindow,
   formatParityResult,
@@ -256,8 +257,11 @@ export async function checkParity(
     const bars = await findBars(args, s.symbol, s.timeframe, s.rangeStartMs, endMs, work, deps);
     // runtime.bar_magnifier false (passed, or from the XLSX Properties) turns the magnifier off:
     // the harness then runs without it, so no 1-minute feed is fetched or budgeted.
-    if (!magnifier && bars.fetched && s.runtime.bar_magnifier !== false && declaresMagnifier(args.pine)) {
-      const duration = timeframeMs(String(s.runtime.script_tf || s.timeframe));
+    // Only chart timeframes the harness magnifies (coarser than 1 minute, at most 1 day) need the feed.
+    const chartTf = String(s.runtime.script_tf || s.timeframe);
+    if (!magnifier && bars.fetched && s.runtime.bar_magnifier !== false && magnifiesChart(chartTf) &&
+        declaresMagnifier(args.pine)) {
+      const duration = timeframeMs(chartTf);
       const window = magnifierWindow(bars.fetched.firstOpenMs, bars.fetched.lastOpenMs, duration);
       const need = Math.floor((window.endMs - window.startMs) / 60_000) + 1;
       if (bars.fetched.bars + need > MAX_FETCH_BARS) {
