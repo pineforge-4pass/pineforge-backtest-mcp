@@ -387,7 +387,9 @@ you pass, or by the 100,000-bar Binance fetch.
 is fetched as Binance spot klines and `BINANCE:<SYMBOL>.P` as USDT-M perpetual klines,
 from the public API, at most 100,000 bars. Any other symbol without bars is an error
 that asks for them. Scripts declaring `use_bar_magnifier = true` also fetch 1-minute
-bars through the last chart bar's close, counted in the same limit. With your own
+bars through the last chart bar's close, counted in the same limit, when the chart is
+one the harness magnifies (coarser than 1 minute, at most 1 day) and
+`runtime.bar_magnifier` is not `false`. With your own
 bars, optionally pass `magnifier_ohlcv_csv` / `magnifier_ohlcv_csv_path`; if the script
 declares the magnifier but runs without one, the result warns that fills inside bars
 may differ from TradingView's.
