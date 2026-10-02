@@ -139,11 +139,12 @@ def resolve_timezone(name) -> tuple[str, object]:
                     "(for example Asia/Tokyo rather than Japan).")
 
 
-def check_grader_zone(form: str, zone, span: tuple[int, int]) -> None:
-    """The grader's reading of `form` must have zoneinfo's UTC offsets over the tape's span."""
+def check_grader_zone(form: str, zone, instants: list[int]) -> None:
+    """The grader's reading of `form` must have zoneinfo's UTC offsets at every
+    row of the tape and every day of its span."""
     graded = vc.tv_tzinfo({"tv_trades_csv_tz": form})
-    lo, hi = span[0] - 86400, span[1] + 86400
-    for ts in range(lo - lo % 3600, hi + 3600, 3600):
+    lo, hi = min(instants) - 86400, max(instants) + 86400
+    for ts in sorted(set(instants) | set(range(lo - lo % 86400, hi + 86400, 86400))):
         at = datetime.fromtimestamp(ts, tz=timezone.utc)
         if graded.utcoffset(at) != zone.utcoffset(at):
             raise UserError("bad_timezone", f"The grader would read '{form}' with a different "
@@ -184,9 +185,11 @@ def read_trades_csv(text) -> list[dict]:
             raise UserError("bad_trades_csv", f"Row {line}: type '{kind}' is neither an Entry nor an Exit.")
         stamp = str(row.get("Date and time") or "")
         try:
-            datetime.strptime(stamp, TV_TIME_FORMAT)
+            when = datetime.strptime(stamp, TV_TIME_FORMAT)
         except ValueError:
             raise UserError("bad_trades_csv", f"Row {line}: time '{stamp}' is not YYYY-MM-DD HH:MM.")
+        if not 1900 <= when.year <= 2200:
+            raise UserError("bad_trades_csv", f"Row {line}: time '{stamp}' is outside 1900-2200.")
         try:
             price = float(row[price_col])
         except (TypeError, ValueError):
@@ -504,12 +507,10 @@ def timezone_check(jail: Path, meta: dict, given_name: str, rep: dict, tv_count:
         out["offset_mode_share"] = share
         if mode != 0 and share > 0.5 and given_matched >= tv_count / 2:
             hours = mode / 3600
-            note = (f"{'Every' if share == 1 else f'{share:.0%} of the'} matched trade"
-                    f"{'' if share == 1 else 's'} sit{'s' if share == 1 else ''} "
-                    f"{abs(hours):g} h {'later' if mode > 0 else 'earlier'} on TradingView than on PineForge: "
-                    f"the chart timezone is probably off by {abs(hours):g} h.")
-            out["note"] = note
-            warnings.append(note)
+            out["note"] = (f"{'Every' if share == 1 else f'{share:.0%} of the'} matched trade"
+                           f"{'' if share == 1 else 's'} sit{'s' if share == 1 else ''} "
+                           f"{abs(hours):g} h {'later' if mode > 0 else 'earlier'} on TradingView than on "
+                           f"PineForge: the chart timezone is probably off by {abs(hours):g} h.")
     # A candidate counts only when it matches `margin` more trades than the
     # given zone; when fewer than that are unmatched no zone can.
     margin = max(2, math.ceil(0.05 * tv_count))
@@ -527,6 +528,10 @@ def timezone_check(jail: Path, meta: dict, given_name: str, rep: dict, tv_count:
             continue
         if best is None or (n, exact) > (best[1], best[2]):
             best = (zone_name, n, exact)
+    if out["note"] and best and best[1] >= given_matched and best[2] > offsets.get(0, 0):
+        out["note"] += f" Read in {best[0]}, {best[2]} trades enter at the same minute on both sides."
+    if out["note"]:
+        warnings.append(out["note"])
     if best and best[1] >= given_matched + margin:
         # Seconds to add to a time read in the given zone to read it in the better one.
         wall = datetime.fromtimestamp(rep["tv_raw_all"][0].entry_time, tz=timezone.utc).replace(tzinfo=None) \
@@ -633,7 +638,7 @@ def grade(req: dict) -> dict:
                  for r in rows]
     check_grader_zone(meta["tv_trades_csv_tz"] if passthrough is None else
                       str(meta.get("tv_trades_csv_tz", "")) or "asia_taipei",
-                      zone if passthrough is None else grader_tz, (min(span_rows), max(span_rows)))
+                      zone if passthrough is None else grader_tz, span_rows)
     first_entry_ms = min(int(datetime.strptime(r["time"], TV_TIME_FORMAT)
                              .replace(tzinfo=grader_tz).timestamp()) * 1000 for r in rows if r["entry"])
     start_ms = meta.get("ohlcv_start_ms")
@@ -642,7 +647,7 @@ def grade(req: dict) -> dict:
         raise UserError("bad_request", "range_end_ms must be after range_start_ms.")
     if start_ms is not None and first_entry_ms < start_ms:
         message = (f"TradingView's first entry ({_fmt_ms(first_entry_ms, grader_tz)} {given_name}) is before "
-                   f"the range start ({_fmt_ms(start_ms, grader_tz)}): set the range start to the first "
+                   f"the range start ({_fmt_ms(start_ms, grader_tz)} {given_name}): set the range start to the first "
                    "bar of the TradingView backtest.")
         if passthrough is None:
             raise UserError("trades_before_range_start", message)
