@@ -23,6 +23,7 @@ import {
   type RuntimeArgsLike,
 } from "./engine.js";
 import { coverageIndex, coverageTopic, checkPineFeature } from "./coverage.js";
+import { parityToolResult, type ParityDeps, type ParityToolArgs } from "./parity-tool.js";
 
 // ─── Config ───────────────────────────────────────────────────────────────
 
@@ -437,6 +438,61 @@ interface FetchOhlcvArgs {
   output_path: string;
 }
 
+// Pages through klines from startTime (inclusive) to endTime, at most `limit` bars.
+async function collectKlines(
+  market: BinanceMarket,
+  symbol: string,
+  interval: string,
+  startTime: number,
+  endTime: number,
+  limit: number,
+): Promise<{ collected: Kline[]; pages: number }> {
+  const intervalMs = BINANCE_INTERVAL_MS[interval];
+  if (intervalMs === undefined) throw new Error(`Unknown interval '${interval}'`);
+  const collected: Kline[] = [];
+  let cursor = startTime;
+  let pages = 0;
+  while (collected.length < limit && cursor <= endTime) {
+    const remaining = limit - collected.length;
+    const pageLimit = Math.min(BINANCE_KLINES_LIMIT, remaining);
+    const page = await fetchKlinesPage(market, symbol, interval, cursor, endTime, pageLimit);
+    pages++;
+    if (page.length === 0) break;
+
+    // Dedup against previous tail (Binance is inclusive on startTime).
+    const tail = collected[collected.length - 1];
+    const lastSeen = tail ? tail[0] : -1;
+    for (const k of page) {
+      if (k[0] > lastSeen) collected.push(k);
+    }
+    if (page.length < pageLimit) break;
+    const lastPage = page[page.length - 1]!;
+    cursor = lastPage[0] + intervalMs;
+    if (collected.length < limit && cursor <= endTime) {
+      await sleep(BINANCE_PAGE_DELAY_MS);
+    }
+  }
+  if (collected.length === 0) {
+    throw new Error(`Binance returned 0 bars for ${symbol} ${interval} (${market})`);
+  }
+  return { collected, pages };
+}
+
+function klinesCsv(collected: Kline[]): string {
+  const lines: string[] = ["timestamp,open,high,low,close,volume"];
+  for (const k of collected) {
+    const ts = Number(k[0]);
+    if (!Number.isFinite(ts)) continue;
+    const o = sanitizeNumeric(k[1]);
+    const h = sanitizeNumeric(k[2]);
+    const l = sanitizeNumeric(k[3]);
+    const c = sanitizeNumeric(k[4]);
+    const v = sanitizeNumeric(k[5]);
+    lines.push(`${ts},${o},${h},${l},${c},${v}`);
+  }
+  return lines.join("\n") + "\n";
+}
+
 async function fetchBinanceOhlcv(args: FetchOhlcvArgs): Promise<unknown> {
   const intervalMs = BINANCE_INTERVAL_MS[args.interval];
   if (intervalMs === undefined) {
@@ -454,48 +510,10 @@ async function fetchBinanceOhlcv(args: FetchOhlcvArgs): Promise<unknown> {
   const endTime = args.end_time ?? now;
   const startTime = args.start_time ?? Math.max(0, endTime - args.limit * intervalMs);
 
-  const collected: Kline[] = [];
-  let cursor = startTime;
-  let pages = 0;
-  while (collected.length < args.limit && cursor <= endTime) {
-    const remaining = args.limit - collected.length;
-    const pageLimit = Math.min(BINANCE_KLINES_LIMIT, remaining);
-    const page = await fetchKlinesPage(
-      args.market, args.symbol, args.interval, cursor, endTime, pageLimit,
-    );
-    pages++;
-    if (page.length === 0) break;
-
-    // Dedup against previous tail (Binance is inclusive on startTime).
-    const tail = collected[collected.length - 1];
-    const lastSeen = tail ? tail[0] : -1;
-    for (const k of page) {
-      if (k[0] > lastSeen) collected.push(k);
-    }
-    if (page.length < pageLimit) break;
-    const lastPage = page[page.length - 1]!;
-    cursor = lastPage[0] + intervalMs;
-    if (collected.length < args.limit && cursor <= endTime) {
-      await sleep(BINANCE_PAGE_DELAY_MS);
-    }
-  }
-
-  if (collected.length === 0) {
-    throw new Error(`Binance returned 0 bars for ${args.symbol} ${args.interval} (${args.market})`);
-  }
-
-  const lines: string[] = ["timestamp,open,high,low,close,volume"];
-  for (const k of collected) {
-    const ts = Number(k[0]);
-    if (!Number.isFinite(ts)) continue;
-    const o = sanitizeNumeric(k[1]);
-    const h = sanitizeNumeric(k[2]);
-    const l = sanitizeNumeric(k[3]);
-    const c = sanitizeNumeric(k[4]);
-    const v = sanitizeNumeric(k[5]);
-    lines.push(`${ts},${o},${h},${l},${c},${v}`);
-  }
-  const csv = lines.join("\n") + "\n";
+  const { collected, pages } = await collectKlines(
+    args.market, args.symbol, args.interval, startTime, endTime, args.limit,
+  );
+  const csv = klinesCsv(collected);
   await writeFile(outAbs, csv, "utf8");
 
   const first = collected[0]!;
@@ -1010,6 +1028,83 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
       },
     },
     async (args) => asTextResult(await runBacktestGrid(runner, args as BacktestGridArgs)),
+  );
+
+  const parityDeps: ParityDeps = {
+    resolvePath: resolveScopedPath,
+    async fetchBinanceCsv(market, symbol, interval, startMs, endMs, limit) {
+      const { collected } = await collectKlines(market, symbol, interval, startMs, endMs, limit);
+      return { csv: klinesCsv(collected), bars: collected.length };
+    },
+  };
+  const parityWhere = runner.mode === "docker"
+    ? "The run and the grading use the pineforge-release Docker image (no network inside the container)."
+    : "The run and the grading happen in this image.";
+
+  server.registerTool(
+    "check_tradingview_parity",
+    {
+      description:
+        "Check how closely PineForge reproduces a TradingView backtest, trade by trade. Give the Pine v6 " +
+        "script and TradingView's own Strategy Tester export: the \"List of trades\" CSV, or the XLSX report " +
+        "as base64. PineForge runs the script on the same market and window and grades the two trade lists " +
+        "with the grader behind its published parity figures (pineforge-engine v1.0.1 " +
+        "scripts/verify_corpus.py). Returns the tier (excellent, strong, moderate, weak, minimal), each check " +
+        "with its value and thresholds, matched and unmatched trade counts, the first mismatches side by side " +
+        "with hints, and a timezone check. Bars: pass ohlcv_csv or ohlcv_csv_path for any market; without " +
+        "them, BINANCE:<SYMBOL> (spot) and BINANCE:<SYMBOL>.P (USDT-M perpetual) bars are fetched from " +
+        "Binance's public API; any other symbol needs your bars. Settings the XLSX Properties sheet states " +
+        "are used; an explicit input that disagrees with one is an error. " + parityWhere,
+      inputSchema: {
+        pine: z.string().describe("The Pine v6 strategy source TradingView ran (at most 256 KiB)."),
+        tradingview_trades: z.string().describe(
+          "TradingView's Strategy Tester export: the \"List of trades\" CSV text, or the XLSX report " +
+          "file base64-encoded (it starts with UEsDB). The CSV needs the columns Trade number, Type, " +
+          "Date and time and a Price column, as TradingView exports them."
+        ),
+        symbol: z.string().optional().describe(
+          "TradingView ticker the backtest ran on, e.g. 'BINANCE:ETHUSDT.P'. Required unless the XLSX " +
+          "states it or you pass bars."
+        ),
+        timeframe: z.string().optional().describe(
+          "TradingView resolution of the chart: '1', '5', '15', '60', '240', '1D', '1W', ... Required " +
+          "unless the XLSX states it."
+        ),
+        range_start: z.string().optional().describe(
+          "ISO 8601 date or datetime of the first bar TradingView computed (UTC unless it has an " +
+          "offset). Required unless the XLSX states it."
+        ),
+        range_end: z.string().optional().describe(
+          "ISO 8601 end of TradingView's range. Default: the export's last row (the result says so)."
+        ),
+        chart_timezone: z.string().optional().describe(
+          "IANA timezone TradingView printed the trade times in (its chart timezone), e.g. " +
+          "'Asia/Taipei', 'UTC', 'America/New_York'. Required unless the export states it."
+        ),
+        inputs: ParamMapSchema.optional().describe(
+          "Pine input overrides (TradingView's Inputs tab), as in backtest_pine."
+        ),
+        strategy_overrides: StrategyOverridesSchema.optional().describe(
+          "TradingView's Properties tab: the 9 strategy() knobs of list_engine_params."
+        ),
+        runtime: RuntimeArgsSchema.optional().describe(
+          "Engine runtime args of list_engine_params (input_tf, script_tf, bar_magnifier, " +
+          "magnifier_samples, magnifier_dist)."
+        ),
+        max_mismatches: z.number().int().min(0).max(50).optional().describe(
+          "How many mismatching trades to list (default 10, at most 50); the counts are always complete."
+        ),
+        ohlcv_csv: z.string().optional().describe(
+          "Your bars as CSV text: header timestamp,open,high,low,close,volume (epoch ms), or " +
+          "TradingView's chart export time,open,high,low,close,Volume (epoch seconds or ISO 8601)."
+        ),
+        ohlcv_csv_path: z.string().optional().describe(
+          "Path to your bars CSV (same formats as ohlcv_csv; same path rules as backtest_pine's " +
+          "ohlcv_csv_path)."
+        ),
+      },
+    },
+    async (args) => parityToolResult(runner, args as ParityToolArgs, parityDeps),
   );
 
   server.registerTool(

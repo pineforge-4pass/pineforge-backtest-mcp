@@ -45,6 +45,10 @@ COPY --from=mcp /app/package.json ./
 # work already goes to world-writable /tmp. Give the non-root runtime user
 # ownership of /app so report offload works out of the box.
 RUN chown -R 10001 /app
+# The check_tradingview_parity grading core (driver + the vendored engine
+# harness and grader), copied after the chown so it stays root-owned and
+# read-only to the runtime user.
+COPY --from=mcp /app/parity ./parity
 ENV PINEFORGE_PREFIX=/opt/pineforge \
     PINEFORGE_ALLOW_ANYWHERE=1 \
     PINEFORGE_VERSION=${PINEFORGE_RELEASE_VERSION}

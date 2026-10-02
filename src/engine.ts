@@ -7,14 +7,21 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdtemp, writeFile, rm, readFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // ─── Config ───────────────────────────────────────────────────────────────
 
 export const DEFAULT_IMAGE = process.env.PINEFORGE_IMAGE ?? "ghcr.io/pineforge-4pass/pineforge-release:latest";
 export const DOCKER_TIMEOUT_MS = Number(process.env.PINEFORGE_DOCKER_TIMEOUT_MS ?? 120_000);
+// One parity check (transpile + compile + run + grade) inside the grading core;
+// the outer kill adds a grace period so the core can report its own timeout.
+export const PARITY_TIMEOUT_MS = Number(process.env.PINEFORGE_PARITY_TIMEOUT_MS ?? 600_000);
+const PARITY_GRACE_MS = 30_000;
+const PARITY_STDOUT_CAP = 64 * 1024 * 1024;
 
 // ─── Local transpile (Pine → C++ via the engine container) ──────────────────
 
@@ -300,10 +307,19 @@ export interface BacktestCall {
   runtime?: RuntimeArgsLike;
 }
 
+export interface ParityCall {
+  /** The grading core's request (parity/pf_parity.py) without file paths. */
+  request: Record<string, unknown>;
+  /** The bars CSV on this machine (header timestamp,open,high,low,close,volume). */
+  barsPath: string;
+}
+
 export interface EngineRunner {
   readonly mode: "docker" | "local";
   transpile(source: string, image?: string): Promise<string>;
   backtest(call: BacktestCall): Promise<unknown>;
+  /** Run the grading core once; resolves to its JSON response. */
+  parity(call: ParityCall): Promise<Record<string, unknown>>;
   engineInfo(): Promise<EngineInfo>;
   // Image freshness — meaningful only for docker; local returns a static note.
   checkImage(image: string, autoPull: boolean): Promise<ImageFreshness | EngineInfo>;
@@ -319,6 +335,37 @@ export class DockerRunner implements EngineRunner {
   }
   backtest(call: BacktestCall): Promise<unknown> {
     return dockerBacktest({ ...call, image: call.image ?? this.image });
+  }
+  // The engine image runs the grading core: no network, the core read-only,
+  // the bars read-only, a per-call jail for the core's work, the request on stdin.
+  async parity(call: ParityCall): Promise<Record<string, unknown>> {
+    const jail = await mkdtemp(join(tmpdir(), "pineforge-parity-"));
+    const name = `pineforge-parity-${randomBytes(6).toString("hex")}`;
+    try {
+      await mkdir(join(jail, "work"));
+      const args = [
+        "run", "--rm", "-i", "--network=none", "--name", name,
+        "--entrypoint", "python3",
+        "-e", `PF_PARITY_TIMEOUT_MS=${PARITY_TIMEOUT_MS}`,
+        "-e", "PYTHONDONTWRITEBYTECODE=1",
+        "-v", `${parityCoreDir()}:/opt/pf-parity:ro`,
+        "-v", `${jail}:/jail`,
+        "-v", `${call.barsPath}:/in/ohlcv.csv:ro`,
+      ];
+      // Run as the caller so the 0700 jail and the caller's files are readable.
+      if (typeof process.getuid === "function" && typeof process.getgid === "function") {
+        args.push("--user", `${process.getuid()}:${process.getgid()}`);
+      }
+      args.push(this.image, "/opt/pf-parity/pf_parity.py");
+      const request = { ...call.request, ohlcv_csv_path: "/in/ohlcv.csv", workdir: "/jail/work" };
+      return await runParityCore("docker", args, request, {
+        onTimeout: () => {
+          spawn("docker", ["kill", name], { stdio: "ignore" }).on("error", () => undefined);
+        },
+      });
+    } finally {
+      await rm(jail, { recursive: true, force: true }).catch(() => undefined);
+    }
   }
   async engineInfo(): Promise<EngineInfo> {
     return { mode: "docker", baked_in: false, version: null, image: this.image };
@@ -396,6 +443,25 @@ export class LocalRunner implements EngineRunner {
     }
   }
 
+  // The grading core copied into this image, on the baked-in engine.
+  async parity(call: ParityCall): Promise<Record<string, unknown>> {
+    const jail = await mkdtemp(join(tmpdir(), "pineforge-parity-"));
+    try {
+      const request = { ...call.request, ohlcv_csv_path: call.barsPath, workdir: jail };
+      return await runParityCore("python3", [join(parityCoreDir(), "pf_parity.py")], request, {
+        env: {
+          ...process.env,
+          PINEFORGE_PREFIX: this.prefix,
+          PF_PARITY_TIMEOUT_MS: String(PARITY_TIMEOUT_MS),
+          PYTHONDONTWRITEBYTECODE: "1",
+        },
+        detached: true,
+      });
+    } finally {
+      await rm(jail, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
   async engineInfo(): Promise<EngineInfo> {
     return { mode: "local", baked_in: true, version: process.env.PINEFORGE_VERSION ?? null };
   }
@@ -407,4 +473,79 @@ export class LocalRunner implements EngineRunner {
   async pullImage(image: string) {
     return { image, pulled: false, output: "engine is baked into the image (local mode); nothing to pull" };
   }
+}
+
+// ─── Grading core process ─────────────────────────────────────────────────
+
+/** parity/ at the package root (npm `files` and the Docker image ship it). */
+export function parityCoreDir(): string {
+  return process.env.PINEFORGE_PARITY_DIR ?? fileURLToPath(new URL("../parity", import.meta.url));
+}
+
+/**
+ * Run the grading core with `request` on stdin. Exit 0 = a JSON answer (also
+ * for user errors); anything else is an internal failure. Past the timeout
+ * (plus grace) the process, or its whole group when detached, is killed and
+ * the answer is a plain timeout error.
+ */
+export function runParityCore(
+  cmd: string,
+  args: string[],
+  request: Record<string, unknown>,
+  opts: { env?: NodeJS.ProcessEnv; detached?: boolean; onTimeout?: () => void } = {},
+): Promise<Record<string, unknown>> {
+  return new Promise((resolveP, rejectP) => {
+    const child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"], env: opts.env, detached: opts.detached });
+    const out: Buffer[] = [];
+    let outBytes = 0;
+    let overflow = false;
+    let stderr = "";
+    let timedOut = false;
+    child.stdout.on("data", (d: Buffer) => {
+      outBytes += d.length;
+      if (outBytes > PARITY_STDOUT_CAP) overflow = true;
+      else out.push(d);
+    });
+    child.stderr.on("data", (d: Buffer) => { stderr = (stderr + d.toString()).slice(-8192); });
+    const kill = () => {
+      try {
+        if (opts.detached && child.pid) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch { /* already gone */ }
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      opts.onTimeout?.();
+      kill();
+    }, PARITY_TIMEOUT_MS + PARITY_GRACE_MS);
+    child.on("error", (e) => { clearTimeout(timer); rejectP(e); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        resolveP({
+          ok: false,
+          error: "timeout",
+          message: `The parity check did not finish within ${Math.round(PARITY_TIMEOUT_MS / 1000)} s ` +
+            "(PINEFORGE_PARITY_TIMEOUT_MS) and was stopped.",
+        });
+        return;
+      }
+      if (overflow) {
+        rejectP(new Error(`grading core output exceeded ${PARITY_STDOUT_CAP} bytes`));
+        return;
+      }
+      const text = Buffer.concat(out).toString("utf8");
+      if (code !== 0) {
+        rejectP(new Error(`grading core failed (exit ${code}):\n${stderr.slice(-2048)}`));
+        return;
+      }
+      try {
+        resolveP(JSON.parse(text) as Record<string, unknown>);
+      } catch {
+        rejectP(new Error(`grading core printed non-JSON output (first 500 B):\n${text.slice(0, 500)}`));
+      }
+    });
+    child.stdin.on("error", () => undefined);
+    child.stdin.end(JSON.stringify(request));
+  });
 }
