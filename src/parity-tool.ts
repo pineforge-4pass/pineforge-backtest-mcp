@@ -166,7 +166,7 @@ async function findBars(
   const bar = timeframeMs(timeframe);
   const need = Math.floor((endMs - startMs) / bar) + 1;
   if (need > MAX_FETCH_BARS) {
-    throw noBars(`The range needs about ${need} ${timeframe} bars from Binance; the fetch limit is ${MAX_FETCH_BARS}.`);
+    throw noBars(`The range needs about ${need} bars at timeframe ${timeframe} from Binance; the fetch limit is ${MAX_FETCH_BARS}.`);
   }
   const market = t.perpetual ? "usdt_perp" : "spot";
   const { csv, bars } = await deps.fetchBinanceCsv(market, t.symbol, interval, startMs, endMs, need);

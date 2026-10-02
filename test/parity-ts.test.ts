@@ -273,10 +273,10 @@ test("result text: tier, checks, counts, mismatches, timezone, versions, methodo
   assert.match(text, /\| distinct entries \| 0 mismatches \| 0 mismatches \| - \| - \| meets excellent \|/);
   assert.match(text, /Matched 5 of 5 TradingView trades; 0 TradingView-only, 0 PineForge-only\./);
   assert.match(text, /1\. matched, outside the threshold\n {3}TradingView: #1 long 2025-03-31 08:15 @ 1807\.82 -> 2025-04-01 08:00 @ 1839\.81 qty 1 P&L 31\.99 signal pyramid-add/);
-  assert.match(text, /deltas: entry 0\.0000%, exit 0\.9900%, pnl 56\.9500%, qty 0\.0000%, exit -18\.22, pnl -18\.22/);
+  assert.match(text, /deltas: entry 0\.0000%, exit 0\.9900%, P&L 56\.9500%, qty 0\.0000%, exit price Δ -18\.22, P&L Δ -18\.22/);
   assert.match(text, /Timezone: Every matched trade sits 8 h later/);
   assert.match(text, /Timezone: read in Asia\/Taipei, 5 trades match instead of 0 under UTC; the tier above uses UTC\./);
-  assert.match(text, /Window: first bar 2020-01-01 00:00 UTC, range end 2025-04-01 00:00 UTC \(tape\)\./);
+  assert.match(text, /Window: first bar 2020-01-01 00:00 UTC, range end 2025-04-01 00:00 UTC, set by tape\./);
   assert.match(text, /Warnings:\n- Something else\.\nBars: your file\./);
   assert.equal(text.match(/sits 8 h later/g)?.length, 1);
   assert.match(text, /Engine 1\.0\.1, codegen 1\.0\.1, grader pineforge-engine v1\.0\.1 scripts\/verify_corpus\.py \(sha256 de84d515\)/);

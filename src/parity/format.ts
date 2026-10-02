@@ -87,16 +87,22 @@ function tradeText(t: unknown): string {
   return parts.join(" ");
 }
 
+const DELTA_LABEL: Record<string, string> = { entry: "entry", exit: "exit", pnl: "P&L", qty: "qty" };
+
 // Relative deltas print as percentages; *_seconds and *_abs keep their units.
 function deltaText(d: unknown): string {
   if (!isObj(d)) return "";
   const parts: string[] = [];
   for (const [k, v] of Object.entries(d)) {
     if (v === null || v === undefined) continue;
-    if (typeof v !== "number") parts.push(`${k} ${str(v)}`);
-    else if (k.endsWith("_seconds")) { if (v !== 0) parts.push(`${k.replace(/_seconds$/, "")} time ${v > 0 ? "+" : ""}${v}s`); }
-    else if (k.endsWith("_abs")) parts.push(`${k.replace(/_abs$/, "")} ${v > 0 ? "+" : ""}${fmtNum(v)}`);
-    else parts.push(`${k} ${pct(v)}`);
+    const base = k.replace(/_(seconds|abs)$/, "");
+    const label = DELTA_LABEL[base] ?? base;
+    if (typeof v !== "number") parts.push(`${label} ${str(v)}`);
+    else if (k.endsWith("_seconds")) {
+      if (v !== 0) parts.push(`${label} time ${v > 0 ? "+" : ""}${v} s`);
+    } else if (k.endsWith("_abs")) {
+      parts.push(`${label}${base === "exit" || base === "entry" ? " price" : ""} Δ ${v > 0 ? "+" : ""}${fmtNum(v)}`);
+    } else parts.push(`${label} ${pct(v)}`);
   }
   return parts.join(", ");
 }
@@ -189,7 +195,7 @@ export function formatParityResult(response: unknown, opts: FormatOptions): stri
     const parts: string[] = [];
     if (win.range_start) parts.push(`first bar ${str(win.range_start)}${utc}`);
     if (win.range_end) {
-      parts.push(`range end ${str(win.range_end)}${utc}${win.range_end_source ? ` (${str(win.range_end_source)})` : ""}`);
+      parts.push(`range end ${str(win.range_end)}${utc}${win.range_end_source ? `, set by ${str(win.range_end_source)}` : ""}`);
     }
     if (parts.length) lines.push("", `Window: ${parts.join(", ")}.`);
   }

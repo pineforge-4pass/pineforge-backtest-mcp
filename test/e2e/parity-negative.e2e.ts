@@ -175,9 +175,11 @@ test("the XLSX report grades exactly like the CSV it came from", async () => {
   const b = { ...a, tradingview_trades: buildXlsx([tradesSheetFromCsv(String(a.tradingview_trades))]).toString("base64") };
   const fromXlsx = await callParity(client, b);
   report("xlsx", fromXlsx);
+  // Equal but for the export block and the XLSX's own note that it has no Properties sheet.
   const pick = (o: CallOutcome) => {
     const d = { ...(o.data ?? {}) };
     delete d.export;
+    d.warnings = (d.warnings as string[]).filter((w) => !w.includes('no "Properties" sheet'));
     return d;
   };
   assert.equal(fromXlsx.data?.ok, true);
