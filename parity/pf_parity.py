@@ -165,10 +165,10 @@ def read_trades_csv(text) -> list[dict]:
         if col not in header:
             missing.append(f"'{col}'")
     if not any(h == "Price" or h.startswith("Price ") for h in header):
-        missing.append("a 'Price' column")
+        missing.append("'Price'")
     if missing:
-        raise UserError("bad_trades_csv", "The trade list has no " + ", ".join(missing)
-                        + " column. Export it from TradingView's Strategy Tester, List of trades.")
+        raise UserError("bad_trades_csv", "The trade list is missing these columns: " + ", ".join(missing)
+                        + ". Export it from TradingView's Strategy Tester, List of trades, as CSV.")
     price_col = next(h for h in header if h == "Price" or h.startswith("Price "))
     rows = []
     for line, row in enumerate(reader, start=2):
@@ -375,9 +375,12 @@ def replay(jail: Path, meta: dict, tz, eng_raw_all=None) -> dict:
             "tv_raw_all": tv_raw_all}
 
 
-def matched_count_under(jail: Path, meta: dict, tz, eng_raw_all) -> int:
+def matched_count_under(jail: Path, meta: dict, tz, eng_raw_all) -> tuple[int, int]:
+    """Trades matched with the tape read in `tz`, and how many of them enter at
+    the same minute on both sides (the match window absorbs a 1-hour error)."""
     r = replay(jail, meta, tz, list(eng_raw_all))
-    return len(r["matched"]) + len(r["marks"])
+    pairs = r["matched"] + r["marks"]
+    return len(pairs), sum(1 for t, e in pairs if t.entry_time == e.entry_time)
 
 
 def trade_view(t, tz) -> dict:
@@ -414,10 +417,16 @@ def build_mismatches(result, rep: dict, thresh: dict, display_tz, edges: dict,
                         f"{len(matched)} trades, the grade matched {expected}."]
     tv_ids = {id(t) for t, _ in matched}
     eng_ids = {id(e) for _, e in matched}
+
+    def key(t, e):
+        return (t.trade_num, t.entry_time, e.trade_num, e.entry_time)
+
+    # The grader's own per-pair P&L deltas (qty-normalized, exit-coupled), keyed
+    # by trade: result.matched holds the grader's objects, not the replay's.
     pnl_by_pair = {}
     eligible = [(t, e) for t, e in result.matched if abs(t.pnl) >= vc.PNL_NEAR_ZERO_USD]
     if len(eligible) == len(result.pnl_deltas):
-        pnl_by_pair = {(id(t), id(e)): d for (t, e), d in zip(eligible, result.pnl_deltas)}
+        pnl_by_pair = {key(t, e): d for (t, e), d in zip(eligible, result.pnl_deltas)}
     items = []
     for t in rep["tv"]:
         if id(t) not in tv_ids:
@@ -431,7 +440,7 @@ def build_mismatches(result, rep: dict, thresh: dict, display_tz, edges: dict,
                           "deltas": None, "hint": hint_unmatched(e, "pineforge", edges, None, None)})
     deviating = 0
     for t, e in matched:
-        pd = pnl_by_pair.get((id(t), id(e)))
+        pd = pnl_by_pair.get(key(t, e))
         if pd is None and abs(t.pnl) >= vc.PNL_NEAR_ZERO_USD:
             pd = abs(t.pnl - e.pnl) / abs(t.pnl)
         d = pair_deltas(t, e, pd)
@@ -487,12 +496,13 @@ def timezone_check(jail: Path, meta: dict, given_name: str, rep: dict, tv_count:
     offsets = Counter(t.entry_time - e.entry_time for t, e in rep["matched"])
     out = {"given": given_name, "offset_mode_seconds": 0, "offset_mode_share": None,
            "better": None, "note": None}
+    given_matched = len(rep["matched"]) + len(rep["marks"])
     if offsets:
         mode, n = offsets.most_common(1)[0]
         share = n / sum(offsets.values())
         out["offset_mode_seconds"] = mode
         out["offset_mode_share"] = share
-        if mode != 0 and share > 0.5:
+        if mode != 0 and share > 0.5 and given_matched >= tv_count / 2:
             hours = mode / 3600
             note = (f"{'Every' if share == 1 else f'{share:.0%} of the'} matched trade"
                     f"{'' if share == 1 else 's'} sit{'s' if share == 1 else ''} "
@@ -500,7 +510,6 @@ def timezone_check(jail: Path, meta: dict, given_name: str, rep: dict, tv_count:
                     f"the chart timezone is probably off by {abs(hours):g} h.")
             out["note"] = note
             warnings.append(note)
-    given_matched = len(rep["matched"]) + len(rep["marks"])
     # A candidate counts only when it matches `margin` more trades than the
     # given zone; when fewer than that are unmatched no zone can.
     margin = max(2, math.ceil(0.05 * tv_count))
@@ -513,11 +522,11 @@ def timezone_check(jail: Path, meta: dict, given_name: str, rep: dict, tv_count:
         if zone_name == given_name:
             continue
         try:
-            n = matched_count_under(jail, meta, ZoneInfo(zone_name), eng_raw_all)
+            n, exact = matched_count_under(jail, meta, ZoneInfo(zone_name), eng_raw_all)
         except Exception:
             continue
-        if best is None or n > best[1]:
-            best = (zone_name, n)
+        if best is None or (n, exact) > (best[1], best[2]):
+            best = (zone_name, n, exact)
     if best and best[1] >= given_matched + margin:
         # Seconds to add to a time read in the given zone to read it in the better one.
         wall = datetime.fromtimestamp(rep["tv_raw_all"][0].entry_time, tz=timezone.utc).replace(tzinfo=None) \
@@ -689,16 +698,16 @@ def grade(req: dict) -> dict:
         rep = replay(jail, meta, grader_tz)
         tz_info, tz_warnings = timezone_check(jail, meta, given_name, rep, len(rep["tv"]) + len(rep["marks"]))
         warnings += tz_warnings
+        import run_strategy as rs
+        range_end_found = rs._load_tv_range_end(jail, meta)
         eng_shifted = rep["eng"] if tz_info["better"] else None
-        edges = {"first_ms": bars["first_ms"], "last_ms": bars["last_ms"], "interval_ms": bars["interval_ms"]}
+        last_ms = bars["last_ms"] if range_end_found is None else min(bars["last_ms"], range_end_found[0])
+        edges = {"first_ms": bars["first_ms"], "last_ms": last_ms, "interval_ms": bars["interval_ms"]}
         items, counts, mm_warnings = build_mismatches(result, rep, thresh, display_tz, edges,
                                                       tz_info["better"], eng_shifted)
         warnings += mm_warnings
         if passthrough is not None:
             warnings.append("meta_passthrough: graded with the given inputs.json (test only).")
-
-        import run_strategy as rs
-        range_end_found = rs._load_tv_range_end(jail, meta)
         window_log = [ln.strip() for ln in run_log.splitlines()
                       if ln.strip().startswith(("range-end:", "emit-window:", "magnifier:"))]
         report_start = first_entry_ms - (bars["interval_ms"] or 0)
