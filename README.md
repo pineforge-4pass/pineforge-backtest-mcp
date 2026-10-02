@@ -35,13 +35,15 @@ serves the first ten, plus `pull_engine_image` (`docker pull` the engine image) 
 `check_engine_image` instead of `engine_info` (12 tools).
 
 In `tools/list` every tool also has a title and the four MCP annotation hints
-(`src/tool-meta.ts`). Read-only: the lookups, `transpile_pine` and
-`check_tradingview_parity` (both work in a temporary directory they delete). Not
-read-only: `backtest_pine` and `backtest_pine_grid` (a report too large to return
-is written to a file), `fetch_binance_ohlcv` (writes its CSV) and the two image
-tools. Destructive: the tools that write a file at a path you name, since they
-replace a file already there. Open-world: the tools that reach Binance's public
-API or the image registry.
+(`src/tool-meta.ts`). Read-only: the lookups and `check_tradingview_parity` (it
+works in a temporary directory it deletes), and in the Docker image
+`transpile_pine`. Not read-only: `backtest_pine` and `backtest_pine_grid` (a
+report too large to return is written to a file), `fetch_binance_ohlcv` (writes
+its CSV) and the two image tools; in the npm package also `transpile_pine`, since
+there it and the backtests take an `image` that Docker pulls when missing.
+Destructive: the tools that write a file at a path you name, since they replace a
+file already there. Open-world: the tools that reach Binance's public API or an
+image registry.
 
 ## Install
 
