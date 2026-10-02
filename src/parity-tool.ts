@@ -255,7 +255,8 @@ export async function checkParity(
       "magnifier_ohlcv", work, deps);
     const bars = await findBars(args, s.symbol, s.timeframe, s.rangeStartMs, endMs, work, deps);
     if (!magnifier && bars.fetched && declaresMagnifier(args.pine)) {
-      const window = magnifierWindow(bars.fetched.firstOpenMs, bars.fetched.lastOpenMs, timeframeMs(s.timeframe));
+      const duration = timeframeMs(String(s.runtime.script_tf || s.timeframe));
+      const window = magnifierWindow(bars.fetched.firstOpenMs, bars.fetched.lastOpenMs, duration);
       const need = Math.floor((window.endMs - window.startMs) / 60_000) + 1;
       if (bars.fetched.bars + need > MAX_FETCH_BARS) {
         throw noBars(`The range needs ${bars.fetched.bars} chart bars plus ${need} 1-minute magnifier bars; ` +

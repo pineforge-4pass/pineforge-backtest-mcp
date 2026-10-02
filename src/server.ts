@@ -1082,7 +1082,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         "Binance's public API (at most 100,000 bars); any other symbol needs your bars. No quota and no " +
         "history window beyond that. Scripts declaring use_bar_magnifier=true also fetch 1-minute bars " +
         "through the last chart bar's close, counted in that limit. With your own bars, optionally pass " +
-        "magnifier_ohlcv_csv or magnifier_ohlcv_csv_path; a declared magnifier that ran without a feed " +
+        "magnifier_ohlcv_csv or magnifier_ohlcv_csv_path; a script that declares the magnifier but runs without one " +
         "gets a warning that fills inside bars may differ from TradingView's. Settings the XLSX Properties sheet states " +
         "are used; an explicit input that disagrees with one is an error. " + parityWhere,
       inputSchema: {
