@@ -25,6 +25,7 @@ import {
 } from "./engine.js";
 import { coverageIndex, coverageTopic, checkPineFeature } from "./coverage.js";
 import { parityToolResult, type ParityDeps, type ParityToolArgs } from "./parity-tool.js";
+import { TOOL_META } from "./tool-meta.js";
 
 // ─── Config ───────────────────────────────────────────────────────────────
 
@@ -928,6 +929,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
   server.registerTool(
     "transpile_pine",
     {
+      ...TOOL_META.transpile_pine,
       description:
         "Transpile PineScript v6 source to a C++ translation unit locally, " +
         transpileWhere + ". " +
@@ -951,6 +953,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
   server.registerTool(
     "backtest_pine",
     {
+      ...TOOL_META.backtest_pine,
       description:
         "Run a real, deterministic backtest of a PineScript v6 strategy — prefer this over " +
         "estimating its trades or P&L by reasoning, which is unreliable for Pine (series semantics, " +
@@ -1013,6 +1016,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
   server.registerTool(
     "backtest_pine_grid",
     {
+      ...TOOL_META.backtest_pine_grid,
       description:
         "Use when the user wants to optimize, sweep, tune, or compare PineScript parameter values " +
         "(e.g. 'try fast length 8/12/19', 'find the best commission/qty settings') rather than test " +
@@ -1082,6 +1086,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
   server.registerTool(
     "check_tradingview_parity",
     {
+      ...TOOL_META.check_tradingview_parity,
       description:
         "Check how closely PineForge reproduces a TradingView backtest, trade by trade. Give the Pine v6 " +
         "script and TradingView's own Strategy Tester export: the \"List of trades\" CSV, or the XLSX report " +
@@ -1166,6 +1171,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
   server.registerTool(
     "fetch_binance_ohlcv",
     {
+      ...TOOL_META.fetch_binance_ohlcv,
       description:
         "Fetch OHLCV candles from Binance public API and write a backtest-ready " +
         "CSV (header: timestamp,open,high,low,close,volume; timestamp = open time " +
@@ -1205,6 +1211,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
   server.registerTool(
     "binance_symbols",
     {
+      ...TOOL_META.binance_symbols,
       description:
         "List/validate symbols available on the Binance public API for OHLCV " +
         "fetching. Filters: `query` (substring of the symbol), `quote_asset` " +
@@ -1230,6 +1237,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
   server.registerTool(
     "list_engine_params",
     {
+      ...TOOL_META.list_engine_params,
       description:
         "Returns the full catalog of engine knobs accepted by backtest_pine / " +
         "backtest_pine_grid in two groups: strategy_overrides (the 9 " +
@@ -1264,6 +1272,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
   server.registerTool(
     "list_coverage_topics",
     {
+      ...TOOL_META.list_coverage_topics,
       description:
         "START HERE before writing, porting, or backtesting a Pine v6 strategy on " +
         "PineForge. PineForge implements a SUBSET of Pine v6, so checking coverage " +
@@ -1285,6 +1294,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
   server.registerTool(
     "get_coverage_topic",
     {
+      ...TOOL_META.get_coverage_topic,
       description:
         "Returns the full detail plus the exact supported[], partial[], " +
         "via_transpiler[] and unsupported[] feature lists for ONE coverage topic " +
@@ -1308,6 +1318,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
   server.registerTool(
     "check_pine_feature",
     {
+      ...TOOL_META.check_pine_feature,
       description:
         "Answer \"does PineForge support X?\" for a specific Pine v6 identifier or " +
         "namespace (e.g. 'ta.supertrend', 'alert', 'array.new', " +
@@ -1337,6 +1348,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
     server.registerTool(
       "pull_engine_image",
       {
+        ...TOOL_META.pull_engine_image,
         description:
           "Run `docker pull` for the pineforge-release runtime image on the user's " +
           "machine. Useful before the first backtest_pine call.",
@@ -1352,6 +1364,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
     server.registerTool(
       "check_engine_image",
       {
+        ...TOOL_META.check_engine_image,
         description:
           "Check whether the local pineforge-release Docker image is up to date " +
           "with the registry. Compares per-platform manifest digests via " +
@@ -1378,6 +1391,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
     server.registerTool(
       "engine_info",
       {
+        ...TOOL_META.engine_info,
         description:
           "Report the bundled backtest engine: mode, baked-in flag, and version. " +
           "This image runs the engine in-process (no host Docker daemon needed).",

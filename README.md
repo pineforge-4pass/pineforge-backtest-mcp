@@ -34,6 +34,15 @@ The table is the Docker image's tool list (11 tools). The [npm package](#npm--np
 serves the first ten, plus `pull_engine_image` (`docker pull` the engine image) and
 `check_engine_image` instead of `engine_info` (12 tools).
 
+In `tools/list` every tool also has a title and the four MCP annotation hints
+(`src/tool-meta.ts`). Read-only: the lookups, `transpile_pine` and
+`check_tradingview_parity` (both work in a temporary directory they delete). Not
+read-only: `backtest_pine` and `backtest_pine_grid` (a report too large to return
+is written to a file), `fetch_binance_ohlcv` (writes its CSV) and the two image
+tools. Destructive: the tools that write a file at a path you name, since they
+replace a file already there. Open-world: the tools that reach Binance's public
+API or the image registry.
+
 ## Install
 
 Runs as a self-contained container over stdio — engine bundled, in-process, no
