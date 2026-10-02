@@ -370,7 +370,9 @@ only the inputs below, returns it for a stratified sample of 30.
 **Bars.** Your `ohlcv_csv` / `ohlcv_csv_path` when given. Otherwise `BINANCE:<SYMBOL>`
 is fetched as Binance spot klines and `BINANCE:<SYMBOL>.P` as USDT-M perpetual klines,
 from the public API, at most 100,000 bars. Any other symbol without bars is an error
-that asks for them.
+that asks for them. There is no input for a finer (1m) magnifier feed: a script that
+declares `use_bar_magnifier = true` runs as the corpus gate runs such scripts, without
+one.
 
 **XLSX report.** The "List of trades" sheet is read as the CSV would be (Excel dates
 become `YYYY-MM-DD HH:MM`). The "Properties" sheet supplies the symbol, timeframe,
