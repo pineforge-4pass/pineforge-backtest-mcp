@@ -216,6 +216,25 @@ async function findBars(
   };
 }
 
+// The vendored harness and grader are pineforge-engine v1.0.1's, and the
+// published parity figures were made with engine and codegen 1.0.1. With npm the
+// engine is whatever image PINEFORGE_IMAGE names (default :latest), so say so
+// when it is another release.
+const GRADED_RELEASE = "1.0.1";
+
+export function releaseWarning(versions: unknown): string | null {
+  if (typeof versions !== "object" || versions === null) return null;
+  const v = versions as Record<string, unknown>;
+  const plain = (x: unknown) => String(x ?? "unknown").replace(/^v/, "");
+  const engine = plain(v.engine);
+  const codegen = plain(v.codegen);
+  if (engine === GRADED_RELEASE && codegen === GRADED_RELEASE) return null;
+  return `This check ran on engine ${engine} and codegen ${codegen}, not ${GRADED_RELEASE}: the grader and the ` +
+    `harness here are pineforge-engine v${GRADED_RELEASE}'s and the published parity figures were made with ` +
+    `${GRADED_RELEASE}, so the tier may differ from what that release gives. To grade on ${GRADED_RELEASE}, use ` +
+    `ghcr.io/pineforge-4pass/pineforge-release:${GRADED_RELEASE} (PINEFORGE_IMAGE with npm).`;
+}
+
 /** The core's response for one call; user problems come back as ok:false. */
 export async function checkParity(
   runner: EngineRunner,
@@ -305,6 +324,8 @@ export async function checkParity(
     } else if (exp.warnings.length) {
       response.warnings = exp.warnings;
     }
+    const release = releaseWarning(response.versions);
+    if (release) response.warnings = [release, ...(Array.isArray(response.warnings) ? response.warnings : [])];
     response.export = {
       format: exp.format,
       rows: exp.rows,

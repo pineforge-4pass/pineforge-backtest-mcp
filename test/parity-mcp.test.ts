@@ -3,7 +3,7 @@
 // createServer() builds, with a runner that records instead of running Docker.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -47,6 +47,9 @@ before(async () => {
   mkdirSync(join(inside, "sub"));
   symlinkSync(outside, join(inside, "sub", "dir-link"));
   writeFileSync(join(inside, "secret.csv"), `${SECRET}\nmore\n`);
+  // Dangling links: their targets do not exist, so a write would create them outside cwd.
+  symlinkSync(join(outside, "new.csv"), join(inside, "dangle.csv"));
+  symlinkSync(join(outside, "missing-dir"), join(inside, "dangle-dir"));
   writeFileSync(join(inside, "bars.csv"), BARS);
   const [a, b] = InMemoryTransport.createLinkedPair();
   await createServer(runner, { imageTools: false }).connect(b);
@@ -137,4 +140,17 @@ test("XLSX Properties range in a DST fold: entry inside it is not 'before the ra
   assert.equal(req.range_end_ms, 1761439500000);
   const same = await parity({ pine: PINE, tradingview_trades: xlsx, chart_timezone: "Europe/Berlin", range_start: "2025-10-26T00:15:00Z", ohlcv_csv_path: join(inside, "bars.csv") });
   assert.equal(same.isError, false, same.text);
+});
+
+test("dangling symlinks are refused for reads and writes (check_tradingview_parity, fetch_binance_ohlcv)", async () => {
+  const r = await parity({ ...base, ohlcv_csv_path: join(inside, "dangle.csv") });
+  assert.equal(r.data.error, "no_bars");
+  assert.match(String(r.data.message), /symbolic link whose target does not exist/);
+  for (const output_path of [join(inside, "dangle.csv"), join(inside, "dangle-dir", "x.csv"), "test/" + inside.split("/test/")[1] + "/dangle.csv"]) {
+    const w = await client.callTool({ name: "fetch_binance_ohlcv", arguments: { symbol: "BTCUSDT", interval: "1h", limit: 2, output_path } });
+    assert.equal(w.isError, true, output_path);
+    assert.match(JSON.stringify(w.content), /symbolic link whose target does not exist/, output_path);
+  }
+  assert.equal(existsSync(join(outside, "new.csv")), false, "nothing was written outside cwd");
+  assert.equal(existsSync(join(outside, "missing-dir")), false);
 });

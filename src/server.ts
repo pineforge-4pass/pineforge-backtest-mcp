@@ -11,7 +11,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { mkdtemp, mkdir, writeFile, rm, stat, readFile } from "node:fs/promises";
-import { realpathSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, isAbsolute, dirname, relative, sep, basename } from "node:path";
 import { VERSION } from "./version.js";
@@ -339,17 +339,23 @@ async function pMap<T, R>(items: T[], n: number, fn: (t: T, i: number) => Promis
 
 // The canonical form of a path: `..` and `.` removed, symlinks resolved. A
 // path that does not exist yet (an output file) resolves through its deepest
-// existing ancestor.
-function canonicalPath(p: string): string {
+// existing ancestor. `danglingLink` names a component that is a symbolic link
+// whose target does not exist: a write through it would land wherever the
+// link points, which the containment check cannot see.
+function canonicalPath(p: string): { path: string; danglingLink: string | null } {
   const abs = resolve(process.cwd(), p);
   const rest: string[] = [];
   let head = abs;
+  let danglingLink: string | null = null;
   for (;;) {
     try {
-      return join(realpathSync(head), ...rest);
+      return { path: join(realpathSync(head), ...rest), danglingLink };
     } catch {
+      try {
+        if (lstatSync(head).isSymbolicLink()) danglingLink = head;
+      } catch { /* this component does not exist yet */ }
       const parent = dirname(head);
-      if (parent === head) return abs;
+      if (parent === head) return { path: abs, danglingLink };
       rest.unshift(basename(head));
       head = parent;
     }
@@ -357,9 +363,15 @@ function canonicalPath(p: string): string {
 }
 
 function resolveScopedPath(p: string, label: string): string {
-  const target = canonicalPath(p);
+  const { path: target, danglingLink } = canonicalPath(p);
   if (!ALLOW_ANYWHERE) {
-    const root = canonicalPath(process.cwd());
+    if (danglingLink) {
+      throw new Error(
+        `${label} path '${p}' goes through a symbolic link whose target does not exist (${danglingLink}); ` +
+        `refused because it could point outside cwd. Set PINEFORGE_ALLOW_ANYWHERE=1 to override.`
+      );
+    }
+    const root = canonicalPath(process.cwd()).path;
     const rel = relative(root, target);
     if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
       throw new Error(

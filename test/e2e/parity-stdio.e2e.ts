@@ -45,6 +45,12 @@ test(`${TOOL} over stdio reproduces the published corpus tiers`, async () => {
         return p;
       })
     : stratifiedSample(eligible, Number(process.env.PF_E2E_SAMPLE ?? 30), Number(process.env.PF_E2E_SEED ?? 20261002));
+  // An empty or short sample must fail, not pass as AGREEMENT 0/0.
+  const requested = wanted ? wanted.length : Number(process.env.PF_E2E_SAMPLE ?? 30);
+  assert.ok(Number.isInteger(requested) && requested > 0, `bad sample size ${requested}`);
+  assert.ok(eligible.length >= requested, `only ${eligible.length} eligible probes for a sample of ${requested}`);
+  assert.equal(sample.length, requested, `sample of ${sample.length}, ${requested} requested`);
+  assert.equal(new Set(sample.map((p) => p.slug)).size, sample.length, "a probe was drawn twice");
   console.log(`sample (${sample.length}): ${sample.map((p) => p.slug).join(", ")}`);
 
   const client = await connect();
@@ -88,6 +94,9 @@ test(`${TOOL} over stdio reproduces the published corpus tiers`, async () => {
     console.log(table);
     if (process.env.PF_E2E_OUT) writeFileSync(process.env.PF_E2E_OUT, table + "\n");
     assert.deepEqual(failures, []);
+    // Every drawn probe was graded and agreed: AGREEMENT n/n with n the sample.
+    assert.equal(rows.length, requested, `${rows.length} probes graded of ${requested}`);
+    assert.equal(rows.filter((r) => r.includes("| yes |")).length, requested);
   } finally {
     await client.close();
   }

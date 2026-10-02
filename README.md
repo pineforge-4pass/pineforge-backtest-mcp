@@ -506,7 +506,9 @@ at that tag is the reference it was checked against.
 With `npx`, OHLCV, output and report paths must be inside the current working
 directory of the MCP server process by default. The check runs on the resolved
 path: `..` segments and symbolic links are resolved first, so neither can point
-outside it. Override with:
+outside it, and a symbolic link whose target does not exist is refused. A data
+file or folder linked into the working directory from outside it is therefore
+refused too. Override with:
 
 ```bash
 export PINEFORGE_ALLOW_ANYWHERE=1
