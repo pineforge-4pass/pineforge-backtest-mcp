@@ -1,0 +1,4 @@
+# pineforge-engine v1.0.1 (commit d1d188673c526a5a1751e51f4f1aa0c0cdcd7471), scripts/<file>, byte-identical
+de84d5150ac0a29b67906f1f8b6fe1f1f13ac66ed36be88ea2bc63d7280ed298  verify_corpus.py
+15a58b905654d945add2e30539341d5799f6155a25ac4ed97c3f04f11fc6180a  run_strategy.py
+d2d848d4e8c11f5fa6cc387dc150ab5a2e67ea800a702db4e6a7c1666539d99a  derive_corpus_feeds.py
