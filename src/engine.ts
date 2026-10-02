@@ -6,9 +6,9 @@
  * second backend can live alongside it. No behavior change.
  */
 
-import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { randomBytes, randomUUID } from "node:crypto";
+import { mkdtemp, mkdir, writeFile, rm, readFile, readdir, readlink, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -451,8 +451,14 @@ export class LocalRunner implements EngineRunner {
   }
 
   // The grading core copied into this image, on the baked-in engine.
+  // Every process of the request inherits PF_PARITY_REQUEST=<id> and starts in
+  // the jail; once the driver has exited (normally, by signal or by SIGKILL) the
+  // request is swept, compiler grandchildren included, before cleanup returns.
   async parity(call: ParityCall): Promise<Record<string, unknown>> {
     const jail = await mkdtemp(join(tmpdir(), "pineforge-parity-"));
+    const jailReal = await realpath(jail);
+    const id = randomUUID();
+    const marker = `PF_PARITY_REQUEST=${id}`;
     try {
       const request = { ...call.request, ohlcv_csv_path: call.barsPath, workdir: jail,
         magnifier_ohlcv_csv_path: call.magnifierBarsPath ?? null };
@@ -462,10 +468,13 @@ export class LocalRunner implements EngineRunner {
           PINEFORGE_PREFIX: this.prefix,
           PF_PARITY_TIMEOUT_MS: String(PARITY_TIMEOUT_MS),
           PYTHONDONTWRITEBYTECODE: "1",
+          PF_PARITY_REQUEST: id,
         },
         detached: true,
+        sweep: (driverPid) => sweepRequest(marker, jailReal, driverPid),
       });
     } finally {
+      await sweepRequest(marker, jailReal).catch(() => undefined);
       await rm(jail, { recursive: true, force: true }).catch(() => undefined);
     }
   }
@@ -500,10 +509,23 @@ export function runParityCore(
   cmd: string,
   args: string[],
   request: Record<string, unknown>,
-  opts: { env?: NodeJS.ProcessEnv; detached?: boolean; onTimeout?: () => void } = {},
+  opts: {
+    env?: NodeJS.ProcessEnv;
+    detached?: boolean;
+    onTimeout?: () => void;
+    /** Kills what is left of the request; run once the driver exits and awaited before settling. */
+    sweep?: (driverPid: number | undefined) => Promise<unknown>;
+  } = {},
 ): Promise<Record<string, unknown>> {
-  return new Promise((resolveP, rejectP) => {
+  return new Promise((resolveSettled, rejectSettled) => {
     const child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"], env: opts.env, detached: opts.detached });
+    let sweeping: Promise<unknown> = Promise.resolve();
+    const sweep = () => {
+      if (opts.sweep) sweeping = sweeping.then(() => opts.sweep!(child.pid)).catch(() => undefined);
+    };
+    child.on("exit", () => sweep());
+    const resolveP = (v: Record<string, unknown>) => { void sweeping.then(() => resolveSettled(v)); };
+    const rejectP = (e: unknown) => { void sweeping.then(() => rejectSettled(e)); };
     const out: Buffer[] = [];
     let outBytes = 0;
     let overflow = false;
@@ -528,7 +550,10 @@ export function runParityCore(
       timedOut = true;
       opts.onTimeout?.();
       signal("SIGTERM");
-      hardKill = setTimeout(() => signal("SIGKILL"), PARITY_KILL_GRACE_MS);
+      hardKill = setTimeout(() => {
+        signal("SIGKILL");
+        sweep();
+      }, PARITY_KILL_GRACE_MS);
     }, PARITY_TIMEOUT_MS + PARITY_GRACE_MS);
     child.on("error", (e) => { clearTimeout(timer); clearTimeout(hardKill); rejectP(e); });
     child.on("close", (code) => {
@@ -561,4 +586,67 @@ export function runParityCore(
     child.stdin.on("error", () => undefined);
     child.stdin.end(JSON.stringify(request));
   });
+}
+
+// ─── Request sweep (LocalRunner) ──────────────────────────────────────────
+
+/**
+ * PIDs of one request, other than this process: those whose environment holds
+ * `marker` (NAME=value) or whose working directory is inside the request's jail.
+ * Linux reads /proc; elsewhere (macOS, the unit tests) lsof lists working
+ * directories, since process environments are not readable there.
+ */
+async function requestPids(marker: string, jailReal: string): Promise<number[]> {
+  const found: number[] = [];
+  const inJail = (p: string) => p === jailReal || p.startsWith(`${jailReal}/`);
+  if (process.platform === "linux") {
+    const needle = Buffer.from(`${marker}\0`);
+    for (const name of await readdir("/proc")) {
+      if (!/^\d+$/.test(name) || Number(name) === process.pid) continue;
+      try {
+        if ((await readFile(`/proc/${name}/environ`)).includes(needle)) {
+          found.push(Number(name));
+          continue;
+        }
+      } catch { /* exited, or not ours to read */ }
+      try {
+        if (inJail(await readlink(`/proc/${name}/cwd`))) found.push(Number(name));
+      } catch { /* exited, or not ours to read */ }
+    }
+    return found;
+  }
+  const lsof = spawnSync("lsof", ["-a", "-d", "cwd", "-u", String(process.getuid?.() ?? ""), "-F", "pn"], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  let pid = 0;
+  for (const line of (lsof.stdout ?? "").split("\n")) {
+    if (line.startsWith("p")) pid = Number(line.slice(1));
+    else if (line.startsWith("n") && pid && pid !== process.pid && inJail(line.slice(1))) found.push(pid);
+  }
+  return found;
+}
+
+/**
+ * SIGKILL every process of one request: the driver's group, then anything still
+ * marked as the request's (children in their own sessions, their compilers,
+ * orphans). Repeats until none is left; throws if some will not go.
+ */
+export async function sweepRequest(marker: string, jailReal: string, driverPid?: number): Promise<number> {
+  let killed = 0;
+  if (driverPid) {
+    try { process.kill(-driverPid, "SIGKILL"); } catch { /* the group is already empty */ }
+  }
+  for (let round = 0; round < 100; round++) {
+    const pids = await requestPids(marker, jailReal);
+    if (pids.length === 0) return killed;
+    for (const pid of pids) {
+      for (const target of [-pid, pid]) {
+        try { process.kill(target, "SIGKILL"); } catch { /* not a group leader, or gone */ }
+      }
+      killed++;
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error("processes of the parity check did not stop");
 }

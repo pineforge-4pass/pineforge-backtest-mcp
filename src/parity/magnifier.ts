@@ -1,5 +1,11 @@
-/** The source with comments removed and string contents blanked, so only code is searched. */
-function codeOnly(pine: string): string {
+/**
+ * The source with comments removed and string contents blanked, so only code is
+ * searched; null when a string never ends (the scanner cannot tell code from
+ * text). Strings follow pineforge-codegen 1.0.1's lexer: triple-quoted strings
+ * run to the matching triple quote, `"` / `'` strings to the matching unescaped
+ * quote, both across line breaks (a wrapped string continues on the next line).
+ */
+function codeOnly(pine: string): string | null {
   let out = "";
   let i = 0;
   while (i < pine.length) {
@@ -9,11 +15,20 @@ function codeOnly(pine: string): string {
       continue;
     }
     if (c === '"' || c === "'") {
-      out += c;
-      i++;
-      while (i < pine.length && pine[i] !== c && pine[i] !== "\n") i += pine[i] === "\\" ? 2 : 1;
-      out += c;
-      i++;
+      const triple = pine.startsWith(c.repeat(3), i);
+      const close = triple ? c.repeat(3) : c;
+      i += close.length;
+      for (;;) {
+        if (i >= pine.length) return null;
+        if (pine[i] === "\\") {
+          i += 2;
+          continue;
+        }
+        if (pine.startsWith(close, i)) break;
+        i++;
+      }
+      i += close.length;
+      out += '""';
       continue;
     }
     out += c;
@@ -21,6 +36,9 @@ function codeOnly(pine: string): string {
   }
   return out;
 }
+
+// The literal declaration, searched in the raw source when strings cannot be told apart.
+const LITERAL_DECLARATION = /(^|[^\w.])use_bar_magnifier\s*=(?!=)[\s(]*true(?![\w.])/;
 
 /** Strip whitespace and outer parentheses that enclose the whole expression. */
 function unparen(expr: string): string {
@@ -46,6 +64,8 @@ function unparen(expr: string): string {
  */
 export function declaresMagnifier(pine: string): boolean {
   const code = codeOnly(pine);
+  // Unsure (a string that never ends): take a literal `use_bar_magnifier = true` as declared.
+  if (code === null) return LITERAL_DECLARATION.test(pine);
   const decl = /(^|[^\w.])strategy\s*\(/.exec(code);
   if (!decl) return false;
   // Split the declaration's arguments at top-level commas.

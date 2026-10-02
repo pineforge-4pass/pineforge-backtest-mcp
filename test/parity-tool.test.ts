@@ -143,6 +143,11 @@ test("LocalRunner.parity: request on stdin, bars path and a jail that is gone af
     assert.equal(res.request.max_mismatches, 3);
     assert.equal(res.request.magnifier_ohlcv_csv_path, path);
     await assert.rejects(runner.parity({ request: { pine: "exit 3" }, barsPath: path }), /grading core failed \(exit 3\):\ndriver failed on purpose/);
+    // A process the driver leaves behind in the jail (its own session) is swept before parity() returns.
+    const left = await runner.parity({ request: { pine: "orphan" }, barsPath: path }) as Record<string, any>;
+    assert.equal(left.marked, true, "the request's processes carry PF_PARITY_REQUEST");
+    assert.ok(Number.isInteger(left.orphan));
+    assert.throws(() => process.kill(left.orphan, 0), /ESRCH/, "the orphan outlived parity()");
   } finally {
     delete process.env.PINEFORGE_PARITY_DIR;
   }
@@ -211,4 +216,39 @@ test("supplied magnifier feeds share the chart formats and do not cause a networ
   const both = await parityToolResult(r, { ...args, magnifier_ohlcv_csv: own, magnifier_ohlcv_csv_path: "fine.csv" }, noNetwork);
   assert.equal(both.structuredContent.error, "bad_request");
   assert.match(String(both.structuredContent.message), /magnifier_ohlcv_csv or magnifier_ohlcv_csv_path, not both/);
+});
+
+test("feed selection: a multiline title keeps the declared magnifier; bar_magnifier false (input or XLSX) fetches and budgets no minute bars", async () => {
+  const start = Date.UTC(2025, 2, 31);
+  const head = "timestamp,open,high,low,close,volume\n";
+  const run = async (extra: Record<string, unknown>, chartBars = 4, end = "2025-03-31T00:30:00Z") => {
+    const r = fakeRunner();
+    const fetched: unknown[][] = [];
+    const out = await parityToolResult(r, { ...base, symbol: "BINANCE:ETHUSDT.P", range_end: end, ...extra }, {
+      ...deps,
+      async fetchBinanceCsv(...a) {
+        fetched.push(a);
+        return { csv: head + [0, 15, 30, 45].map((m) => `${start + m * 60_000},1,1,1,1,1\n`).join(""), bars: chartBars };
+      },
+    });
+    return { out, fetched, r };
+  };
+  const multiline = await run({ pine: '//@version=6\nstrategy("""multi\nline""", use_bar_magnifier=true)\n' });
+  assert.equal(multiline.out.isError, false, multiline.out.content[0]!.text);
+  assert.deepEqual(multiline.fetched.map((a) => a[2]), ["15m", "1m"]);
+  assert.ok(multiline.r.calls[0]!.magnifierBarsPath);
+  const wrapped = await run({ pine: '//@version=6\nstrategy("multi\n     line", use_bar_magnifier=true)\n' });
+  assert.deepEqual(wrapped.fetched.map((a) => a[2]), ["15m", "1m"]);
+  // The review's case: 70 days of 15m bars would need 100,815 minute bars; with the magnifier off none are budgeted.
+  const off = await run({ pine: 'strategy("x", use_bar_magnifier=true)', runtime: { bar_magnifier: false } }, 6722,
+    new Date(start + 70 * 86_400_000).toISOString());
+  assert.equal(off.out.isError, false, off.out.content[0]!.text);
+  assert.deepEqual(off.fetched.map((a) => a[2]), ["15m"]);
+  assert.equal(off.r.calls[0]!.magnifierBarsPath, undefined);
+  const props = SAMPLE_PROPERTIES.map((row) => (row[0] === "Trading range" ? ["Trading range", "Mar 31, 2025, 00:00 — Mar 31, 2025, 08:30"] : row));
+  const xlsx = reportXlsx(CSV, props).toString("base64");
+  const fromXlsx = await run({ pine: 'strategy("x", use_bar_magnifier=true)', tradingview_trades: xlsx, timeframe: undefined, range_start: undefined, range_end: undefined });
+  assert.equal(fromXlsx.out.isError, false, fromXlsx.out.content[0]!.text);
+  assert.equal(fromXlsx.r.calls[0]!.request.runtime && (fromXlsx.r.calls[0]!.request.runtime as Record<string, unknown>).bar_magnifier, false);
+  assert.deepEqual(fromXlsx.fetched.map((a) => a[2]), ["15m"]);
 });

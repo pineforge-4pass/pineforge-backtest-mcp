@@ -254,7 +254,9 @@ export async function checkParity(
     let magnifier = await suppliedBars(args.magnifier_ohlcv_csv, args.magnifier_ohlcv_csv_path,
       "magnifier_ohlcv", work, deps);
     const bars = await findBars(args, s.symbol, s.timeframe, s.rangeStartMs, endMs, work, deps);
-    if (!magnifier && bars.fetched && declaresMagnifier(args.pine)) {
+    // runtime.bar_magnifier false (passed, or from the XLSX Properties) turns the magnifier off:
+    // the harness then runs without it, so no 1-minute feed is fetched or budgeted.
+    if (!magnifier && bars.fetched && s.runtime.bar_magnifier !== false && declaresMagnifier(args.pine)) {
       const duration = timeframeMs(String(s.runtime.script_tf || s.timeframe));
       const window = magnifierWindow(bars.fetched.firstOpenMs, bars.fetched.lastOpenMs, duration);
       const need = Math.floor((window.endMs - window.startMs) / 60_000) + 1;

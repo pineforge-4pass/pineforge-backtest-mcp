@@ -75,16 +75,29 @@ test("a magnifier-declaring corpus probe fetches chart and 1-minute bars from Bi
   request.tradingview_trades = readFileSync(join(p.dir, "tv_trades.csv"), "utf8")
     .split(/\r?\n/).slice(0, 11).join("\n") + "\n";
   request.range_start = "2025-03-31T00:00:00Z";
+  // The same script with its title as a multiline triple-quoted string, which
+  // codegen 1.0.1 accepts and still reads as declaring the magnifier.
+  const title = '"PF barstate-magnifier probe 01a - isconfirmed ON"';
+  assert.ok(String(request.pine).includes(title));
+  const variants: Array<[string, string]> = [
+    ["ordinary title", String(request.pine)],
+    ["multiline triple-quoted title", String(request.pine).replace(title, '"""PF barstate-magnifier probe 01a\nisconfirmed ON"""')],
+  ];
   const client = await connect();
   try {
-    const out = await callParity(client, request);
-    assert.equal(out.data?.ok, true, out.text);
-    assert.match(harnessLog(out.data), /magnifier: declared:.*input_tf=1.*magnifier on/);
-    assert.match(String(out.data?.bars_source), /Binance.*15m/);
-    assert.match(String(out.data?.magnifier_bars_source), /Binance.*1m/);
-    assert.doesNotMatch(out.formatted, /ran without one/);
-    console.log(`LIVE ${p.slug} (first 5 complete trades): tier ${out.data?.tier}, matched ${out.data?.matched}; ` +
-      `${out.data?.bars_source}; magnifier ${out.data?.magnifier_bars_source}; ${harnessLog(out.data)}`);
+    const tiers: unknown[] = [];
+    for (const [label, pine] of variants) {
+      const out = await callParity(client, { ...request, pine });
+      assert.equal(out.data?.ok, true, out.text);
+      assert.match(harnessLog(out.data), /magnifier: declared:.*input_tf=1.*magnifier on/, label);
+      assert.match(String(out.data?.bars_source), /Binance.*15m/);
+      assert.match(String(out.data?.magnifier_bars_source), /Binance.*1m/, label);
+      assert.doesNotMatch(out.formatted, /ran without one/);
+      tiers.push([out.data?.tier, out.data?.matched]);
+      console.log(`LIVE ${p.slug} (${label}, first 5 complete trades): tier ${out.data?.tier}, matched ${out.data?.matched}; ` +
+        `${out.data?.bars_source}; magnifier ${out.data?.magnifier_bars_source}; ${harnessLog(out.data)}`);
+    }
+    assert.deepEqual(tiers[1], tiers[0]);
   } finally {
     await client.close();
   }
