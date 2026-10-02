@@ -44,7 +44,12 @@ function args(slug: string): Record<string, unknown> {
 function report(name: string, out: CallOutcome): void {
   const d = out.data ?? {};
   console.log(`--- ${name}: isError=${out.isError} ok=${d.ok} tier=${d.tier ?? "-"} error=${d.error ?? "-"}`);
-  console.log(out.text.split("\n").slice(0, 40).join("\n"));
+  const lines = out.formatted.split("\n");
+  // Long mismatch listings are cut to their first entries; the rest of the text is kept.
+  const cut = lines.findIndex((l) => /^4\. /.test(l));
+  const end = cut < 0 ? -1 : lines.findIndex((l, i) => i > cut && (l === "" || /^(Timezone|Window|Warnings):/.test(l)));
+  console.log((cut >= 0 && end > cut ? [...lines.slice(0, cut), "   ...", ...lines.slice(end)] : lines).join("\n"));
+  if (d.timezone) console.log(`timezone: ${JSON.stringify(d.timezone)}`);
 }
 
 /** The trade list with one row's price column changed by `factor`. */

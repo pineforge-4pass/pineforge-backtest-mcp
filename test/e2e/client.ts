@@ -30,7 +30,10 @@ export function pathMapper(): (s: string) => string {
 
 export interface CallOutcome {
   isError: boolean;
+  /** Every text block joined. */
   text: string;
+  /** The first text block: the plain-text result. */
+  formatted: string;
   data: Record<string, unknown> | undefined;
 }
 
@@ -43,6 +46,7 @@ export async function callParity(client: Client, args: Record<string, unknown>):
   return {
     isError: r.isError === true,
     text,
+    formatted: content.find((c) => c.type === "text")?.text ?? "",
     data: r.structuredContent as Record<string, unknown> | undefined,
   };
 }
