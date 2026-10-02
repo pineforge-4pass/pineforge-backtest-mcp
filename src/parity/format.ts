@@ -48,13 +48,17 @@ function pct(v: unknown, digits = 4): string {
 function checkValue(c: Json): string {
   const name = String(c.name ?? "");
   const v = c.value;
-  if (/count|entries/i.test(name) && ("tradingview" in c || "pineforge" in c)) {
+  if ("tradingview" in c || "pineforge" in c) {
     const parts = [`TradingView ${str(c.tradingview)}, PineForge ${str(c.pineforge)}`];
     if (c.abs !== undefined) parts.push(`Δ ${str(c.abs)}`);
     if (typeof v === "number" && v !== 0) parts.push(`(${pct(v, 2)})`);
     return parts.join(" ");
   }
-  if (/coverage/i.test(name)) return pct(v, 1);
+  if (/coverage/i.test(name)) {
+    const of = typeof c.of === "number" ? ` (${str(c.unmatched)} of ${c.of} unmatched)` : "";
+    return pct(v, 1) + of;
+  }
+  if (/distinct/i.test(name) && typeof v === "number") return `${v} mismatch${v === 1 ? "" : "es"}`;
   if (typeof v === "number") return pct(v);
   return str(v);
 }
@@ -79,15 +83,20 @@ function tradeText(t: unknown): string {
   if (t.qty !== undefined) parts.push(`qty ${str(t.qty)}`);
   if (t.pnl !== undefined) parts.push(`P&L ${str(t.pnl)}`);
   if (t.signal) parts.push(`signal ${str(t.signal)}`);
+  if (t.open_at_range_end === true) parts.push("(open at the range end)");
   return parts.join(" ");
 }
 
+// Relative deltas print as percentages; *_seconds and *_abs keep their units.
 function deltaText(d: unknown): string {
   if (!isObj(d)) return "";
   const parts: string[] = [];
   for (const [k, v] of Object.entries(d)) {
     if (v === null || v === undefined) continue;
-    parts.push(`${k} ${typeof v === "number" ? pct(v) : str(v)}`);
+    if (typeof v !== "number") parts.push(`${k} ${str(v)}`);
+    else if (k.endsWith("_seconds")) { if (v !== 0) parts.push(`${k.replace(/_seconds$/, "")} time ${v > 0 ? "+" : ""}${v}s`); }
+    else if (k.endsWith("_abs")) parts.push(`${k.replace(/_abs$/, "")} ${v > 0 ? "+" : ""}${fmtNum(v)}`);
+    else parts.push(`${k} ${pct(v)}`);
   }
   return parts.join(", ");
 }
@@ -131,18 +140,23 @@ export function formatParityResult(response: unknown, opts: FormatOptions): stri
     lines.push("");
   }
 
-  const total = (n: unknown) => (typeof n === "number" ? n : 0);
-  const matched = total(r.matched);
-  const tvOnly = total(r.unmatched_tradingview);
-  const pfOnly = total(r.unmatched_pineforge);
-  lines.push(
-    `Matched ${matched} of ${matched + tvOnly} TradingView trades; ${tvOnly} TradingView-only, ${pfOnly} PineForge-only.`,
-  );
+  const count = (n: unknown) => (typeof n === "number" ? n : null);
+  const matched = count(r.matched) ?? 0;
+  const tvOnly = count(r.unmatched_tradingview);
+  const pfOnly = count(r.unmatched_pineforge);
+  if (tvOnly === null || pfOnly === null) {
+    lines.push(`Matched ${matched} TradingView trades; the per-trade listing is left out (see the warnings).`);
+  } else {
+    lines.push(
+      `Matched ${matched} of ${matched + tvOnly} TradingView trades; ${tvOnly} TradingView-only, ${pfOnly} PineForge-only.`,
+    );
+  }
 
   const mismatches = Array.isArray(r.mismatches) ? r.mismatches.filter(isObj) : [];
   if (mismatches.length) {
-    const listed = typeof r.mismatches_total === "number" ? r.mismatches_total : undefined;
-    lines.push("", `Mismatches (first ${mismatches.length}${listed !== undefined ? ` of ${listed}` : ""}, by entry time):`);
+    const all = (tvOnly ?? 0) + (pfOnly ?? 0) + (count(r.deviating_pairs) ?? 0);
+    const of = all > mismatches.length ? ` of ${all}` : "";
+    lines.push("", `Mismatches (first ${mismatches.length}${of}, by entry time; times in the chart timezone):`);
     mismatches.forEach((m, i) => {
       lines.push(`${i + 1}. ${KIND_LABEL[String(m.kind)] ?? str(m.kind)}`);
       lines.push(`   TradingView: ${tradeText(m.tradingview)}`);
@@ -151,26 +165,36 @@ export function formatParityResult(response: unknown, opts: FormatOptions): stri
       if (d) lines.push(`   deltas: ${d}`);
       if (m.hint) lines.push(`   hint: ${str(m.hint)}`);
     });
-  } else if (typeof r.mismatches_note === "string" && r.mismatches_note) {
-    lines.push(r.mismatches_note);
   }
 
+  const printed = new Set<string>();
   const tz = isObj(r.timezone) ? r.timezone : undefined;
-  if (tz && (tz.note || tz.better)) {
+  const better = tz && isObj(tz.better) ? tz.better : undefined;
+  if (tz && (tz.note || better)) {
     lines.push("");
-    if (tz.note) lines.push(`Timezone: ${str(tz.note)}`);
-    if (tz.better && !String(tz.note ?? "").includes(String(tz.better))) {
-      lines.push(`Timezone: more trades line up under ${str(tz.better)} than under ${str(tz.given)}.`);
+    if (tz.note) {
+      lines.push(`Timezone: ${str(tz.note)}`);
+      printed.add(str(tz.note));
+    }
+    if (better) {
+      lines.push(
+        `Timezone: read in ${str(better.zone)}, ${str(better.matched)} trades match instead of ` +
+          `${str(better.matched_given)} under ${str(tz.given)}; the tier above uses ${str(tz.given)}.`,
+      );
     }
   }
   const win = isObj(r.window) ? r.window : undefined;
   if (win) {
+    const utc = win.timezone_of_times ? ` ${str(win.timezone_of_times)}` : "";
     const parts: string[] = [];
-    if (win.range_start) parts.push(`range start ${str(win.range_start)}`);
-    if (win.range_end) parts.push(`range end ${str(win.range_end)}${win.range_end_source ? ` (${str(win.range_end_source)})` : ""}`);
+    if (win.range_start) parts.push(`first bar ${str(win.range_start)}${utc}`);
+    if (win.range_end) {
+      parts.push(`range end ${str(win.range_end)}${utc}${win.range_end_source ? ` (${str(win.range_end_source)})` : ""}`);
+    }
     if (parts.length) lines.push("", `Window: ${parts.join(", ")}.`);
   }
-  const warnings = Array.isArray(r.warnings) ? r.warnings.map(str).filter(Boolean) : [];
+  const warnings = (Array.isArray(r.warnings) ? r.warnings.map(str) : [])
+    .filter((w) => w && !printed.has(w) && !(better && w.startsWith(`Read in ${str(better.zone)},`)));
   if (warnings.length) {
     lines.push("", "Warnings:");
     for (const w of warnings) lines.push(`- ${w}`);

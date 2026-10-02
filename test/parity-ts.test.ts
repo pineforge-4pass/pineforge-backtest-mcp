@@ -228,39 +228,62 @@ test("export span: first entry and last row in the chart timezone", () => {
   assert.equal(s.lastRowMs, Date.UTC(2025, 3, 1, 0, 0));
 });
 
-test("result text: tier, checks, counts, mismatches, versions, methodology, retention", () => {
-  const text = formatParityResult({
+test("result text: tier, checks, counts, mismatches, timezone, versions, methodology, retention", () => {
+  // The shape parity/pf_parity.py returns.
+  const response = {
     ok: true,
     tier: "strong",
-    tier_meaning: "close to TradingView, outside the excellent envelope",
+    tier_meaning: "Close to TradingView: small differences in count or prices.",
     profile: "strict",
     checks: [
-      { name: "trade count", tradingview: 5, pineforge: 5, value: 0, abs: 0, excellent: "exact (0)", strong: "< 6%", pass_excellent: true },
+      { name: "trade count", tradingview: 5, pineforge: 5, value: 0, abs: 0, excellent: "exact (0)", strong: "< 6%", pass_excellent: true, pass_strong: true },
+      { name: "coverage", value: 1, unmatched: 0, of: 5, excellent: ">= 99% or <= 1 unmatched", strong: ">= 95% or <= 1 unmatched", moderate: ">= 75%", pass_excellent: true, pass_strong: true },
       { name: "exit price p90", value: 0.0101, excellent: "< 0.01%", strong: "< 0.5%", pass_excellent: false, pass_strong: true },
+      { name: "distinct entries", value: 0, excellent: "0 mismatches", pass_excellent: true },
     ],
     matched: 5,
     unmatched_tradingview: 0,
     unmatched_pineforge: 0,
+    deviating_pairs: 1,
     mismatches: [{
       kind: "deviating_pair",
-      tradingview: { trade: 1, side: "long", entry_time: "2025-03-31 08:15", entry_price: 1807.82, exit_time: "2025-04-01 08:00", exit_price: 1839.81, qty: 1, pnl: 31.99 },
-      pineforge: { side: "long", entry_time: "2025-03-31 08:15", entry_price: 1807.82, exit_time: "2025-04-01 08:00", exit_price: 1821.59, qty: 1, pnl: 13.77 },
-      deltas: { entry: 0, exit: 0.0099, pnl: 0.5695 },
+      tradingview: { trade: 1, side: "long", entry_time: "2025-03-31 08:15", entry_price: 1807.82, exit_time: "2025-04-01 08:00", exit_price: 1839.81, qty: 1, pnl: 31.99, signal: "pyramid-add", open_at_range_end: false },
+      pineforge: { trade: 1, side: "long", entry_time: "2025-03-31 08:15", entry_price: 1807.82, exit_time: "2025-04-01 08:00", exit_price: 1821.59, qty: 1, pnl: 13.77, signal: null, open_at_range_end: false },
+      deltas: { entry: 0, exit: 0.0099, pnl: 0.5695, qty: 0, entry_seconds: 0, exit_abs: -18.22, pnl_abs: -18.22 },
       hint: null,
     }],
-    timezone: { given: "Asia/Taipei", offset_mode_seconds: 0, better: null, note: null },
+    timezone: {
+      given: "UTC", offset_mode_seconds: 28800, offset_mode_share: 1,
+      better: { zone: "Asia/Taipei", matched: 5, matched_given: 0, shift_seconds: 28800 },
+      note: "Every matched trade sits 8 h later on TradingView than on PineForge: the chart timezone is probably off by 8 h.",
+    },
+    window: { range_start: "2020-01-01 00:00", range_end: "2025-04-01 00:00", range_end_source: "tape", timezone_of_times: "UTC" },
     versions: { engine: "1.0.1", codegen: "1.0.1", grader: "pineforge-engine v1.0.1 scripts/verify_corpus.py", grader_sha256: "de84d515" },
-    warnings: [],
-  }, { retention: RETENTION_LOCAL });
-  assert.match(text, /^Tier: strong: close to TradingView/);
-  assert.match(text, /\| trade count \| TradingView 5, PineForge 5 Δ 0 \| exact \(0\) \| < 6% \| meets excellent \|/);
-  assert.match(text, /\| exit price p90 \| 1\.0100% \| < 0\.01% \| < 0\.5% \| meets strong \|/);
+    warnings: [
+      "Every matched trade sits 8 h later on TradingView than on PineForge: the chart timezone is probably off by 8 h.",
+      "Read in Asia/Taipei, 5 trades match instead of 0: TradingView may have printed the times in Asia/Taipei. The tier above uses UTC.",
+      "Something else.",
+    ],
+  };
+  const text = formatParityResult(response, { retention: RETENTION_LOCAL, notes: ["Bars: your file."] });
+  assert.match(text, /^Tier: strong: Close to TradingView/);
+  assert.match(text, /\| trade count \| TradingView 5, PineForge 5 Δ 0 \| exact \(0\) \| < 6% \| - \| meets excellent \|/);
+  assert.match(text, /\| coverage \| 100\.0% \(0 of 5 unmatched\) \|/);
+  assert.match(text, /\| exit price p90 \| 1\.0100% \| < 0\.01% \| < 0\.5% \| - \| meets strong \|/);
+  assert.match(text, /\| distinct entries \| 0 mismatches \| 0 mismatches \| - \| - \| meets excellent \|/);
   assert.match(text, /Matched 5 of 5 TradingView trades; 0 TradingView-only, 0 PineForge-only\./);
-  assert.match(text, /1\. matched, outside the threshold\n {3}TradingView: #1 long 2025-03-31 08:15 @ 1807\.82 -> 2025-04-01 08:00 @ 1839\.81/);
-  assert.match(text, /deltas: entry 0\.0000%, exit 0\.9900%, pnl 56\.9500%/);
+  assert.match(text, /1\. matched, outside the threshold\n {3}TradingView: #1 long 2025-03-31 08:15 @ 1807\.82 -> 2025-04-01 08:00 @ 1839\.81 qty 1 P&L 31\.99 signal pyramid-add/);
+  assert.match(text, /deltas: entry 0\.0000%, exit 0\.9900%, pnl 56\.9500%, qty 0\.0000%, exit -18\.22, pnl -18\.22/);
+  assert.match(text, /Timezone: Every matched trade sits 8 h later/);
+  assert.match(text, /Timezone: read in Asia\/Taipei, 5 trades match instead of 0 under UTC; the tier above uses UTC\./);
+  assert.match(text, /Window: first bar 2020-01-01 00:00 UTC, range end 2025-04-01 00:00 UTC \(tape\)\./);
+  assert.match(text, /Warnings:\n- Something else\.\nBars: your file\./);
+  assert.equal(text.match(/sits 8 h later/g)?.length, 1);
   assert.match(text, /Engine 1\.0\.1, codegen 1\.0\.1, grader pineforge-engine v1\.0\.1 scripts\/verify_corpus\.py \(sha256 de84d515\)/);
   assert.match(text, /Methodology: https:\/\/pineforge\.dev\/en\/methodology\//);
   assert.ok(text.endsWith(RETENTION_LOCAL));
+  const omitted = formatParityResult({ ...response, unmatched_tradingview: null, unmatched_pineforge: null, mismatches: [] }, { retention: RETENTION_LOCAL });
+  assert.match(omitted, /Matched 5 TradingView trades; the per-trade listing is left out/);
   const err = formatParityResult({ ok: false, error: "no_bars", message: "Pass bars." }, { retention: RETENTION_LOCAL });
   assert.match(err, /^Parity check failed \(no_bars\): Pass bars\./);
 });
