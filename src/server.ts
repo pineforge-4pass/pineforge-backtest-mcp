@@ -1120,7 +1120,8 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         "TradingView. Lists every coverage topic with a one-line status " +
         "(supported / partial / unsupported / via_transpiler) and summary, plus the " +
         "legend (note: via_transpiler still works end-to-end; unsupported means " +
-        "refused, not compiling, or accepted with no effect) and the coverage " +
+        "refused, not compiling, stopping the run where its value is read, or " +
+        "accepted with no effect) and the coverage " +
         "version. Statuses describe what a backtest on THIS server can do. Cheap, " +
         "free, local — no engine run, no I/O. Then drill in with get_coverage_topic " +
         "for one area's per-feature lists, or check_pine_feature to look up a " +
@@ -1168,7 +1169,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         "alias, returning {query, status, topic, note} where status is " +
         "supported / partial / unsupported / via_transpiler / not_found " +
         "(via_transpiler = works end-to-end; unsupported = refused, not compiling, " +
-        "or no effect) and the note quotes the catalog entry, which says what THIS " +
+        "stopping the run, or no effect) and the note quotes the catalog entry, which says what THIS " +
         "server can and cannot do (e.g. request.security on another symbol). " +
         "Local, free, no engine run.",
       inputSchema: {

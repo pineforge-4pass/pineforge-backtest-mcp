@@ -94,18 +94,25 @@ test("checkPineFeature: longest prefix wins (strategy.risk.* -> strategy_risk)",
   assert.equal(r.status, "supported");
 });
 
-test("checkPineFeature: alias fallback ('alert' -> drawing_plotting_alerts)", () => {
+test("checkPineFeature: an exact entry wins over the alias_map ('alert' -> drawing_plotting_alerts)", () => {
   const r = checkPineFeature("alert");
-  // 'alert' is both an alias key AND an exact unsupported identifier; either
-  // path resolves to the drawing topic with unsupported status.
+  // 'alert' is both an alias key AND an exact unsupported identifier; the exact entry answers.
   assert.equal(r.topic, "drawing_plotting_alerts");
   assert.equal(r.status, "unsupported");
+  assert.doesNotMatch(r.note, /alias/);
 });
 
-test("checkPineFeature: alias-only key resolves via alias_map ('series')", () => {
-  const r = checkPineFeature("series");
-  assert.equal(r.topic, "series_history");
+test("checkPineFeature: alias-only key resolves via alias_map ('matrix')", () => {
+  const r = checkPineFeature("matrix");
+  assert.equal(r.topic, "numeric_matrices");
   assert.equal(r.status, "supported");
+  assert.match(r.note, /alias/);
+});
+
+test("checkPineFeature: Object prototype keys are not aliases", () => {
+  for (const q of ["constructor", "__proto__", "toString"]) {
+    assert.equal(checkPineFeature(q).status, "not_found", q);
+  }
 });
 
 test("checkPineFeature: a miss returns not_found", () => {
@@ -157,6 +164,12 @@ test("check_pine_feature: request.security is partial, scoped to what this serve
   expectFeature("request.security_lower_tf", "partial", "request_security", "string elements are refused");
   expectFeature("barmerge.lookahead_on", "supported", "request_security");
   expectFeature("barmerge.gaps_off", "supported", "request_security");
+  expectFeature("request.security", "partial", "request_security", "including one written as a string");
+  expectFeature("syminfo.tickerid", "supported", "request_security");
+  expectFeature("ticker.heikinashi", "supported", "request_security");
+  expectFeature("ticker.standard", "via_transpiler", "request_security");
+  expectFeature("ticker.new", "unsupported", "request_security", "refused");
+  expectFeature("ticker.renko", "unsupported", "request_security");
 });
 
 test("check_pine_feature: recorded and refused request.* calls are unsupported here, with the reason", () => {
@@ -280,5 +293,38 @@ test("every prefix_map and alias_map target is a real topic", () => {
   const ids = new Set(COVERAGE.topics.map((t) => t.id));
   for (const target of [...Object.values(COVERAGE.prefix_map), ...Object.values(COVERAGE.alias_map)]) {
     assert.ok(ids.has(target), `unknown topic ${target}`);
+  }
+});
+
+test("review fixes: matrix.rank/trace, str.tostring, input.source, arrays, @annotations", () => {
+  expectFeature("matrix.rank", "supported", "numeric_matrices");
+  expectFeature("matrix.trace", "supported", "numeric_matrices");
+  expectFeature("str.tostring", "partial", "str", "array argument");
+  expectFeature("input.source", "partial", "inputs", "hlcc4");
+  expectFeature("input.float", "supported", "inputs");
+  expectFeature("array.slice", "partial", "arrays_maps_udts", "aliases");
+  expectFeature("array.new_color", "unsupported", "arrays_maps_udts");
+  expectFeature("array.new_table", "unsupported", "arrays_maps_udts");
+  expectFeature("array.new_float", "via_transpiler", "arrays_maps_udts");
+  expectFeature("@strategy_alert_message", "unsupported", "logging_errors");
+});
+
+// Entries that describe C++ or Pine syntax and carry no matchable identifier on purpose.
+const DESCRIPTIVE_ENTRIES = new Set([
+  "matrix.new<int>", "matrix.new<bool>", "matrix.new<string>", "matrix.new<color>", "matrix.new<UDT>",
+  "na<double>() (NaN)", "na<int>() / na<int64_t>() (INT_MIN / INT64_MIN)", "na<bool>() (false)",
+  "Series<T>::push / Series<T>::update / Series<T>::current",
+  "series[k] (0 = current bar, k >= 1 = k bars ago; out of range reads na; max_len 500)",
+  "tz_util::ScopedTimezone",
+]);
+
+test("every catalog entry yields an identifier to match, unless it is a known descriptive entry", () => {
+  for (const t of COVERAGE.topics) {
+    for (const list of ["supported", "partial", "via_transpiler", "unsupported"] as const) {
+      for (const entry of t[list] ?? []) {
+        if (DESCRIPTIVE_ENTRIES.has(entry)) continue;
+        assert.ok(entryIdentifiers(entry).length > 0, `${t.id}.${list}: "${entry}" matches nothing`);
+      }
+    }
   }
 });

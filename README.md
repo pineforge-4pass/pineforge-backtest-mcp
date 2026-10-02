@@ -25,7 +25,7 @@ tools make outbound requests (public endpoints).
 | `binance_symbols`      | Binance public API   | List / filter Binance symbols (5-min in-process cache)                   |
 | `list_coverage_topics` | local (no I/O)       | Every Pine v6 coverage topic with a one-line status + summary            |
 | `check_pine_feature`   | local (no I/O)       | Look up whether a Pine identifier/namespace is supported in PineForge    |
-| `get_coverage_topic`   | local (no I/O)       | Full detail + supported/unsupported feature lists for one coverage topic |
+| `get_coverage_topic`   | local (no I/O)       | Full detail + supported/partial/via_transpiler/unsupported lists for one topic |
 | `engine_info`          | local (no I/O)       | Docker image only: mode, baked-in flag and the bundled `pineforge-release` version (for example `1.0.0`) |
 
 The table is the Docker image's tool list (10 tools). The [npm package](#npm--npx)

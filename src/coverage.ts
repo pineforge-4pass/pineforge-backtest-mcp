@@ -48,7 +48,7 @@ export const COVERAGE: CoverageDataset = {
     partial:
       "Works with a documented gap or restriction: some variants, argument types or data are refused or missing, or the value only approximates TradingView's. The entry names the gap. Where the engine supports more than this server can supply (another symbol's bars, recorded request data, library sources), the entry says so.",
     unsupported:
-      "A backtest on this server cannot use it: PineForge's transpiler refuses it, the generated C++ does not compile, or it is accepted with no effect (plots, tables, alerts and visual setters).",
+      "A backtest on this server cannot use it: PineForge's transpiler refuses it, the generated C++ does not compile, the run stops where its value is read (data this server cannot supply), or it is accepted with no effect (plots, tables, alerts and visual setters).",
     via_transpiler:
       "The feature has no dedicated runtime module, but PineForge's PineScript-to-C++ transpiler emits it inline against the C++ standard library or generated structs, so it still works end-to-end.",
   },
@@ -160,16 +160,15 @@ export const COVERAGE: CoverageDataset = {
       title: "Inputs",
       status: "supported",
       summary:
-        "Every input.* kind works: values arrive as strings through an override map and typed getters, and input.source overrides resolve native source names. UI metadata has no runtime backing.",
+        "Every input.* kind is read: values arrive as strings through an override map and typed getters, and input.source overrides resolve native source names. input.source() needs a native chart series as its default; UI metadata has no runtime backing.",
       detail:
-        "Inputs are stored as a std::unordered_map<std::string,std::string> on the engine. Generated code reads them through typed getters (get_input_double / _int / _int64 / _bool / _string, and get_input_source) that fall back to the Pine default on a missing key or a parse failure. get_input_bool accepts \"true\"/\"1\" and \"false\"/\"0\" (anything else returns the default); the numeric getters route through std::stod / std::stoi / std::stoll with try/catch. get_input_int64 backs 64-bit payloads such as input.color (packed ARGB). get_input_source backs input.source overrides: it resolves a native source name (open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4) to the engine's source series and falls back to the codegen default when the key is absent or the override is not a native name. The runtime does not care about the input kind: every input.* value is a string and the getter at the call site decides the parse. The C ABI's strategy_set_input overrides a value before run(...). UI metadata (group, inline, tooltip, display, confirm, options, min/max/step) has no runtime backing.",
+        "Inputs are stored as a std::unordered_map<std::string,std::string> on the engine. Generated code reads them through typed getters (get_input_double / _int / _int64 / _bool / _string, and get_input_source) that fall back to the Pine default on a missing key or a parse failure. get_input_bool accepts \"true\"/\"1\" and \"false\"/\"0\" (anything else returns the default); the numeric getters route through std::stod / std::stoi / std::stoll with try/catch. get_input_int64 backs 64-bit payloads such as input.color (packed ARGB). get_input_source backs input.source overrides: it resolves a native source name (open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4) to the engine's source series and falls back to the codegen default when the key is absent or the override is not a native name. The runtime does not care about the input kind: every input.* value is a string and the getter at the call site decides the parse. The C ABI's strategy_set_input overrides a value before run(...). input.source() must default to a native chart series (open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4); codegen refuses any other default. UI metadata (group, inline, tooltip, display, confirm, options, min/max/step) has no runtime backing.",
       supported: [
         "input()",
         "input.float()",
         "input.int()",
         "input.bool()",
         "input.string()",
-        "input.source()",
         "input.color()",
         "input.timeframe()",
         "input.enum()",
@@ -185,6 +184,9 @@ export const COVERAGE: CoverageDataset = {
         "get_input_string",
         "get_input_source",
         "strategy_set_input",
+      ],
+      partial: [
+        "input.source() (its default must be open, high, low, close, volume, hl2, hlc3, ohlc4 or hlcc4; any other default is refused)",
       ],
       unsupported: [
         "group / inline / tooltip / display / confirm / options / min / max / step (input UI metadata: no runtime backing)",
@@ -230,7 +232,7 @@ export const COVERAGE: CoverageDataset = {
       title: "math.*",
       status: "via_transpiler",
       summary:
-        "The runtime backs math.random (deterministic, not TradingView's generator) and the rolling math.sum; PineForge's transpiler emits every other math.* inline, so they work end-to-end.",
+        "The runtime backs math.random (deterministic, not TradingView's generator), the rolling math.sum and math.round_to_mintick; PineForge's transpiler emits every other math.* inline, so they work end-to-end.",
       detail:
         "math.hpp/math.cpp own two pieces. pine_random(lo, call_site, hi, seed, bar_index) is a deterministic SplitMix64-style mixer, stable across platforms and runs but not TradingView's PRNG: math.random maps here, so its values differ from TradingView's (TradingView-exact PRNG parity is out of scope by design). math::Sum(length) backs math.sum(source, length): na sources are ignored, the output stays na until length non-na values exist, then holds the sum of the last length non-na values, including on na-input bars. math.round_to_mintick maps to BacktestEngine::round_to_mintick. Everything else in the math namespace is emitted inline by PineForge's transpiler against <cmath> or simple expressions: math.abs/sqrt/pow/exp/log/log10/ceil/floor/round/sign/avg/min/max/todegrees/toradians, the trig functions, and the constants math.pi, math.e, math.phi and math.rphi.",
       supported: [
@@ -255,13 +257,15 @@ export const COVERAGE: CoverageDataset = {
       summary:
         "The runtime backs str.format, str.format_time, str.match, str.split and str.tostring; PineForge's transpiler emits the other str.* functions inline against std::string, so they work end-to-end.",
       detail:
-        "str_utils.hpp/str_utils.cpp own the runtime helpers. pine_str_format and str_format_values implement MessageFormat: {N} and {N,number,<style>} placeholders (integer, percent, currency or a decimal pattern), text between single quotes is literal, and a placeholder with no such argument is kept as written; a number argument in {N} renders as #,###.###. pine_str_format_time maps Pine tokens (yyyy/MM/dd/HH/mm/ss) to strftime: empty/\"UTC\"/\"Etc/UTC\" use gmtime_r, any other zone swaps TZ under tz_util::ScopedTimezone and uses localtime_r. pine_str_match returns the first capture group, else the full match, and an empty string on no match or a regex error. pine_str_split returns a vector<string>; an empty separator yields {source}. pine_str_tostring renders the value's shortest round-trip decimal digits, rounded half-up; NaN, Infinity and -Infinity print as such; modes are the default (up to ten fraction digits), \"percent\", \"volume\" (K/M/B/T), \"mintick\", or a decimal pattern (#.##, #.00, #,###, #.##%). str.tostring(<enum member>) uses pine_enum_str_at (source/pine_policy_support.hpp), which clamps the index.\n\nEvery other string operation (str.length, str.contains, str.replace/replace_all, str.lower/upper, str.tonumber, str.substring, str.startswith/endswith, str.pos, str.repeat, str.trim) has no runtime API: PineForge's transpiler emits it inline against std::string, and it runs end-to-end. codegen warns where str.repeat's result can be na, which the engine cannot yet represent exactly.",
+        "str_utils.hpp/str_utils.cpp own the runtime helpers. pine_str_format and str_format_values implement MessageFormat: {N} and {N,number,<style>} placeholders (integer, percent, currency or a decimal pattern), text between single quotes is literal, and a placeholder with no such argument is kept as written; a number argument in {N} renders as #,###.###. pine_str_format_time maps Pine tokens (yyyy/MM/dd/HH/mm/ss) to strftime: empty/\"UTC\"/\"Etc/UTC\" use gmtime_r, any other zone swaps TZ under tz_util::ScopedTimezone and uses localtime_r. pine_str_match returns the first capture group, else the full match, and an empty string on no match or a regex error. pine_str_split returns a vector<string>; an empty separator yields {source}. pine_str_tostring renders the value's shortest round-trip decimal digits, rounded half-up; NaN, Infinity and -Infinity print as such; modes are the default (up to ten fraction digits), \"percent\", \"volume\" (K/M/B/T), \"mintick\", or a decimal pattern (#.##, #.00, #,###, #.##%). str.tostring(<enum member>) uses pine_enum_str_at (source/pine_policy_support.hpp), which clamps the index.\n\nEvery other string operation (str.length, str.contains, str.replace/replace_all, str.lower/upper, str.tonumber, str.substring, str.startswith/endswith, str.pos, str.repeat, str.trim) has no runtime API: PineForge's transpiler emits it inline against std::string, and it runs end-to-end. codegen warns where str.repeat's result can be na, which the engine cannot yet represent exactly. str.tostring of an array is not lowered, and its C++ does not compile (codegen 1.0.1).",
       supported: [
         "str.format (MessageFormat placeholders)",
         "str.format_time",
         "str.match",
         "str.split",
-        "str.tostring (default, percent, volume and mintick formats, decimal patterns, enum members)",
+      ],
+      partial: [
+        "str.tostring (default, percent, volume and mintick formats, decimal patterns, enum members; an array argument is not lowered and its C++ does not compile)",
       ],
       via_transpiler: [
         "str.length / str.contains / str.replace / str.replace_all / str.lower / str.upper / str.tonumber",
@@ -274,24 +278,29 @@ export const COVERAGE: CoverageDataset = {
       title: "request.security()",
       status: "partial",
       summary:
-        "On the chart's own symbol, request.security and request.security_lower_tf run here: higher-timeframe aggregation, lookahead and gaps, and lower-timeframe emulation. On another symbol, request.security is supported by the engine, which reads that symbol's own bars installed before the run; this server cannot supply other symbols' bars, so such a request whose value can reach a trade stops the run.",
+        "On the chart's own symbol (syminfo.tickerid), request.security and request.security_lower_tf run here: higher-timeframe aggregation, lookahead and gaps, and lower-timeframe emulation. On another symbol, request.security is supported by the engine, which reads that symbol's own bars installed before the run; this server cannot supply other symbols' bars, so such a request whose value can reach a trade stops the run. A symbol written as a string counts as another symbol.",
       detail:
-        "Chart symbol: the runtime owns the security state machine (SecurityEvalState), ratio/calendar aggregation (TimeframeAggregator), lookahead/gaps semantics, lower-timeframe emulation and per-security diagnostics. A higher-timeframe request routes the chart's bars through the aggregator: a complete bar evaluates with is_complete=true; a partial bar evaluates under lookahead_on, clears under gaps_on, and is otherwise held until it completes. codegen warns that lookahead_on exposes the completed higher-timeframe value from the bucket's first chart bar.\n\nrequest.security_lower_tf emulates intrabars from each chart bar when both timeframes are fixed intraday minute strings (no D/W/M/S suffix), the requested one is finer and it divides the chart's evenly; the array runs earliest to latest within the chart bar. Its elements may be float, int or bool; tuple, UDT, color and string element types are refused. Emulation is lookahead_off/gaps_off only. A run fails when a request exists but the chart timeframe is unknown, when a lower timeframe cannot be emulated, or when a request.security timeframe is finer than a chart fed only its own bars.\n\nAnother symbol: supported by the engine; this server cannot supply other symbols' bars. In engine v1.0.1 a site of another symbol reads that symbol's own bars, which the host installs through the engine's C API before the run (strategy_set_symbol_feed / _feed_column / strategy_set_symbol_facts) from a feed a requests manifest pins; codegen 1.0.0 and later lower such a site onto it. This server installs no other symbol's bars, so a request on another symbol whose value can reach a trade transpiles, then stops the run where its value is read (\"... no data is pinned for this request, and its value was read\"); it never reads the chart's bars in its place. One whose value reaches only plots, alerts, tables or logs lowers to na with a warning, and trades are unaffected.\n\nThe other request.* calls: request.financial, request.earnings, request.dividends and request.splits read per-bar series that a requests manifest records, and request.footprint inside request.security reads a pinned feed's delta column. This server installs neither, so a value of theirs that can reach a trade stops the run where it is read, and one that reaches only plots, alerts, tables or logs reads na. request.economic, request.currency_rate, request.seed and request.quandl are refused at transpile.",
+        "Chart symbol (syminfo.tickerid or syminfo.ticker): the runtime owns the security state machine (SecurityEvalState), ratio/calendar aggregation (TimeframeAggregator), lookahead/gaps semantics, lower-timeframe emulation and per-security diagnostics. A higher-timeframe request routes the chart's bars through the aggregator: a complete bar evaluates with is_complete=true; a partial bar evaluates under lookahead_on, clears under gaps_on, and is otherwise held until it completes. codegen warns that lookahead_on exposes the completed higher-timeframe value from the bucket's first chart bar.\n\nrequest.security_lower_tf emulates intrabars from each chart bar when both timeframes are fixed intraday minute strings (no D/W/M/S suffix), the requested one is finer and it divides the chart's evenly; the array runs earliest to latest within the chart bar. Its elements may be float, int or bool; tuple, UDT, color and string element types are refused. Emulation is lookahead_off/gaps_off only. A run fails when a request exists but the chart timeframe is unknown, when a lower timeframe cannot be emulated, or when a request.security timeframe is finer than a chart fed only its own bars.\n\nAnother symbol: supported by the engine; this server cannot supply other symbols' bars. In engine v1.0.1 a site of another symbol reads that symbol's own bars, which the host installs through the engine's C API before the run (strategy_set_symbol_feed / _feed_column / strategy_set_symbol_facts) from a feed a requests manifest pins; codegen 1.0.0 and later lower such a site onto it. This server installs no other symbol's bars, and codegen treats a symbol written as a string (\"BINANCE:BTCUSDT\") as another symbol even when it names the chart's own market. So a request on another symbol whose value can reach a trade transpiles, then stops the run where its value is read (\"... no data is pinned for this request, and its value was read\"); it never reads the chart's bars in its place. One whose value reaches only plots, alerts, tables or logs lowers to na with a warning, and trades are unaffected.\n\nThe other request.* calls: request.financial, request.earnings, request.dividends and request.splits read per-bar series that a requests manifest records, and request.footprint inside request.security reads a pinned feed's delta column. This server installs neither, so a value of theirs that can reach a trade stops the run where it is read, and one that reaches only plots, alerts, tables or logs reads na. request.economic, request.currency_rate, request.seed and request.quandl are refused at transpile.",
       partial: [
-        "request.security (supported by the engine; this server cannot supply other symbols' bars: on the chart's symbol it runs, and on another symbol a value that can reach a trade stops the run, while one that reaches only plots, alerts, tables or logs reads na)",
+        "request.security (supported by the engine; this server cannot supply other symbols' bars: on syminfo.tickerid it runs on the chart's bars; on another symbol, including one written as a string, a value that can reach a trade stops the run, while one that reaches only plots, alerts, tables or logs reads na)",
         "request.security_lower_tf (chart's symbol, fixed intraday minute timeframes that divide the chart's; float, int or bool elements: tuple, UDT, color and string elements are refused)",
       ],
       supported: [
         "barmerge.gaps_on / barmerge.gaps_off",
         "barmerge.lookahead_off",
         "barmerge.lookahead_on (codegen warns that it exposes the completed higher-timeframe value from the bucket's first chart bar)",
+        "syminfo.tickerid / syminfo.ticker (the chart's own symbol in a request)",
+        "ticker.heikinashi (the chart's own symbol only: Heikin-Ashi candles inside a same-symbol request.security)",
       ],
+      via_transpiler: ["ticker.inherit / ticker.standard (pass the symbol through)"],
       unsupported: [
         "request.financial / request.earnings / request.dividends / request.splits (PineForge reads them from recorded per-bar series; this server installs none, so a value that can reach a trade stops the run, and one that reaches only plots, alerts, tables or logs reads na)",
         "request.footprint (reads a pinned feed's delta column; this server installs none, so a value that can reach a trade stops the run)",
         "request.economic / request.currency_rate (refused at transpile)",
         "request.seed (refused at transpile: TradingView seeds have no PineForge equivalent)",
         "request.quandl (refused at transpile: deprecated upstream)",
+        "ticker.new / ticker.modify (refused: no cross-symbol ticker construction)",
+        "ticker.renko / ticker.kagi / ticker.linebreak / ticker.pointfigure (refused: the engine does not build these chart types)",
       ],
     },
     {
@@ -371,6 +380,8 @@ export const COVERAGE: CoverageDataset = {
         "matrix.pinv",
         "matrix.eigenvalues",
         "matrix.eigenvectors",
+        "matrix.rank",
+        "matrix.trace",
         "matrix.kron",
         "matrix.transpose",
         "matrix.sort",
@@ -387,7 +398,7 @@ export const COVERAGE: CoverageDataset = {
       summary:
         "PineGenericMatrix<T> header-only template gives structural matrix ops for int/bool/string/color/UDT element types; numeric methods stay on the double PineMatrix.",
       detail:
-        "PineGenericMatrix<T> (header-only, include/pineforge/generic_matrix.hpp) is a template over std::vector<std::vector<T>> (T=bool specialized to vector<vector<char>>) for non-double element types: int, bool, string, color and UDT. matrix.new<float>() is a PineMatrix; every other element type is a PineGenericMatrix<T>.\n\nUDT element types work: the template instantiates over arbitrary structs. engine coverage.md's sentence that UDT-typed matrices are not runtime-supported belongs to the PineMatrix (double) section: the double-only PineMatrix cannot hold UDTs.\n\nThe support is structural: add_row/remove_row/reshape/transpose and the other shape and access operations apply, but the numeric methods (det, inv, pinv, rank, trace, eigenvalues, eigenvectors) exist only on PineMatrix. A string/color/UDT matrix can be built, indexed, reshaped and transposed, but not inverted. sort is limited to int/bool/string on the primary template and is not available for bool's specialization.",
+        "PineGenericMatrix<T> (header-only, include/pineforge/generic_matrix.hpp) is a template over std::vector<std::vector<T>> (T=bool specialized to vector<vector<char>>) for non-double element types: int, bool, string, color and UDT. matrix.new<float>() is a PineMatrix; every other element type is a PineGenericMatrix<T>.\n\nUDT element types work: the template instantiates over arbitrary structs, and the engine tests a UDT matrix (tests/test_generic_matrix_udt.cpp). Only the double PineMatrix cannot hold UDTs.\n\nThe support is structural: add_row/remove_row/reshape/transpose and the other shape and access operations apply, but the numeric methods (det, inv, pinv, rank, trace, eigenvalues, eigenvectors) exist only on PineMatrix. A string/color/UDT matrix can be built, indexed, reshaped and transposed, but not inverted. sort works on int and string matrices, not bool.",
       supported: [
         "matrix.new<int>",
         "matrix.new<bool>",
@@ -424,7 +435,7 @@ export const COVERAGE: CoverageDataset = {
       detail:
         "color.hpp (header-only): 17 named ARGB constants in pine_color::* (aqua, black, blue, fuchsia, gray, green, lime, maroon, navy, olive, orange, purple, red, silver, teal, white, yellow). new_color(c, transp) sets the alpha byte to the whole number nearest 255 x (100 - transp) / 100, clamped to 0..255 (an na transparency is fully transparent); r(c)/g(c)/b(c) return the channel bytes; t(c) recovers the transparency (0..100). A fractional input or series transparency rounds to the nearest alpha byte as TradingView's does; a fractional constant transparency also rounds, where TradingView truncates (10.5 reads back 11 where TradingView reads 10). color.rgb is emitted inline by the transpiler, and color.new / color.rgb bind a keyword transparency like a positional one.\n\ncolor.from_gradient is accepted with a warning: it evaluates its arguments and returns a default color, not the gradient. Drawing objects are data in drawing.hpp; the runtime has no charting or rendering types.",
       supported: [
-        "color (type)",
+        "color (type; a bare color cast is cosmetic: a warning and a default color)",
         "color.new",
         "color.r / color.g / color.b / color.t",
         "color.* (17 named constants)",
@@ -488,17 +499,17 @@ export const COVERAGE: CoverageDataset = {
       summary:
         "No runtime array or UDT module: PineForge's transpiler emits arrays as std::vector and user-defined types as C++ structs, so they work end-to-end, including (since codegen 1.0.1) the history of arrays and objects. Maps are their own topic (maps).",
       detail:
-        "The runtime ships no array or UDT module; the transpiler emits array<T> as std::vector<T> and UDTs (including nested fields and array<UDT>) as plain C++ structs, and handles the type and method keywords. array.sort/sort_indices use std::sort; array.from is supported; order.ascending/order.descending are runtime constants. Every array.slice warns that PineForge copies the slice where TradingView aliases it. Arrays of lines, boxes, labels and linefills hold drawings, which are data (see drawing_plotting_alerts).\n\nHistory (codegen 1.0.1): a[k] of an array variable, top-level or a block's local, is a read-only copy of the array as the variable left it k executions back; built-ins read it, na() tests it, and a for...in loop over a[1] iterates the array the variable holds now, as on TradingView. A change to the copy stops the run with RE10051, and a method on it before the variable has a history with RE10052. obj[k] of a UDT variable is the reference it held k bars back, and (obj[k]).field reads that object as it is now. Not kept: the history of a function's array parameter or local, of a call's result or of a selection (TradingView keeps one per call), and a typed method's receiver at a call site that skips bars counts calls instead of chart bars. Refused with TradingView's codes: a field or method straight after the history operator (c[1].v, a[1].size(); write (a[1]).size()), the history of a field (CE10290), and an array's history used as a number, condition, string or element (CE10123 and related codes).",
+        "The runtime ships no array or UDT module; the transpiler emits array<T> as std::vector<T> and UDTs (including nested fields and array<UDT>) as plain C++ structs, and handles the type and method keywords. array.sort/sort_indices use std::sort; array.from is supported; order.ascending/order.descending are runtime constants. Every array.slice warns that PineForge copies the slice where TradingView aliases it. array.new_color and array.new_table are refused. Arrays of lines, boxes, labels and linefills hold drawings, which are data (see drawing_plotting_alerts).\n\nHistory (codegen 1.0.1): a[k] of an array variable, top-level or a block's local, is a read-only copy of the array as the variable left it k executions back; built-ins read it, na() tests it, and a for...in loop over a[1] iterates the array the variable holds now, as on TradingView. A change to the copy stops the run with RE10051, and a method on it before the variable has a history with RE10052. obj[k] of a UDT variable is the reference it held k bars back, and (obj[k]).field reads that object as it is now. Not kept: the history of a function's array parameter or local, of a call's result or of a selection (TradingView keeps one per call), and a typed method's receiver at a call site that skips bars counts calls instead of chart bars. The history of an array of drawings does not compile, and a variable bound to a[1] before the variable has a history holds an empty array where TradingView's is na. Refused with TradingView's codes: a field or method straight after the history operator (c[1].v, a[1].size(); write (a[1]).size()), the history of a field (CE10290), and an array's history used as a number, condition, string or element (CE10123 and related codes).",
       supported: ["order.ascending / order.descending (runtime constants)"],
+      partial: ["array.slice (PineForge copies the slice where TradingView aliases it, so writes through either array can diverge; codegen warns)"],
       via_transpiler: [
         "array (type)",
         "array.new / array.from / array.push / array.get / array.set / array.size / array.sort / array.sort_indices",
-        "array.slice (copies where TradingView aliases; codegen warns)",
         "array.* (array functions are emitted inline)",
         "type (UDT struct generation)",
         "method (UDT method generation)",
       ],
-      unsupported: [],
+      unsupported: ["array.new_color / array.new_table (refused: not implemented)"],
     },
     {
       id: "drawing_plotting_alerts",
@@ -534,6 +545,7 @@ export const COVERAGE: CoverageDataset = {
     "str.": "str",
     "request.": "request_security",
     "barmerge.": "request_security",
+    "ticker.": "request_security",
     "strategy.": "strategy_orders",
     "strategy.risk.": "strategy_risk",
     "strategy.direction.": "strategy_risk",
@@ -684,7 +696,7 @@ export interface CheckPineFeatureResult {
  *   3. Exact key in alias_map => that topic's status.
  *   4. Otherwise { status: "not_found" }.
  */
-const FEATURE_IDENT = /^[A-Za-z_][A-Za-z0-9_.]*\*?$/;
+const FEATURE_IDENT = /^@?[A-Za-z_][A-Za-z0-9_.]*\*?$/;
 
 /**
  * Identifier tokens inside a supported[]/unsupported[] entry, ignoring
@@ -770,7 +782,9 @@ export function checkPineFeature(feature: string): CheckPineFeatureResult {
   }
 
   // (3) Exact alias_map key.
-  const aliasTopicId = COVERAGE.alias_map[query];
+  const aliasTopicId = Object.prototype.hasOwnProperty.call(COVERAGE.alias_map, query)
+    ? COVERAGE.alias_map[query]
+    : undefined;
   if (aliasTopicId !== undefined) {
     const t = COVERAGE.topics.find((x) => x.id === aliasTopicId);
     const status = t ? t.status : "not_found";
