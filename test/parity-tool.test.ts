@@ -96,6 +96,12 @@ test("bars: TradingView chart export is converted; other symbols without bars ar
   const aapl = await parityToolResult(r, { ...base, symbol: "NASDAQ:AAPL" }, deps);
   assert.equal(aapl.structuredContent.error, "no_bars");
   assert.match(String(aapl.structuredContent.message), /NASDAQ:AAPL has no bars source here.*ohlcv_csv/);
+  const down = await parityToolResult(r, { ...base, symbol: "BINANCE:NOPEUSDT" }, {
+    ...deps,
+    fetchBinanceCsv: async () => { throw new Error('Binance 400: {"code":-1121,"msg":"Invalid symbol."}'); },
+  });
+  assert.equal(down.structuredContent.error, "no_bars");
+  assert.match(String(down.structuredContent.message), /Fetching BINANCE:NOPEUSDT 15m klines from Binance failed: Binance 400/);
   const none = await parityToolResult(r, { ...base }, deps);
   assert.equal(none.structuredContent.error, "missing_setting");
   const both = await parityToolResult(r, { ...base, ohlcv_csv: "x", ohlcv_csv_path: tv }, deps);

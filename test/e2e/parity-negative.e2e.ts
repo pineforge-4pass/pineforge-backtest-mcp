@@ -8,6 +8,9 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { buildXlsx, tradesSheetFromCsv } from "../fixtures/parity/xlsx.js";
 import { parseCsv, toCsv } from "../../src/parity/csv.js";
@@ -134,6 +137,16 @@ test("a symbol with no bars source asks for bars", async () => {
   await stillServes();
 });
 
+test("an input named like a grader key is refused", async () => {
+  const a = args(SMALL);
+  a.inputs = { expected_tier: "excellent" };
+  const out = await callParity(client, a);
+  report("input expected_tier", out);
+  assert.equal(out.isError, true);
+  assert.equal(out.data?.error, "reserved_input_name");
+  await stillServes();
+});
+
 test("an infinite loop is stopped with a timeout error", async () => {
   const a = args(SMALL);
   a.pine = [
@@ -184,6 +197,46 @@ test("the XLSX report grades exactly like the CSV it came from", async () => {
   };
   assert.equal(fromXlsx.data?.ok, true);
   assert.deepEqual(pick(fromXlsx), pick(fromCsv));
+});
+
+const WINDOWED = "ta-dmi-adx-di-cross-01"; // range start 2025-04-05: a year of 15m bars
+
+function sansSource(o: CallOutcome): Record<string, unknown> {
+  const d = { ...(o.data ?? {}) };
+  delete d.bars_source;
+  delete d.export;
+  return d;
+}
+
+test("bars in TradingView's chart-export format grade like the engine CSV", async () => {
+  const a = args(WINDOWED);
+  const fromEngine = await callParity(client, a);
+  const startMs = Date.parse(String(a.range_start));
+  const lines = readFileSync(feed15, "utf8").split("\n").slice(1).filter(Boolean)
+    .filter((l) => Number(l.split(",")[0]) >= startMs);
+  const tv = ["time,open,high,low,close,Volume", ...lines.map((l) => {
+    const [t, ...rest] = l.split(",");
+    return [Number(t) / 1000, ...rest].join(",");
+  })].join("\n") + "\n";
+  const dir = mkdtempSync(join(tmpdir(), "e2e-parity-tvbars-"));
+  const path = join(dir, "tv-chart-export.csv");
+  writeFileSync(path, tv);
+  const fromTv = await callParity(client, { ...a, ohlcv_csv_path: map(path) });
+  report("TradingView chart-export bars", fromTv);
+  assert.equal(fromTv.data?.ok, true);
+  assert.match(String(fromTv.data?.bars_source), /TradingView chart export, converted/);
+  assert.deepEqual(sansSource(fromTv), sansSource(fromEngine));
+});
+
+test("without bars, BINANCE:ETHUSDT.P is fetched from Binance's public API", async () => {
+  const a = args(WINDOWED);
+  delete a.ohlcv_csv_path;
+  const out = await callParity(client, a);
+  report("bars fetched from Binance", out);
+  assert.equal(out.data?.ok, true, out.text.slice(0, 300));
+  assert.match(String(out.data?.bars_source), /^Binance USDT-M perpetual ETHUSDT 15m klines/);
+  assert.ok(Number(out.data?.matched) > 0);
+  console.log(`Binance-fetched bars: tier ${out.data?.tier} (published ${probes.get(WINDOWED)!.expectedTier} on the corpus feed)`);
 });
 
 test("after all of that the server still grades", async () => {

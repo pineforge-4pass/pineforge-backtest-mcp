@@ -169,7 +169,13 @@ async function findBars(
     throw noBars(`The range needs about ${need} bars at timeframe ${timeframe} from Binance; the fetch limit is ${MAX_FETCH_BARS}.`);
   }
   const market = t.perpetual ? "usdt_perp" : "spot";
-  const { csv, bars } = await deps.fetchBinanceCsv(market, t.symbol, interval, startMs, endMs, need);
+  let fetched: { csv: string; bars: number };
+  try {
+    fetched = await deps.fetchBinanceCsv(market, t.symbol, interval, startMs, endMs, need);
+  } catch (e) {
+    throw noBars(`Fetching ${t.ticker} ${interval} klines from Binance failed: ${(e as Error).message.slice(0, 300)}.`);
+  }
+  const { csv, bars } = fetched;
   const path = join(work, "ohlcv.csv");
   await writeFile(path, csv, "utf8");
   return {
