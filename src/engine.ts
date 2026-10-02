@@ -17,10 +17,13 @@ import { fileURLToPath } from "node:url";
 
 export const DEFAULT_IMAGE = process.env.PINEFORGE_IMAGE ?? "ghcr.io/pineforge-4pass/pineforge-release:latest";
 export const DOCKER_TIMEOUT_MS = Number(process.env.PINEFORGE_DOCKER_TIMEOUT_MS ?? 120_000);
-// One parity check (transpile + compile + run + grade) inside the grading core;
-// the outer kill adds a grace period so the core can report its own timeout.
+// One parity check (transpile + compile + run + grade) inside the grading core.
+// The core's own deadline is PARITY_TIMEOUT_MS; the runner stops the driver only
+// PARITY_GRACE_MS later (SIGTERM, then SIGKILL after PARITY_KILL_GRACE_MS), so
+// the core reports its own timeout first and, when stopped, kills its children.
 export const PARITY_TIMEOUT_MS = Number(process.env.PINEFORGE_PARITY_TIMEOUT_MS ?? 600_000);
 const PARITY_GRACE_MS = 30_000;
+const PARITY_KILL_GRACE_MS = 5_000;
 const PARITY_STDOUT_CAP = 64 * 1024 * 1024;
 
 // ─── Local transpile (Pine → C++ via the engine container) ──────────────────
@@ -507,20 +510,25 @@ export function runParityCore(
       else out.push(d);
     });
     child.stderr.on("data", (d: Buffer) => { stderr = (stderr + d.toString()).slice(-8192); });
-    const kill = () => {
+    const signal = (sig: NodeJS.Signals) => {
       try {
-        if (opts.detached && child.pid) process.kill(-child.pid, "SIGKILL");
-        else child.kill("SIGKILL");
+        if (opts.detached && child.pid) process.kill(-child.pid, sig);
+        else child.kill(sig);
       } catch { /* already gone */ }
     };
+    // SIGTERM lets the driver kill and reap its children (they run in their own
+    // sessions); SIGKILL follows if it has not exited after the kill grace.
+    let hardKill: NodeJS.Timeout | undefined;
     const timer = setTimeout(() => {
       timedOut = true;
       opts.onTimeout?.();
-      kill();
+      signal("SIGTERM");
+      hardKill = setTimeout(() => signal("SIGKILL"), PARITY_KILL_GRACE_MS);
     }, PARITY_TIMEOUT_MS + PARITY_GRACE_MS);
-    child.on("error", (e) => { clearTimeout(timer); rejectP(e); });
+    child.on("error", (e) => { clearTimeout(timer); clearTimeout(hardKill); rejectP(e); });
     child.on("close", (code) => {
       clearTimeout(timer);
+      clearTimeout(hardKill);
       if (timedOut) {
         resolveP({
           ok: false,

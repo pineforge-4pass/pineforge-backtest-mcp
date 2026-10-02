@@ -5,3 +5,4 @@ dist/
 .env
 .npmrc
 src/version.ts
+test/.tmp-*

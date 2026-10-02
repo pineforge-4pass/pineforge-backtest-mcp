@@ -25,8 +25,10 @@ export interface ExportLimits {
   maxTotalBytes: number;
   /** Trade-list rows (two per closed trade). */
   maxRows: number;
-  /** Cells read from one sheet. */
+  /** Cells read from one sheet, empty cells inside a row's span included. */
   maxCells: number;
+  /** Columns of one sheet row (default 256; Excel's own limit is 16,384). */
+  maxColumns?: number;
 }
 
 export const DEFAULT_EXPORT_LIMITS: ExportLimits = {
@@ -329,14 +331,23 @@ interface Cell {
 
 type Grid = Map<number, Map<number, Cell>>;
 
-function colIndex(ref: string): number {
+const DEFAULT_MAX_COLUMNS = 256;
+const EXCEL_MAX_COLUMNS = 16_384;
+const EXCEL_MAX_ROWS = 1_048_576;
+const CELL_REF = /^([A-Z]{1,3})([1-9][0-9]{0,6})$/;
+
+/** Zero-based column of an A1 reference inside Excel's grid, else null. */
+function colIndex(ref: string): number | null {
+  const m = CELL_REF.exec(ref);
+  if (!m) return null;
   let n = 0;
-  for (const ch of ref) {
-    const c = ch.charCodeAt(0);
-    if (c < 65 || c > 90) break;
-    n = n * 26 + (c - 64);
-  }
+  for (const ch of m[1]!) n = n * 26 + (ch.charCodeAt(0) - 64);
+  if (n > EXCEL_MAX_COLUMNS || Number(m[2]) > EXCEL_MAX_ROWS) return null;
   return n - 1;
+}
+
+function badCell(): ParityInputError {
+  return new ParityInputError("bad_trades_csv", "A sheet of the XLSX has a cell reference outside Excel's grid.");
 }
 
 function parseSheet(xml: string, shared: string[], dateStyles: Set<number>, limits: ExportLimits): Grid {
@@ -346,6 +357,7 @@ function parseSheet(xml: string, shared: string[], dateStyles: Set<number>, limi
   for (const rm of xml.matchAll(/<(?:\w+:)?row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/(?:\w+:)?row>)/g)) {
     const rAttr = attr(rm[1] ?? "", "r");
     rowNo = rAttr ? Number(rAttr) : rowNo + 1;
+    if (!Number.isInteger(rowNo) || rowNo < 1 || rowNo > EXCEL_MAX_ROWS) throw badCell();
     if (rowNo > limits.maxRows + 1) {
       throw new ParityInputError("bad_trades_csv", `A sheet of the XLSX has more than ${limits.maxRows} rows.`);
     }
@@ -357,7 +369,9 @@ function parseSheet(xml: string, shared: string[], dateStyles: Set<number>, limi
       }
       const a = cm[1] ?? "";
       const ref = attr(a, "r");
-      col = ref ? colIndex(ref) : col + 1;
+      const at = ref ? colIndex(ref) : col + 1;
+      if (at === null || at >= EXCEL_MAX_COLUMNS) throw badCell();
+      col = at;
       const t = attr(a, "t") ?? "n";
       const style = Number(attr(a, "s") ?? 0);
       const body = cm[2] ?? "";
@@ -375,12 +389,27 @@ function parseSheet(xml: string, shared: string[], dateStyles: Set<number>, limi
   return grid;
 }
 
-function gridRows(grid: Grid): Cell[][] {
+/** Rows as arrays, after checking widths against the column cap and cell budget. */
+function gridRows(grid: Grid, limits: ExportLimits): Cell[][] {
+  const maxColumns = limits.maxColumns ?? DEFAULT_MAX_COLUMNS;
   const rowNos = [...grid.keys()].sort((a, b) => a - b);
+  const widths = new Map<number, number>();
+  let cells = 0;
+  for (const r of rowNos) {
+    let width = 0;
+    for (const c of grid.get(r)!.keys()) if (c + 1 > width) width = c + 1;
+    if (width > maxColumns) {
+      throw new ParityInputError("bad_trades_csv", `A sheet of the XLSX has a row wider than ${maxColumns} columns.`);
+    }
+    cells += width;
+    if (cells > limits.maxCells) {
+      throw new ParityInputError("bad_trades_csv", `A sheet of the XLSX spans more than ${limits.maxCells} cells.`);
+    }
+    widths.set(r, width);
+  }
   return rowNos.map((r) => {
     const row = grid.get(r)!;
-    const width = Math.max(-1, ...row.keys()) + 1;
-    return Array.from({ length: width }, (_, c) => row.get(c) ?? { value: null, isDate: false });
+    return Array.from({ length: widths.get(r)! }, (_, c) => row.get(c) ?? { value: null, isDate: false });
   });
 }
 
@@ -470,7 +499,7 @@ async function readXlsx(b64: string, inflate: InflateFn, limits: ExportLimits): 
     );
   }
 
-  const tradeCells = gridRows(parseSheet(await zip.text(tradesSheet.path), shared, dateStyles, limits));
+  const tradeCells = gridRows(parseSheet(await zip.text(tradesSheet.path), shared, dateStyles, limits), limits);
   const headerIdx = tradeCells.findIndex((r) => r.some((c) => {
     const v = String(c.value ?? "");
     return v === "Trade number" || v === "Trade #";
@@ -500,7 +529,7 @@ async function readXlsx(b64: string, inflate: InflateFn, limits: ExportLimits): 
   let settings: ExportSettings = {};
   if (propsSheet) {
     let section = "";
-    const propCells = gridRows(parseSheet(await zip.text(propsSheet.path), shared, dateStyles, limits));
+    const propCells = gridRows(parseSheet(await zip.text(propsSheet.path), shared, dateStyles, limits), limits);
     for (const r of propCells) {
       const texts = r.map((c) => cellText(c, date1904).trim()).filter((s, i) => s !== "" || i < 2);
       const name = texts[0] ?? "";

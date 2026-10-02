@@ -18,6 +18,7 @@ import {
   formatParityResult,
   RETENTION_LOCAL,
   resolveSettings,
+  DEFAULT_EXPORT_LIMITS,
   type InflateFn,
 } from "../src/parity/index.js";
 import { buildXlsx, reportXlsx, tradesSheetFromCsv, zip, SAMPLE_PROPERTIES } from "./fixtures/parity/xlsx.js";
@@ -328,4 +329,79 @@ test("settings: explicit inputs and XLSX Properties merge only when they agree",
   const noSymbol = resolveSettings({ timeframe: "60", chart_timezone: "UTC", range_start: "2025-01-01" }, {}, { symbolRequired: false });
   assert.equal(noSymbol.symbol, null);
   assert.equal(noSymbol.rangeEndMs, null);
+});
+
+// Python: int(datetime.strptime(wall, "%Y-%m-%d %H:%M").replace(tzinfo=ZoneInfo(tz)).timestamp()) * 1000,
+// i.e. the grader's own reading (fold=0), for spring-forward gaps and fall-back folds in both hemispheres.
+const PY_FOLD0: Array<[string, string, number]> = [
+  ["Europe/Berlin", "2025-10-26 02:15", 1761437700000], // fold: first occurrence (CEST)
+  ["Europe/Berlin", "2025-10-26 02:45", 1761439500000],
+  ["Europe/Berlin", "2025-10-26 03:15", 1761444900000],
+  ["Europe/Berlin", "2025-10-26 01:59", 1761436740000],
+  ["Europe/Berlin", "2025-03-30 02:30", 1743298200000], // gap: the offset before the change
+  ["America/New_York", "2025-11-02 01:30", 1762061400000],
+  ["America/New_York", "2025-03-09 02:30", 1741505400000],
+  ["Australia/Sydney", "2025-04-06 02:30", 1743867000000], // southern fall-back
+  ["Australia/Sydney", "2025-10-05 02:30", 1759595400000], // southern spring-forward
+  ["America/Santiago", "2025-04-05 23:30", 1743906600000],
+  ["America/Santiago", "2025-09-07 00:30", 1757219400000],
+  ["Asia/Taipei", "2025-03-31 08:15", 1743380100000],
+];
+
+test("wall times resolve exactly as the grader's zoneinfo does (fold=0), gaps and folds, both hemispheres", () => {
+  for (const [tz, wall, ms] of PY_FOLD0) {
+    const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/.exec(wall)!;
+    assert.equal(wallToUtcMs(+m[1]!, +m[2]!, +m[3]!, +m[4]!, +m[5]!, tz), ms, `${tz} ${wall}`);
+  }
+});
+
+test("XLSX Properties in a DST fold merge with the matching explicit instant", () => {
+  const exp = { range_start_wall: "2025-10-26 02:15", range_end_wall: "2025-10-26 02:45", timeframe: "15", symbol: "BINANCE:ETHUSDT" };
+  const r = resolveSettings({ chart_timezone: "Europe/Berlin", range_start: "2025-10-26T00:15:00Z" }, exp, { symbolRequired: true });
+  assert.equal(r.rangeStartMs, 1761437700000);
+  assert.equal(r.rangeEndMs, 1761439500000);
+  assert.throws(() => resolveSettings({ chart_timezone: "Europe/Berlin", range_start: "2025-10-26T01:15:00Z" }, exp, { symbolRequired: true }),
+    (e: unknown) => e instanceof ParityInputError && e.kind === "conflicting_setting");
+  const syd = resolveSettings({ chart_timezone: "Australia/Sydney" }, { ...exp, range_start_wall: "2025-04-06 02:30", range_end_wall: undefined }, { symbolRequired: true });
+  assert.equal(syd.rangeStartMs, 1743867000000);
+});
+
+test("ISO ranges: calendar, clock and offset fields are checked, never rolled over", () => {
+  for (const bad of ["2025-02-30", "2025-13-01", "2025-00-10", "2025-04-31T00:00", "2025-04-01T24:00",
+                     "2025-04-01T23:60", "2025-04-01T23:59:60", "2025-04-01T08:00+25:99", "2025-04-01T08:00+14:30",
+                     "2023-02-29", "1899-12-31"]) {
+    assert.throws(() => parseIsoUtc(bad, "range_start"), (e: unknown) => e instanceof ParityInputError && e.kind === "bad_range", bad);
+  }
+  assert.equal(parseIsoUtc("2024-02-29", "range_start"), Date.UTC(2024, 1, 29));
+  assert.equal(parseIsoUtc("2025-04-01T23:59:59-14:00", "range_start"), Date.UTC(2025, 3, 2, 13, 59, 59));
+});
+
+test("XLSX cell references outside the grid, over-wide rows and the expanded-cell budget are refused before allocation", async () => {
+  const sheet = (cells: string) => zip([
+    { name: "xl/workbook.xml", data: Buffer.from('<workbook><sheets><sheet name="List of trades" r:id="rId1"/></sheets></workbook>') },
+    { name: "xl/_rels/workbook.xml.rels", data: Buffer.from('<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>') },
+    { name: "xl/worksheets/sheet1.xml", data: Buffer.from(`<worksheet><sheetData>${cells}</sheetData></worksheet>`) },
+  ]).toString("base64");
+  const bomb = sheet('<row r="1"><c r="ZZZZZ1" t="inlineStr"><is><t>x</t></is></c></row>');
+  assert.ok(Buffer.from(bomb, "base64").length < 1024);
+  await inputError(readTradingViewExport(bomb, inflate), "bad_trades_csv", /cell reference outside Excel's grid/);
+  await inputError(readTradingViewExport(sheet('<row r="1"><c r="XFE1"><v>1</v></c></row>'), inflate), "bad_trades_csv", /outside Excel's grid/);
+  await inputError(readTradingViewExport(sheet('<row r="2000000"><c r="A1"><v>1</v></c></row>'), inflate), "bad_trades_csv", /outside Excel's grid/);
+  await inputError(readTradingViewExport(sheet('<row r="1"><c r="XFD1"><v>1</v></c></row>'), inflate), "bad_trades_csv", /wider than 256 columns/);
+  const wide = Array.from({ length: 50 }, (_, i) => `<row r="${i + 1}"><c r="IV${i + 1}"><v>1</v></c></row>`).join("");
+  const limits = { ...DEFAULT_EXPORT_LIMITS, maxCells: 10_000 };
+  await inputError(readTradingViewExport(sheet(wide), inflate, limits), "bad_trades_csv", /spans more than 10000 cells/);
+});
+
+test("a check the grader did not compute prints as not measured", () => {
+  const text = formatParityResult({
+    ok: true, tier: "minimal", tier_meaning: "m", profile: "strict",
+    checks: [
+      { name: "trade count", tradingview: 1, pineforge: 1, value: 0, abs: 0, excellent: "exact (0)", strong: "< 6%", pass_excellent: true, pass_strong: true },
+      { name: "coverage", value: null, note: "not measured: no trade lined up" },
+    ],
+    matched: 0, unmatched_tradingview: 1, unmatched_pineforge: 1, mismatches: [], warnings: [],
+  }, { retention: RETENTION_LOCAL });
+  assert.match(text, /\| trade count \| TradingView 1, PineForge 1 Δ 0 \|/);
+  assert.match(text, /\| coverage \| not measured: no trade lined up \| - \| - \|  \|/);
 });

@@ -108,6 +108,30 @@ def main() -> int:
     except pf.UserError as e:
         check("a name the grader falls back on is caught", e.kind == "bad_timezone", e.kind)
 
+    # every numeric column the grader reads must be finite (no NaN reaches the JSON)
+    for col, value in (("Net PnL USDT", "NaN"), ("Position size (qty)", "inf"), ("Net PnL USDT", "-Infinity")):
+        tape = TAPE.replace(",1,10.5\n", ",1," + value + "\n", 1) if col == "Net PnL USDT" else \
+            TAPE.replace(",1810.5,1,", ",1810.5," + value + ",", 1)
+        refused(f"{value} in {col}", {**base, "tradingview_trades_csv": tape}, "bad_trades_csv")
+    check("grader numeric columns found in every spelling",
+          pf.grader_numeric_columns(["Trade #", "Price USDT", "Size (qty)", "Net P&L USD", "Net P&L %",
+                                     "Favorable excursion USDT", "Favorable excursion %",
+                                     "Adverse excursion USDT", "MFE", "Signal"]) ==
+          ["Size (qty)", "Net P&L USD", "Net P&L %", "Favorable excursion USDT", "Adverse excursion USDT", "MFE"])
+
+    # no trade lined up: counts from the fields the grader fills; the rest is not a measured zero
+    r = pf.vc.VerificationResult(strategy_dir=tmp, rel="x", label="minimal", no_aligned_trades=True,
+                                 tv_count=1, eng_count=1, count_delta=0.0, count_abs_delta=0, count_ok=True)
+    checks = pf.build_checks(r, pf.vc.parity_for_profile("strict"))
+    check("no alignment: trade count from tv_count / eng_count",
+          checks[0]["tradingview"] == 1 and checks[0]["pineforge"] == 1, str(checks[0]))
+    check("no alignment: unmeasured checks are null, not 0",
+          all(c["value"] is None and c["note"] == pf.NOT_MEASURED for c in checks[1:]) and len(checks) == 5,
+          str(checks[1:]))
+    metrics = pf.build_metrics(r)
+    check("no alignment: unmeasured metrics are null", metrics["entry_p90"] is None and
+          metrics["coverage"] is None and metrics["tv"] == 1 and metrics["eng"] == 1, str(metrics))
+
     # the process contract: JSON in, JSON out, exit 0 on user errors
     proc = subprocess.run([sys.executable, str(HERE / "pf_parity.py")], input="not json",
                           capture_output=True, text=True)

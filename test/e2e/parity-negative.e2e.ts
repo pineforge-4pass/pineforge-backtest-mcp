@@ -10,9 +10,9 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { buildXlsx, tradesSheetFromCsv } from "../fixtures/parity/xlsx.js";
+import { buildXlsx, tradesSheetFromCsv, zip } from "../fixtures/parity/xlsx.js";
 import { parseCsv, toCsv } from "../../src/parity/csv.js";
 import { callParity, connect, pathMapper, type CallOutcome } from "./client.js";
 import { env, listProbes, probeCall, type Probe } from "./corpus.js";
@@ -242,6 +242,68 @@ test("without bars, BINANCE:ETHUSDT.P is fetched from Binance's public API", asy
   assert.match(String(out.data?.bars_source), /^Binance USDT-M perpetual ETHUSDT 15m klines/);
   assert.ok(Number(out.data?.matched) > 0);
   console.log(`Binance-fetched bars: tier ${out.data?.tier} (published ${probes.get(WINDOWED)!.expectedTier} on the corpus feed)`);
+});
+
+test("no trade lines up: minimal, with the trade counts the grader measured", async () => {
+  const a = args(SMALL);
+  const rows = parseCsv(String(a.tradingview_trades).replace(/^\uFEFF/, ""));
+  const iPrice = rows[0]!.findIndex((c) => c.startsWith("Price"));
+  for (const r of rows.slice(1)) r[iPrice] = (Number(r[iPrice]) + 1000).toFixed(2);
+  a.tradingview_trades = toCsv(rows);
+  const out = await callParity(client, a);
+  report("prices +1000 (nothing lines up)", out);
+  assert.equal(out.data?.tier, "minimal");
+  const checks = out.data?.checks as Array<Record<string, any>>;
+  assert.equal(checks[0]!.tradingview, 5);
+  assert.equal(checks[0]!.pineforge, 5);
+  assert.ok(checks.slice(1).every((c) => c.value === null), JSON.stringify(checks));
+  assert.match(out.formatted, /\| trade count \| TradingView 5, PineForge 5 Δ 0 \|/);
+});
+
+test("a non-finite P&L is refused before any run, as a plain error", async () => {
+  const a = args(SMALL);
+  const rows = parseCsv(String(a.tradingview_trades).replace(/^\uFEFF/, ""));
+  const iPnl = rows[0]!.findIndex((c) => c.startsWith("Net PnL") && !c.endsWith("%"));
+  rows[1]![iPnl] = "NaN";
+  a.tradingview_trades = toCsv(rows);
+  const out = await callParity(client, a);
+  report("NaN P&L", out);
+  assert.equal(out.data?.error, "bad_trades_csv");
+  assert.match(String(out.data?.message), /is not a finite number/);
+  await stillServes();
+});
+
+test("a sparse-coordinate XLSX gets a typed error over stdio and the server keeps serving", async () => {
+  const a = args(SMALL);
+  a.tradingview_trades = zip([
+    { name: "xl/workbook.xml", data: Buffer.from('<workbook><sheets><sheet name="List of trades" r:id="rId1"/></sheets></workbook>') },
+    { name: "xl/_rels/workbook.xml.rels", data: Buffer.from('<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>') },
+    { name: "xl/worksheets/sheet1.xml", data: Buffer.from('<worksheet><sheetData><row r="1"><c r="ZZZZZ1" t="inlineStr"><is><t>x</t></is></c></row></sheetData></worksheet>') },
+  ]).toString("base64");
+  const out = await callParity(client, a);
+  report("XLSX cell ZZZZZ1", out);
+  assert.equal(out.data?.error, "bad_trades_csv");
+  await stillServes();
+});
+
+test("a cwd-scoped server refuses bars paths that leave its cwd ('..', symlink)", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "e2e-parity-scope-"));
+  const { symlinkSync } = await import("node:fs");
+  symlinkSync(feed15, join(cwd, "link.csv"));
+  const argv = (JSON.parse(process.env.PF_E2E_SERVER ?? '["node","dist/index.js"]') as string[])
+    .map((x) => (x === "dist/index.js" ? resolve("dist/index.js") : x));
+  const scoped = await connect({ env: { PINEFORGE_ALLOW_ANYWHERE: "0" }, cwd, argv });
+  try {
+    const a = args(SMALL);
+    for (const p of [`${cwd}/${"../".repeat(cwd.split("/").length)}${feed15.slice(1)}`, join(cwd, "link.csv")]) {
+      const out = await callParity(scoped, { ...a, ohlcv_csv_path: p });
+      report(`scoped server, ${p}`, out);
+      assert.equal(out.data?.error, "no_bars");
+      assert.match(String(out.data?.message), /outside cwd/);
+    }
+  } finally {
+    await scoped.close();
+  }
 });
 
 test("after all of that the server still grades", async () => {

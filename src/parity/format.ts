@@ -48,6 +48,8 @@ function pct(v: unknown, digits = 4): string {
 function checkValue(c: Json): string {
   const name = String(c.name ?? "");
   const v = c.value;
+  // null is a statistic the grader did not compute, not a measured zero.
+  if (v === null || v === undefined) return c.note ? str(c.note) : "not measured";
   if ("tradingview" in c || "pineforge" in c) {
     const parts = [`TradingView ${str(c.tradingview)}, PineForge ${str(c.pineforge)}`];
     if (c.abs !== undefined) parts.push(`Δ ${str(c.abs)}`);

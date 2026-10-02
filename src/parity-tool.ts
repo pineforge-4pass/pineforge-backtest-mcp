@@ -81,7 +81,7 @@ function fromTradingViewChart(text: string): string {
     const f = lines[i]!.split(",");
     const t = (f[it] ?? "").trim();
     const ms = /^\d+(\.\d+)?$/.test(t) ? Math.round(Number(t) * 1000) : Date.parse(t);
-    if (!Number.isFinite(ms)) throw noBars(`Bars row ${i + 1}: time '${t}' is neither epoch seconds nor ISO 8601.`);
+    if (!Number.isFinite(ms)) throw noBars(`Bars row ${i + 1}: the time is neither epoch seconds nor ISO 8601.`);
     const nums = [io, ih, il, ic].map((j) => (f[j] ?? "").trim());
     if (nums.some((v) => !/^-?\d+(\.\d+)?([eE][-+]?\d+)?$/.test(v))) {
       throw noBars(`Bars row ${i + 1} has a missing or non-numeric price.`);
@@ -99,7 +99,8 @@ function barsFormat(firstLine: string): BarsFormat {
   const cols = firstLine.replace(/^﻿/, "").toLowerCase().split(",").map((s) => s.trim());
   if (ENGINE_HEADER.split(",").every((c, i) => cols[i] === c)) return "engine";
   if (["time", "open", "high", "low", "close"].every((c, i) => cols[i] === c)) return "tradingview";
-  throw noBars(`The bars header '${firstLine.slice(0, 120)}' is neither format.`);
+  // The line itself is not echoed: the path may name any readable file.
+  throw noBars("The bars file's first line is neither header.");
 }
 
 async function firstLine(path: string): Promise<string> {

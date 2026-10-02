@@ -367,6 +367,21 @@ only the inputs below, returns it for a stratified sample of 30.
 | `max_mismatches` | optional, default 10, at most 50 |
 | `ohlcv_csv` / `ohlcv_csv_path` | your bars, so any market works: `timestamp,open,high,low,close,volume` (epoch ms) or TradingView's chart export `time,open,high,low,close,Volume` (epoch seconds or ISO 8601); paths follow the [`backtest_pine` rules](#filesystem-scope) |
 
+**Limits** (refused with a plain error above them):
+
+| what | limit |
+|---|---|
+| `pine` | 262,144 bytes (256 KiB) of UTF-8 |
+| `tradingview_trades` | 33,554,432 characters (32 × 1024²) as passed; the trade list the grader reads (the CSV, or the one rebuilt from the XLSX) at most 32 MiB of UTF-8 and 400,000 rows |
+| XLSX report | each decompressed part at most 64 MiB, all parts together at most 128 MiB; a sheet at most 400,000 rows, 256 columns, and 8,000,000 cells counting the empty cells inside each row |
+| `ohlcv_csv` | 67,108,864 characters (64 × 1024²) |
+| `ohlcv_csv_path` | no size limit (a TradingView chart export is converted in memory) |
+| Binance fetch | 100,000 bars |
+| run time | `PINEFORGE_PARITY_TIMEOUT_MS`, default 600,000 ms for transpile, compile, backtest and grading together |
+
+There is no quota and no history window here: the range is limited only by the bars
+you pass, or by the 100,000-bar Binance fetch.
+
 **Bars.** Your `ohlcv_csv` / `ohlcv_csv_path` when given. Otherwise `BINANCE:<SYMBOL>`
 is fetched as Binance spot klines and `BINANCE:<SYMBOL>.P` as USDT-M perpetual klines,
 from the public API, at most 100,000 bars. Any other symbol without bars is an error
@@ -486,7 +501,9 @@ at that tag is the reference it was checked against.
 ## Filesystem scope
 
 With `npx`, OHLCV, output and report paths must be inside the current working
-directory of the MCP server process by default. Override with:
+directory of the MCP server process by default. The check runs on the resolved
+path: `..` segments and symbolic links are resolved first, so neither can point
+outside it. Override with:
 
 ```bash
 export PINEFORGE_ALLOW_ANYWHERE=1

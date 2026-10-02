@@ -143,13 +143,29 @@ export function tzOffsetMs(ms: number, tz: string): number {
   return Date.UTC(y!, mo! - 1, d!, h!, mi!, s!) - (ms - (((ms % 1000) + 1000) % 1000));
 }
 
-/** The instant of a wall-clock time in `tz` (the earlier one in a DST overlap). */
+/**
+ * The instant of a wall-clock time in `tz`, resolved as the grader resolves it:
+ * Python's `datetime(...).replace(tzinfo=ZoneInfo(tz)).timestamp()` with
+ * fold=0. A UTC-offset change at instant T takes effect, in wall time, at
+ * T + max(offset before, offset after): a time repeated by a fall-back reads as
+ * its first occurrence, a time skipped by a spring-forward reads with the
+ * offset in force before the change.
+ */
 export function wallToUtcMs(y: number, mo: number, d: number, h: number, mi: number, tz: string): number {
-  const guess = Date.UTC(y, mo - 1, d, h, mi);
-  let t = guess - tzOffsetMs(guess, tz);
-  const t2 = guess - tzOffsetMs(t, tz);
-  if (t2 !== t) t = Math.min(t, t2);
-  return t;
+  const wall = Date.UTC(y, mo - 1, d, h, mi);
+  const span = 40 * 3_600_000;
+  const before = tzOffsetMs(wall - span, tz);
+  const after = tzOffsetMs(wall + span, tz);
+  if (before === after) return wall - before;
+  // The change between wall - span and wall + span, to the minute.
+  let lo = wall - span;
+  let hi = wall + span;
+  while (hi - lo > 60_000) {
+    const mid = lo + Math.floor((hi - lo) / 120_000) * 60_000;
+    if (tzOffsetMs(mid, tz) === before) lo = mid;
+    else hi = mid;
+  }
+  return wall < hi + Math.max(before, after) ? wall - before : wall - after;
 }
 
 /** "YYYY-MM-DD HH:MM" wall clock of instant `ms` in `tz`. */
@@ -180,20 +196,24 @@ export function parseIsoUtc(raw: string, field: string): number {
       `${field} '${raw}' is not an ISO 8601 date or datetime (e.g. 2025-04-01 or 2025-04-01T08:00:00Z).`,
     );
   }
-  let ms = Date.UTC(
-    Number(m[1]), Number(m[2]) - 1, Number(m[3]),
-    Number(m[4] ?? 0), Number(m[5] ?? 0), Number(m[6] ?? 0), Number((m[7] ?? "0").padEnd(3, "0")),
-  );
+  const [y, mo, d, h, mi, sec] = [1, 2, 3, 4, 5, 6].map((i) => Number(m[i] ?? 0)) as [number, number, number, number, number, number];
   const z = m[8];
+  let offsetMin = 0;
+  let offsetOk = true;
   if (z && z.toUpperCase() !== "Z") {
-    const sign = z[0] === "-" ? -1 : 1;
     const digits = z.slice(1).replace(":", "");
-    ms -= sign * (Number(digits.slice(0, 2)) * 60 + Number(digits.slice(2, 4))) * 60_000;
+    const oh = Number(digits.slice(0, 2));
+    const om = Number(digits.slice(2, 4));
+    offsetOk = om <= 59 && oh * 60 + om <= 14 * 60;
+    offsetMin = (z[0] === "-" ? -1 : 1) * (oh * 60 + om);
   }
-  if (!Number.isFinite(ms)) {
-    throw new ParityInputError("bad_range", `${field} '${raw}' is not a valid date.`);
+  // Calendar and clock fields are checked, never rolled over (2025-02-30 is not March 2).
+  const daysInMonth = mo >= 1 && mo <= 12 ? new Date(Date.UTC(y, mo, 0)).getUTCDate() : 0;
+  if (y < 1900 || y > 2200 || mo < 1 || mo > 12 || d < 1 || d > daysInMonth ||
+      h > 23 || mi > 59 || sec > 59 || !offsetOk) {
+    throw new ParityInputError("bad_range", `${field} '${raw}' is not a valid date and time.`);
   }
-  return ms;
+  return Date.UTC(y, mo - 1, d, h, mi, sec, Number((m[7] ?? "0").padEnd(3, "0"))) - offsetMin * 60_000;
 }
 
 // ─── Export span ──────────────────────────────────────────────────────────

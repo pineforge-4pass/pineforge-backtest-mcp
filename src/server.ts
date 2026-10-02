@@ -11,8 +11,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { mkdtemp, mkdir, writeFile, rm, stat, readFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve, isAbsolute, dirname, relative } from "node:path";
+import { join, resolve, isAbsolute, dirname, relative, sep, basename } from "node:path";
 import { VERSION } from "./version.js";
 import {
   DEFAULT_IMAGE,
@@ -336,15 +337,38 @@ async function pMap<T, R>(items: T[], n: number, fn: (t: T, i: number) => Promis
 
 // ─── Path / CSV helpers ───────────────────────────────────────────────────
 
-function resolveScopedPath(p: string, label: string): string {
-  const abs = isAbsolute(p) ? p : resolve(process.cwd(), p);
-  if (!ALLOW_ANYWHERE && !abs.startsWith(process.cwd() + "/") && abs !== process.cwd()) {
-    throw new Error(
-      `${label} path '${abs}' is outside cwd '${process.cwd()}'. ` +
-      `Set PINEFORGE_ALLOW_ANYWHERE=1 to override.`
-    );
+// The canonical form of a path: `..` and `.` removed, symlinks resolved. A
+// path that does not exist yet (an output file) resolves through its deepest
+// existing ancestor.
+function canonicalPath(p: string): string {
+  const abs = resolve(process.cwd(), p);
+  const rest: string[] = [];
+  let head = abs;
+  for (;;) {
+    try {
+      return join(realpathSync(head), ...rest);
+    } catch {
+      const parent = dirname(head);
+      if (parent === head) return abs;
+      rest.unshift(basename(head));
+      head = parent;
+    }
   }
-  return abs;
+}
+
+function resolveScopedPath(p: string, label: string): string {
+  const target = canonicalPath(p);
+  if (!ALLOW_ANYWHERE) {
+    const root = canonicalPath(process.cwd());
+    const rel = relative(root, target);
+    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+      throw new Error(
+        `${label} path '${p}' is outside cwd '${process.cwd()}' (after resolving '..' and symlinks). ` +
+        `Set PINEFORGE_ALLOW_ANYWHERE=1 to override.`
+      );
+    }
+  }
+  return target;
 }
 
 async function resolveCsvPath(p: string): Promise<string> {
@@ -355,9 +379,8 @@ async function resolveCsvPath(p: string): Promise<string> {
   const expected = ["timestamp", "open", "high", "low", "close", "volume"];
   const cols = head.toLowerCase().split(",").map((s) => s.trim());
   if (expected.some((c, i) => cols[i] !== c)) {
-    throw new Error(
-      `OHLCV header mismatch. Expected: ${expected.join(",")}\nGot: ${head}`
-    );
+    // The file's own first line is not echoed: the path may name any readable file.
+    throw new Error(`OHLCV header mismatch: the first line of ${abs} is not ${expected.join(",")}.`);
   }
   return abs;
 }
@@ -1056,14 +1079,18 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         "with its value and thresholds, matched and unmatched trade counts, the first mismatches side by side " +
         "with hints, and a timezone check. Bars: pass ohlcv_csv or ohlcv_csv_path for any market; without " +
         "them, BINANCE:<SYMBOL> (spot) and BINANCE:<SYMBOL>.P (USDT-M perpetual) bars are fetched from " +
-        "Binance's public API; any other symbol needs your bars. Settings the XLSX Properties sheet states " +
+        "Binance's public API (at most 100,000 bars); any other symbol needs your bars. No quota and no " +
+        "history window beyond that. Settings the XLSX Properties sheet states " +
         "are used; an explicit input that disagrees with one is an error. " + parityWhere,
       inputSchema: {
-        pine: z.string().describe("The Pine v6 strategy source TradingView ran (at most 256 KiB)."),
+        pine: z.string().describe("The Pine v6 strategy source TradingView ran (at most 262,144 bytes of UTF-8)."),
         tradingview_trades: z.string().describe(
           "TradingView's Strategy Tester export: the \"List of trades\" CSV text, or the XLSX report " +
           "file base64-encoded (it starts with UEsDB). The CSV needs the columns Trade number, Type, " +
-          "Date and time and a Price column, as TradingView exports them."
+          "Date and time and a Price column, as TradingView exports them. Limits: 33,554,432 characters " +
+          "as passed; the trade list graded at most 32 MiB of UTF-8 and 400,000 rows; XLSX parts at most " +
+          "64 MiB each and 128 MiB together decompressed, sheets at most 400,000 rows, 256 columns and " +
+          "8,000,000 cells."
         ),
         symbol: z.string().optional().describe(
           "TradingView ticker the backtest ran on, e.g. 'BINANCE:ETHUSDT.P'. Required unless the XLSX " +
@@ -1099,11 +1126,12 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         ),
         ohlcv_csv: z.string().optional().describe(
           "Your bars as CSV text: header timestamp,open,high,low,close,volume (epoch ms), or " +
-          "TradingView's chart export time,open,high,low,close,Volume (epoch seconds or ISO 8601)."
+          "TradingView's chart export time,open,high,low,close,Volume (epoch seconds or ISO 8601). " +
+          "At most 67,108,864 characters; use ohlcv_csv_path for more."
         ),
         ohlcv_csv_path: z.string().optional().describe(
-          "Path to your bars CSV (same formats as ohlcv_csv; same path rules as backtest_pine's " +
-          "ohlcv_csv_path)."
+          "Path to your bars CSV (same formats as ohlcv_csv, no size limit; same path rules as " +
+          "backtest_pine's ohlcv_csv_path, checked after resolving '..' and symlinks)."
         ),
       },
     },

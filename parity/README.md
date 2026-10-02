@@ -41,6 +41,35 @@ Request fields: `pine`, `tradingview_trades_csv`, `chart_timezone`,
 corpus test only: a probe's whole inputs.json used as is; the MCP tools never
 send it.
 
+## What a runner must do
+
+The driver's children (the transpile step, g++ and its compilers, the harness
+with the user's `.so` loaded in it) each run in their own session, so the
+driver can kill each one's whole subtree. The driver kills and reaps them when
+it gets SIGTERM, SIGINT or SIGHUP, and on every exit path; on Linux each child
+also gets SIGKILL if the driver dies without doing that (`PR_SET_PDEATHSIG`),
+and the driver gets SIGTERM if the process that started it dies.
+`pf_parity_killtest.py` checks all three in the release image.
+
+A runner (the local MCP's LocalRunner, the hosted container's `/parity` route)
+must:
+
+1. Start `python3 pf_parity.py` in its own process group (Node:
+   `spawn(..., { detached: true })`), the request on stdin, and read stdout
+   until the process closes. Its own working folder goes in `workdir`.
+2. Set `PF_PARITY_TIMEOUT_MS` (the driver's deadline) and stop the driver only
+   later: at least 30 s after that deadline, send SIGTERM to the driver's
+   process group, then SIGKILL to the group if it has not exited 5 s later.
+   SIGKILL first would leave the driver no chance to kill its children (the
+   Linux backstop still takes the direct children, not their descendants).
+3. Treat exit 0 as an answer (`ok` true or false) and anything else as an
+   internal failure; after a stop, answer `timeout` itself.
+4. Remove `workdir` after the driver has closed, not before.
+
+Under Docker the container is the boundary instead: `docker kill` on the
+container ends every process in it (the DockerRunner does this past the
+timeout).
+
 ## Vendored files
 
 `vendor/` holds pineforge-engine v1.0.1 (commit

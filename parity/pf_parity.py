@@ -151,6 +151,15 @@ def check_grader_zone(form: str, zone, instants: list[int]) -> None:
                             f"UTC offset than the timezone database at {at:%Y-%m-%d %H:%M} UTC.")
 
 
+def grader_numeric_columns(header: list[str]) -> list[str]:
+    """The columns verify_corpus.parse_trades reads with float(): size, P&L,
+    P&L %, favorable and adverse excursion, in every spelling it accepts."""
+    exact = {"Position size (qty)", "Size (qty)", "Qty", "Net P&L %", "Net PnL %", "MFE", "MAE"}
+    prefixes = ("Net P&L", "Net PnL", "Favorable excursion", "Adverse excursion")
+    return [h for h in header if h in exact or (
+        not h.endswith(" %") and any(h == p or h.startswith(p + " ") for p in prefixes))]
+
+
 def read_trades_csv(text) -> list[dict]:
     """Rows of a TradingView List of trades CSV, checked for what the grader reads."""
     if not isinstance(text, str) or not text.strip():
@@ -171,6 +180,7 @@ def read_trades_csv(text) -> list[dict]:
         raise UserError("bad_trades_csv", "The trade list is missing these columns: " + ", ".join(missing)
                         + ". Export it from TradingView's Strategy Tester, List of trades, as CSV.")
     price_col = next(h for h in header if h == "Price" or h.startswith("Price "))
+    numeric_cols = grader_numeric_columns(header)
     rows = []
     for line, row in enumerate(reader, start=2):
         if None in row or any(v is None for v in row.values()):
@@ -196,6 +206,16 @@ def read_trades_csv(text) -> list[dict]:
             raise UserError("bad_trades_csv", f"Row {line}: price '{row[price_col]}' is not a number.")
         if not math.isfinite(price):
             raise UserError("bad_trades_csv", f"Row {line}: price '{row[price_col]}' is not a number.")
+        for col in numeric_cols:
+            raw = row.get(col)
+            if raw is None or str(raw).strip() == "":
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                raise UserError("bad_trades_csv", f"Row {line}: {col} '{raw}' is not a number.")
+            if not math.isfinite(value):
+                raise UserError("bad_trades_csv", f"Row {line}: {col} '{raw}' is not a finite number.")
         rows.append({"n": n, "entry": kind.startswith("Entry"), "time": stamp})
     entries = {r["n"] for r in rows if r["entry"]}
     exits = {r["n"] for r in rows if not r["entry"]}
@@ -288,13 +308,69 @@ def build_meta(req: dict, grader_tz: str) -> dict:
 
 # --- subprocess ---------------------------------------------------------
 
+# Every child runs in its own session, so its whole subtree (g++ and its
+# compilers, the harness and the user's .so inside it) is one process group the
+# driver can kill. The driver kills and reaps those groups when it is told to
+# stop (SIGTERM, SIGINT, SIGHUP) and on every exit path; on Linux each child also
+# gets SIGKILL if the driver dies without doing so (PR_SET_PDEATHSIG).
+_CHILDREN: set = set()
+_PR_SET_PDEATHSIG = 1
+
+
+def _prctl_pdeathsig(sig: int) -> None:
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        import ctypes
+        ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_PDEATHSIG, int(sig), 0, 0, 0)
+    except Exception:
+        pass
+
+
+def _child_setup() -> None:
+    _prctl_pdeathsig(signal.SIGKILL)
+
+
+def kill_children() -> None:
+    for proc in list(_CHILDREN):
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    for proc in list(_CHILDREN):
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            pass
+        _CHILDREN.discard(proc)
+
+
+def _stop(signum, _frame) -> None:
+    kill_children()
+    raise SystemExit(128 + signum)
+
+
 def run_capped(cmd: list[str], *, timeout_s: float, cwd: Path, env: dict | None = None,
                stdin_text: str | None = None) -> tuple[int | None, str]:
     """Run `cmd` in its own process group; keep the last OUTPUT_CAP bytes of its
     output; SIGKILL the group past `timeout_s`. Returns (exit code or None on timeout, output)."""
     proc = subprocess.Popen(cmd, cwd=str(cwd), env=env, start_new_session=True,
+                            preexec_fn=_child_setup,
                             stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    _CHILDREN.add(proc)
+    try:
+        return _capture(proc, timeout_s, stdin_text)
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait()
+        _CHILDREN.discard(proc)
+
+
+def _capture(proc, timeout_s: float, stdin_text: str | None) -> tuple[int | None, str]:
     tail = bytearray()
 
     def pump():
@@ -550,7 +626,28 @@ def pct(x: float) -> str:
     return f"{x * 100:g}%"
 
 
+# Statistics the grader computes only when at least one trade lines up; its
+# no-alignment return leaves them at their zero defaults, which are not measurements.
+UNMEASURED_WITHOUT_ALIGNMENT = (
+    "entry_p90", "exit_p90", "pnl_p90", "coverage", "unmatched_total", "coverage_tv_count",
+    "gating_matched_count", "tv_gate_count", "eng_gate_count", "unmatched_in_window",
+    "open_mark_pairs", "open_mark_pnl_cent_exact", "open_mark_pnl_max_abs_usd", "entry_p100",
+    "exit_p100", "pnl_p100", "qty_p100", "pnlpct_p100", "mfe_p90", "mae_p90",
+    "distinct_entry_mismatches",
+)
+NOT_MEASURED = "not measured: no trade lined up"
+
+
 def build_checks(r, thresh: dict) -> list[dict]:
+    if r.no_aligned_trades:
+        # The grader's no-alignment branch fills tv_count / eng_count (its common
+        # window), count_delta and count_abs_delta, and nothing else.
+        count = {"name": "trade count", "tradingview": r.tv_count, "pineforge": r.eng_count,
+                 "value": r.count_delta, "abs": r.count_abs_delta,
+                 "excellent": "exact (0)", "strong": f"< {pct(vc.STRONG_COUNT_DELTA)}",
+                 "pass_excellent": r.count_ok, "pass_strong": r.count_delta < vc.STRONG_COUNT_DELTA}
+        return [count] + [{"name": name, "value": None, "note": NOT_MEASURED}
+                          for name in ("coverage", "entry price p90", "exit price p90", "P&L p90")]
     return [
         {"name": "trade count", "tradingview": r.tv_gate_count, "pineforge": r.eng_gate_count,
          "value": r.count_delta, "abs": r.count_abs_delta,
@@ -586,6 +683,10 @@ def build_metrics(r) -> dict:
               "open_mark_pnl_max_abs_usd", "entry_p100", "exit_p100", "pnl_p100", "qty_p100",
               "pnlpct_p100", "mfe_p90", "mae_p90"):
         out[k] = getattr(r, k)
+    if r.no_aligned_trades:
+        for k in UNMEASURED_WITHOUT_ALIGNMENT:
+            if k in out:
+                out[k] = None
     return out
 
 
@@ -723,7 +824,7 @@ def grade(req: dict) -> dict:
             "tier": result.label,
             "tier_meaning": TIER_MEANING.get(result.label, ""),
             "profile": result.profile,
-            "checks": build_checks(result, thresh) if not result.no_aligned_trades else build_checks(result, thresh)[:1],
+            "checks": build_checks(result, thresh),
             "metrics": build_metrics(result),
             "matched": result.matched_count,
             "unmatched_tradingview": counts.get("unmatched_tradingview"),
@@ -748,6 +849,10 @@ def grade(req: dict) -> dict:
 
 def main() -> int:
     import hashlib
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, _stop)
+    # Linux: if whoever started the driver dies, the driver is told to stop.
+    _prctl_pdeathsig(signal.SIGTERM)
     actual = hashlib.sha256((VENDOR / "verify_corpus.py").read_bytes()).hexdigest()
     if actual != GRADER_SHA256:
         sys.stderr.write(f"pf_parity: vendor/verify_corpus.py sha256 {actual} is not {GRADER_SHA256}\n")
@@ -761,8 +866,15 @@ def main() -> int:
         response = grade(req)
     except UserError as e:
         response = {"ok": False, "error": e.kind, "message": e.message}
-    json.dump(response, sys.stdout)
-    sys.stdout.write("\n")
+    finally:
+        kill_children()
+    try:
+        text = json.dumps(response, allow_nan=False)
+    except ValueError:
+        # A non-finite number reached the response: report it, never print NaN.
+        text = json.dumps({"ok": False, "error": "internal",
+                           "message": "The grade holds a value that is not a finite number."})
+    sys.stdout.write(text + "\n")
     return 0
 
 

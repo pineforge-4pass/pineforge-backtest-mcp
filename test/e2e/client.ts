@@ -8,12 +8,13 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 export const TOOL = "check_tradingview_parity";
 const CALL_TIMEOUT_MS = Number(process.env.PF_E2E_CALL_TIMEOUT_MS ?? 1_200_000);
 
-export async function connect(): Promise<Client> {
-  const argv = JSON.parse(process.env.PF_E2E_SERVER ?? '["node","dist/index.js"]') as string[];
+export async function connect(opts: { env?: Record<string, string>; cwd?: string; argv?: string[] } = {}): Promise<Client> {
+  const argv = opts.argv ?? (JSON.parse(process.env.PF_E2E_SERVER ?? '["node","dist/index.js"]') as string[]);
   const transport = new StdioClientTransport({
     command: argv[0]!,
     args: argv.slice(1),
-    env: { ...(process.env as Record<string, string>) },
+    env: { ...(process.env as Record<string, string>), ...(opts.env ?? {}) },
+    cwd: opts.cwd,
     stderr: "inherit",
   });
   const client = new Client({ name: "parity-e2e", version: "0.0.0" });
