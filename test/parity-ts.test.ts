@@ -165,8 +165,15 @@ test("XLSX decompression is capped", async () => {
     { name: "xl/_rels/workbook.xml.rels", data: Buffer.from('<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>') },
     { name: "xl/worksheets/sheet1.xml", data: big },
   ]).toString("base64");
-  const limits = { maxInputChars: 1e9, maxPartBytes: 1024 * 1024, maxTotalBytes: 2 * 1024 * 1024, maxRows: 1000, maxCells: 1000 };
+  // The per-part cap (the total leaves room for the part).
+  const limits = { maxInputChars: 1e9, maxPartBytes: 1024 * 1024, maxTotalBytes: 8 * 1024 * 1024, maxRows: 1000, maxCells: 1000 };
   await inputError(readTradingViewExport(bomb, inflate, limits), "bad_trades_csv", /larger than the 1048576-byte limit/);
+  // The total: the sizes the directory states for the parts read are checked before any is inflated.
+  const small = { ...limits, maxPartBytes: 8 * 1024 * 1024, maxTotalBytes: 2 * 1024 * 1024 };
+  let inflated = 0;
+  const counting: InflateFn = (d, max) => { inflated++; return inflate(d, max); };
+  await inputError(readTradingViewExport(bomb, counting, small), "bad_trades_csv", /parts this reads unpack to \d+ bytes; the limit is 2097152/);
+  assert.equal(inflated, 2, "only the workbook and its rels were inflated");
   await inputError(readTradingViewExport("UEsDBAAA", inflate), "bad_trades_csv", /not a readable ZIP/);
 });
 

@@ -268,6 +268,11 @@ class XlsxReader {
     private limits: ExportLimits,
   ) {}
 
+  /** The unpacked size the ZIP directory states for a part (0 when absent). */
+  declaredSize(name: string): number {
+    return this.entries.get(name)?.size ?? 0;
+  }
+
   has(name: string): boolean {
     return this.entries.has(name);
   }
@@ -562,6 +567,27 @@ async function readXlsx(b64: string, inflate: InflateFn, limits: ExportLimits): 
     const path = rid ? targets.get(rid) : undefined;
     if (path) sheets.push({ name, path });
   }
+  const byName = (pred: (n: string) => boolean) => sheets.find((s) => pred(norm(s.name)));
+  const tradesSheet = byName((n) => n.includes("listoftrades")) ?? byName((n) => n.includes("trades") && !n.includes("analysis"));
+  const propsSheet = byName((n) => n.includes("properties")) ?? byName((n) => n.includes("settings"));
+  if (!tradesSheet) {
+    throw new ParityInputError(
+      "bad_trades_csv",
+      `The XLSX has no "List of trades" sheet (sheets: ${sheets.map((s) => s.name).join(", ") || "none"}).`,
+    );
+  }
+  // Every part read here counts toward maxTotalBytes. Check the sizes the ZIP
+  // directory states for them before inflating any large one: a workbook over the
+  // limit is refused without a byte of it unpacked (each part's inflate is still
+  // capped, so a directory that understates a size gains nothing).
+  const planned = new Set(["xl/workbook.xml", "xl/_rels/workbook.xml.rels", "xl/sharedStrings.xml", "xl/styles.xml",
+    tradesSheet.path, ...(propsSheet ? [propsSheet.path] : [])]);
+  let declared = 0;
+  for (const part of planned) declared += zip.declaredSize(part);
+  if (declared > limits.maxTotalBytes) {
+    throw new ParityInputError("bad_trades_csv",
+      `The XLSX parts this reads unpack to ${declared} bytes; the limit is ${limits.maxTotalBytes}.`);
+  }
   const shared: string[] = [];
   if (zip.has("xl/sharedStrings.xml")) {
     const sst = await zip.text("xl/sharedStrings.xml");
@@ -591,15 +617,6 @@ async function readXlsx(b64: string, inflate: InflateFn, limits: ExportLimits): 
     }
   }
 
-  const byName = (pred: (n: string) => boolean) => sheets.find((s) => pred(norm(s.name)));
-  const tradesSheet = byName((n) => n.includes("listoftrades")) ?? byName((n) => n.includes("trades") && !n.includes("analysis"));
-  const propsSheet = byName((n) => n.includes("properties")) ?? byName((n) => n.includes("settings"));
-  if (!tradesSheet) {
-    throw new ParityInputError(
-      "bad_trades_csv",
-      `The XLSX has no "List of trades" sheet (sheets: ${sheets.map((s) => s.name).join(", ") || "none"}).`,
-    );
-  }
 
   // One cell budget for the whole workbook: the trades sheet and the Properties sheet draw on it together.
   const budget: CellBudget = { parsed: 0, spanned: 0 };
