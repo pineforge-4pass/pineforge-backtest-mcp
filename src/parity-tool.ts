@@ -11,7 +11,9 @@ import { inflateRawSync } from "node:zlib";
 import type { EngineRunner, ParamMap, RuntimeArgsLike } from "./engine.js";
 import {
   ParityInputError,
+  declaresMagnifier,
   exportSpan,
+  magnifierWindow,
   formatParityResult,
   formatWall,
   parseTicker,
@@ -37,6 +39,8 @@ export interface ParityToolArgs {
   max_mismatches?: number;
   ohlcv_csv?: string;
   ohlcv_csv_path?: string;
+  magnifier_ohlcv_csv?: string;
+  magnifier_ohlcv_csv_path?: string;
 }
 
 export interface ParityDeps {
@@ -117,6 +121,51 @@ async function firstLine(path: string): Promise<string> {
 interface Bars {
   path: string;
   source: string;
+  /** Present only for fetched chart bars inside the harness's run bounds. */
+  fetched?: { bars: number; firstOpenMs: number; lastOpenMs: number };
+}
+
+async function suppliedBars(
+  csvText: string | undefined,
+  csvPath: string | undefined,
+  kind: "ohlcv" | "magnifier_ohlcv",
+  work: string,
+  deps: ParityDeps,
+): Promise<Bars | undefined> {
+  if (csvText !== undefined && csvPath !== undefined) {
+    throw new ParityInputError("bad_request", `Pass ${kind}_csv or ${kind}_csv_path, not both.`);
+  }
+  if (csvText !== undefined) {
+    if (csvText.length > MAX_INLINE_BARS_CHARS) {
+      throw noBars(`${kind}_csv is larger than ${MAX_INLINE_BARS_CHARS} characters; pass ${kind}_csv_path instead.`);
+    }
+    const text = csvText.replace(/^\uFEFF/, "");
+    const csv = barsFormat(text.split(/\r?\n/)[0] ?? "") === "engine" ? text : fromTradingViewChart(text);
+    const path = join(work, `${kind}.csv`);
+    await writeFile(path, csv, "utf8");
+    return { path, source: `the ${kind}_csv you passed` };
+  }
+  if (csvPath !== undefined) {
+    let abs: string;
+    try {
+      abs = deps.resolvePath(csvPath, kind === "ohlcv" ? "OHLCV" : "Magnifier OHLCV");
+    } catch (e) {
+      throw new ParityInputError("no_bars", (e as Error).message);
+    }
+    const st = await stat(abs).catch(() => null);
+    if (!st || !st.isFile()) throw new ParityInputError("no_bars", `OHLCV file not found: ${abs}`);
+    const head = await firstLine(abs);
+    const path = join(work, `${kind}.csv`);
+    if (barsFormat(head) === "engine") {
+      if (!head.startsWith("\uFEFF")) return { path: abs, source: `your file ${abs}` };
+      // The grading core reads the header without a byte-order mark.
+      await writeFile(path, (await readFile(abs, "utf8")).replace(/^\uFEFF/, ""), "utf8");
+      return { path, source: `your file ${abs}` };
+    }
+    await writeFile(path, fromTradingViewChart(await readFile(abs, "utf8")), "utf8");
+    return { path, source: `your file ${abs} (TradingView chart export, converted)` };
+  }
+  return undefined;
 }
 
 async function findBars(
@@ -128,39 +177,8 @@ async function findBars(
   work: string,
   deps: ParityDeps,
 ): Promise<Bars> {
-  if (args.ohlcv_csv !== undefined && args.ohlcv_csv_path !== undefined) {
-    throw new ParityInputError("bad_request", "Pass ohlcv_csv or ohlcv_csv_path, not both.");
-  }
-  if (args.ohlcv_csv !== undefined) {
-    if (args.ohlcv_csv.length > MAX_INLINE_BARS_CHARS) {
-      throw noBars(`ohlcv_csv is larger than ${MAX_INLINE_BARS_CHARS} characters; pass ohlcv_csv_path instead.`);
-    }
-    const text = args.ohlcv_csv.replace(/^\uFEFF/, "");
-    const csv = barsFormat(text.split(/\r?\n/)[0] ?? "") === "engine" ? text : fromTradingViewChart(text);
-    const path = join(work, "ohlcv.csv");
-    await writeFile(path, csv, "utf8");
-    return { path, source: "the ohlcv_csv you passed" };
-  }
-  if (args.ohlcv_csv_path !== undefined) {
-    let abs: string;
-    try {
-      abs = deps.resolvePath(args.ohlcv_csv_path, "OHLCV");
-    } catch (e) {
-      throw new ParityInputError("no_bars", (e as Error).message);
-    }
-    const st = await stat(abs).catch(() => null);
-    if (!st || !st.isFile()) throw new ParityInputError("no_bars", `OHLCV file not found: ${abs}`);
-    const head = await firstLine(abs);
-    const path = join(work, "ohlcv.csv");
-    if (barsFormat(head) === "engine") {
-      if (!head.startsWith("\uFEFF")) return { path: abs, source: `your file ${abs}` };
-      // The grading core reads the header without a byte-order mark.
-      await writeFile(path, (await readFile(abs, "utf8")).replace(/^\uFEFF/, ""), "utf8");
-      return { path, source: `your file ${abs}` };
-    }
-    await writeFile(path, fromTradingViewChart(await readFile(abs, "utf8")), "utf8");
-    return { path, source: `your file ${abs} (TradingView chart export, converted)` };
-  }
+  const supplied = await suppliedBars(args.ohlcv_csv, args.ohlcv_csv_path, "ohlcv", work, deps);
+  if (supplied) return supplied;
   if (!symbol) throw noBars("No bars and no symbol.");
   const t = parseTicker(symbol);
   if (t.exchange !== "BINANCE") {
@@ -171,22 +189,27 @@ async function findBars(
     throw noBars(`Binance has no ${timeframe} klines for ${t.perpetual ? "perpetuals" : "spot"}.`);
   }
   const bar = timeframeMs(timeframe);
-  const need = Math.floor((endMs - startMs) / bar) + 1;
+  const fetchEndMs = endMs + bar; // Preserve the chart feed padding; the harness trims to endMs.
+  const need = Math.floor((fetchEndMs - startMs) / bar) + 1;
   if (need > MAX_FETCH_BARS) {
     throw noBars(`The range needs about ${need} bars at timeframe ${timeframe} from Binance; the fetch limit is ${MAX_FETCH_BARS}.`);
   }
   const market = t.perpetual ? "usdt_perp" : "spot";
   let fetched: { csv: string; bars: number };
   try {
-    fetched = await deps.fetchBinanceCsv(market, t.symbol, interval, startMs, endMs, need);
+    fetched = await deps.fetchBinanceCsv(market, t.symbol, interval, startMs, fetchEndMs, need);
   } catch (e) {
     throw noBars(`Fetching ${t.ticker} ${interval} klines from Binance failed: ${(e as Error).message.slice(0, 300)}.`);
   }
   const { csv, bars } = fetched;
+  const opens = csv.trim().split(/\r?\n/).slice(1).map((row) => Number(row.split(",", 1)[0]))
+    .filter((ms) => Number.isFinite(ms) && ms >= startMs && ms <= endMs);
+  if (!opens.length) throw noBars("Binance returned no chart bars inside the run's range.");
   const path = join(work, "ohlcv.csv");
   await writeFile(path, csv, "utf8");
   return {
     path,
+    fetched: { bars, firstOpenMs: opens[0]!, lastOpenMs: opens[opens.length - 1]! },
     source: `Binance ${market === "spot" ? "spot" : "USDT-M perpetual"} ${t.symbol} ${interval} klines ` +
       `(${bars} bars, fetched from the public API)`,
   };
@@ -225,10 +248,32 @@ export async function checkParity(
         `(${formatWall(s.rangeStartMs, s.chartTimezone)}): set range_start to the first bar of the TradingView backtest.`,
     );
   }
-  const endMs = (s.rangeEndMs ?? span.lastRowMs) + timeframeMs(s.timeframe);
+  const endMs = s.rangeEndMs ?? span.lastRowMs;
   const work = await mkdtemp(join(tmpdir(), "pineforge-pt-"));
   try {
+    let magnifier = await suppliedBars(args.magnifier_ohlcv_csv, args.magnifier_ohlcv_csv_path,
+      "magnifier_ohlcv", work, deps);
     const bars = await findBars(args, s.symbol, s.timeframe, s.rangeStartMs, endMs, work, deps);
+    if (!magnifier && bars.fetched && declaresMagnifier(args.pine)) {
+      const window = magnifierWindow(bars.fetched.firstOpenMs, bars.fetched.lastOpenMs, timeframeMs(s.timeframe));
+      const need = Math.floor((window.endMs - window.startMs) / 60_000) + 1;
+      if (bars.fetched.bars + need > MAX_FETCH_BARS) {
+        throw noBars(`The range needs ${bars.fetched.bars} chart bars plus ${need} 1-minute magnifier bars; ` +
+          `the Binance fetch limit is ${MAX_FETCH_BARS} bars in total. Shorten the range or pass both feeds.`);
+      }
+      const t = parseTicker(s.symbol!);
+      const market = t.perpetual ? "usdt_perp" : "spot";
+      let fine: { csv: string; bars: number };
+      try {
+        fine = await deps.fetchBinanceCsv(market, t.symbol, "1m", window.startMs, window.endMs, need);
+      } catch (e) {
+        throw noBars(`Fetching ${t.ticker} 1m magnifier bars from Binance failed: ${(e as Error).message.slice(0, 300)}.`);
+      }
+      const path = join(work, "magnifier_ohlcv.csv");
+      await writeFile(path, fine.csv, "utf8");
+      magnifier = { path, source: `Binance ${market === "spot" ? "spot" : "USDT-M perpetual"} ${t.symbol} 1m klines ` +
+        `(${fine.bars} bars, fetched from the public API)` };
+    }
     const request: Record<string, unknown> = {
       pine: args.pine,
       tradingview_trades_csv: exp.csv,
@@ -239,11 +284,11 @@ export async function checkParity(
       inputs: args.inputs ?? {},
       strategy_overrides: s.strategyOverrides,
       runtime: s.runtime,
-      magnifier_ohlcv_csv_path: null,
       max_mismatches: args.max_mismatches ?? 10,
     };
-    const response = await runner.parity({ request, barsPath: bars.path });
+    const response = await runner.parity({ request, barsPath: bars.path, magnifierBarsPath: magnifier?.path });
     notes.push(`Bars: ${bars.source}.`);
+    if (magnifier) notes.push(`Magnifier bars: ${magnifier.source}.`);
     if (s.rangeEndMs === null) {
       notes.push(`Range end: not given, so the export's last row (${span.lastRow} ${s.chartTimezone}) ends the run.`);
     }
@@ -261,6 +306,7 @@ export async function checkParity(
       ...(exp.format === "xlsx" ? { properties: exp.properties } : {}),
     };
     response.bars_source = bars.source;
+    if (magnifier) response.magnifier_bars_source = magnifier.source;
     return response;
   } finally {
     await rm(work, { recursive: true, force: true }).catch(() => undefined);

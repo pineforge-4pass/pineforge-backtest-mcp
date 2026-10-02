@@ -315,6 +315,8 @@ export interface ParityCall {
   request: Record<string, unknown>;
   /** The bars CSV on this machine (header timestamp,open,high,low,close,volume). */
   barsPath: string;
+  /** Optional 1-minute magnifier feed on this machine. */
+  magnifierBarsPath?: string;
 }
 
 export interface EngineRunner {
@@ -355,12 +357,14 @@ export class DockerRunner implements EngineRunner {
         "-v", `${jail}:/jail`,
         "-v", `${call.barsPath}:/in/ohlcv.csv:ro`,
       ];
+      if (call.magnifierBarsPath) args.push("-v", `${call.magnifierBarsPath}:/in/magnifier.csv:ro`);
       // Run as the caller so the 0700 jail and the caller's files are readable.
       if (typeof process.getuid === "function" && typeof process.getgid === "function") {
         args.push("--user", `${process.getuid()}:${process.getgid()}`);
       }
       args.push(this.image, "/opt/pf-parity/pf_parity.py");
-      const request = { ...call.request, ohlcv_csv_path: "/in/ohlcv.csv", workdir: "/jail/work" };
+      const request = { ...call.request, ohlcv_csv_path: "/in/ohlcv.csv", workdir: "/jail/work",
+        magnifier_ohlcv_csv_path: call.magnifierBarsPath ? "/in/magnifier.csv" : null };
       return await runParityCore("docker", args, request, {
         onTimeout: () => {
           spawn("docker", ["kill", name], { stdio: "ignore" }).on("error", () => undefined);
@@ -450,7 +454,8 @@ export class LocalRunner implements EngineRunner {
   async parity(call: ParityCall): Promise<Record<string, unknown>> {
     const jail = await mkdtemp(join(tmpdir(), "pineforge-parity-"));
     try {
-      const request = { ...call.request, ohlcv_csv_path: call.barsPath, workdir: jail };
+      const request = { ...call.request, ohlcv_csv_path: call.barsPath, workdir: jail,
+        magnifier_ohlcv_csv_path: call.magnifierBarsPath ?? null };
       return await runParityCore("python3", [join(parityCoreDir(), "pf_parity.py")], request, {
         env: {
           ...process.env,

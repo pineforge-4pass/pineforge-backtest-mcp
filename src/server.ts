@@ -1080,7 +1080,10 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         "with hints, and a timezone check. Bars: pass ohlcv_csv or ohlcv_csv_path for any market; without " +
         "them, BINANCE:<SYMBOL> (spot) and BINANCE:<SYMBOL>.P (USDT-M perpetual) bars are fetched from " +
         "Binance's public API (at most 100,000 bars); any other symbol needs your bars. No quota and no " +
-        "history window beyond that. Settings the XLSX Properties sheet states " +
+        "history window beyond that. Scripts declaring use_bar_magnifier=true also fetch 1-minute bars " +
+        "through the last chart bar's close, counted in that limit. With your own bars, optionally pass " +
+        "magnifier_ohlcv_csv or magnifier_ohlcv_csv_path; a declared magnifier that ran without a feed " +
+        "gets a warning that fills inside bars may differ from TradingView's. Settings the XLSX Properties sheet states " +
         "are used; an explicit input that disagrees with one is an error. " + parityWhere,
       inputSchema: {
         pine: z.string().describe("The Pine v6 strategy source TradingView ran (at most 262,144 bytes of UTF-8)."),
@@ -1132,6 +1135,15 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         ohlcv_csv_path: z.string().optional().describe(
           "Path to your bars CSV (same formats as ohlcv_csv, no size limit; same path rules as " +
           "backtest_pine's ohlcv_csv_path, checked after resolving '..' and symlinks)."
+        ),
+        magnifier_ohlcv_csv: z.string().optional().describe(
+          "Optional 1-minute bars for a declared bar magnifier, in the same formats as ohlcv_csv " +
+          "and with the same 67,108,864-character limit. Cover the first chart bar's open through " +
+          "the last chart bar's close."
+        ),
+        magnifier_ohlcv_csv_path: z.string().optional().describe(
+          "Path to optional 1-minute magnifier bars (same formats and path rules as ohlcv_csv_path, " +
+          "no size limit). Pass this or magnifier_ohlcv_csv, not both."
         ),
       },
     },

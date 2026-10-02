@@ -366,6 +366,7 @@ only the inputs below, returns it for a stratified sample of 30.
 | `inputs`, `strategy_overrides`, `runtime` | optional, the same keys as `backtest_pine` |
 | `max_mismatches` | optional, default 10, at most 50 |
 | `ohlcv_csv` / `ohlcv_csv_path` | your bars, so any market works: `timestamp,open,high,low,close,volume` (epoch ms) or TradingView's chart export `time,open,high,low,close,Volume` (epoch seconds or ISO 8601); paths follow the [`backtest_pine` rules](#filesystem-scope) |
+| `magnifier_ohlcv_csv` / `magnifier_ohlcv_csv_path` | optional 1-minute bars for a declared bar magnifier, covering the first chart bar's open through the last chart bar's close; same formats, limits and path rules as `ohlcv_csv` / `ohlcv_csv_path` |
 
 **Limits** (refused with a plain error above them):
 
@@ -376,7 +377,7 @@ only the inputs below, returns it for a stratified sample of 30.
 | XLSX report | each decompressed part at most 64 MiB, all parts together at most 128 MiB; a sheet at most 400,000 rows, 256 columns, and 8,000,000 cells counting the empty cells inside each row |
 | `ohlcv_csv` | 67,108,864 characters (64 × 1024²) |
 | `ohlcv_csv_path` | no size limit (a TradingView chart export is converted in memory) |
-| Binance fetch | 100,000 bars |
+| Binance fetch | 100,000 chart and magnifier bars combined |
 | run time | `PINEFORGE_PARITY_TIMEOUT_MS`, default 600,000 ms for transpile, compile, backtest and grading together |
 
 There is no quota and no history window here: the range is limited only by the bars
@@ -385,9 +386,11 @@ you pass, or by the 100,000-bar Binance fetch.
 **Bars.** Your `ohlcv_csv` / `ohlcv_csv_path` when given. Otherwise `BINANCE:<SYMBOL>`
 is fetched as Binance spot klines and `BINANCE:<SYMBOL>.P` as USDT-M perpetual klines,
 from the public API, at most 100,000 bars. Any other symbol without bars is an error
-that asks for them. There is no input for a finer (1m) magnifier feed: a script that
-declares `use_bar_magnifier = true` runs as the corpus gate runs such scripts, without
-one.
+that asks for them. Scripts declaring `use_bar_magnifier = true` also fetch 1-minute
+bars through the last chart bar's close, counted in the same limit. With your own
+bars, optionally pass `magnifier_ohlcv_csv` / `magnifier_ohlcv_csv_path`; if the script
+declares the magnifier but runs without one, the result warns that fills inside bars
+may differ from TradingView's.
 
 **XLSX report.** The "List of trades" sheet is read as the CSV would be (Excel dates
 become `YYYY-MM-DD HH:MM`). The "Properties" sheet supplies the symbol, timeframe,

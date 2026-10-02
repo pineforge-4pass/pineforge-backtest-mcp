@@ -300,6 +300,11 @@ test("a cwd-scoped server refuses bars paths that leave its cwd ('..', symlink)"
       report(`scoped server, ${p}`, out);
       assert.equal(out.data?.error, "no_bars");
       assert.match(String(out.data?.message), /outside cwd/);
+      const fine = await callParity(scoped, { ...a, ohlcv_csv_path: undefined,
+        ohlcv_csv: "timestamp,open,high,low,close,volume\n1743379200000,1,1,1,1,1\n",
+        magnifier_ohlcv_csv_path: p });
+      assert.equal(fine.data?.error, "no_bars");
+      assert.match(String(fine.data?.message), /outside cwd/);
     }
   } finally {
     await scoped.close();

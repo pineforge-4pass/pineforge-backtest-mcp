@@ -3,6 +3,8 @@
  * Reads the grading core's response (parity/pf_parity.py) as it is.
  */
 
+import { magnifierNotRun } from "./magnifier.js";
+
 export const METHODOLOGY_URL = "https://pineforge.dev/en/methodology/";
 
 export const RETENTION_LOCAL =
@@ -203,6 +205,9 @@ export function formatParityResult(response: unknown, opts: FormatOptions): stri
   }
   const warnings = (Array.isArray(r.warnings) ? r.warnings.map(str) : [])
     .filter((w) => w && !printed.has(w) && !(better && w.startsWith(`Read in ${str(better.zone)},`)));
+  if (magnifierNotRun(win?.harness_log) !== null) {
+    warnings.push("The script declares the bar magnifier but ran without one, so fills inside bars may differ from TradingView's.");
+  }
   if (warnings.length) {
     lines.push("", "Warnings:");
     for (const w of warnings) lines.push(`- ${w}`);

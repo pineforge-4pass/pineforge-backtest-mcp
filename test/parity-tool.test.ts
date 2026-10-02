@@ -12,23 +12,26 @@ const CSV = readFileSync(new URL("./fixtures/parity/tv_trades.csv", import.meta.
 const PINE = '//@version=6\nstrategy("x")\n';
 
 // A runner that records the grading core's request instead of running it.
-function fakeRunner(): EngineRunner & { calls: ParityCall[]; bars: string[] } {
+function fakeRunner(): EngineRunner & { calls: ParityCall[]; bars: string[]; magnifiers: Array<string | undefined> } {
   const calls: ParityCall[] = [];
   const bars: string[] = [];
+  const magnifiers: Array<string | undefined> = [];
   return {
     mode: "local",
     calls,
     bars,
+    magnifiers,
     async parity(call: ParityCall) {
       calls.push(call);
       bars.push(readFileSync(call.barsPath, "utf8"));
+      magnifiers.push(call.magnifierBarsPath ? readFileSync(call.magnifierBarsPath, "utf8") : undefined);
       return { ok: true, tier: "excellent", tier_meaning: "m", checks: [], matched: 5,
         unmatched_tradingview: 0, unmatched_pineforge: 0, mismatches: [], warnings: [] };
     },
     transpile: async () => "", backtest: async () => ({}), engineInfo: async () => ({ mode: "local", baked_in: true, version: null }),
     checkImage: async () => ({ mode: "local", baked_in: true, version: null }),
     pullImage: async (image: string) => ({ image, pulled: false, output: "" }),
-  } as EngineRunner & { calls: ParityCall[]; bars: string[] };
+  } as EngineRunner & { calls: ParityCall[]; bars: string[]; magnifiers: Array<string | undefined> };
 }
 
 const fetched: Array<unknown[]> = [];
@@ -130,7 +133,7 @@ test("LocalRunner.parity: request on stdin, bars path and a jail that is gone af
     const { LocalRunner } = await import("../src/engine.js");
     const runner = new LocalRunner(resolve("test/fixtures/fake-prefix"));
     const path = await barsFile("timestamp,open,high,low,close,volume\n1,1,1,1,1,1\n");
-    const res = await runner.parity({ request: { pine: PINE, max_mismatches: 3 }, barsPath: path }) as Record<string, any>;
+    const res = await runner.parity({ request: { pine: PINE, max_mismatches: 3 }, barsPath: path, magnifierBarsPath: path }) as Record<string, any>;
     assert.equal(res.ok, true);
     assert.equal(res.ohlcv_csv_path, path);
     assert.equal(res.bars_head, "timestamp,open,high,low,close,volume");
@@ -138,8 +141,74 @@ test("LocalRunner.parity: request on stdin, bars path and a jail that is gone af
     assert.equal(existsSync(res.workdir), false, "jail left behind");
     assert.equal(res.timeout_ms, "600000");
     assert.equal(res.request.max_mismatches, 3);
+    assert.equal(res.request.magnifier_ohlcv_csv_path, path);
     await assert.rejects(runner.parity({ request: { pine: "exit 3" }, barsPath: path }), /grading core failed \(exit 3\):\ndriver failed on purpose/);
   } finally {
     delete process.env.PINEFORGE_PARITY_DIR;
   }
+});
+
+test("Binance magnifier fetch uses actual chart opens within the harness bounds, including the final bar's tail", async () => {
+  const r = fakeRunner();
+  const start = Date.UTC(2025, 2, 31);
+  const fetched: unknown[][] = [];
+  const head = "timestamp,open,high,low,close,volume\n";
+  const out = await parityToolResult(r, {
+    ...base, pine: 'strategy("x", use_bar_magnifier=((true)))', symbol: "BINANCE:ETHUSDT.P",
+    range_end: "2025-03-31T00:30:00Z",
+  }, {
+    ...deps,
+    async fetchBinanceCsv(...a) {
+      fetched.push(a);
+      // Include one padding bar past the harness end; the feed must stop before its tail.
+      return { csv: head + [0, 15, 30, 45].map((m) => `${start + m * 60_000},1,1,1,1,1\n`).join(""), bars: 4 };
+    },
+  });
+  assert.equal(out.isError, false, out.content[0]!.text);
+  assert.deepEqual(fetched[1], ["usdt_perp", "ETHUSDT", "1m", start, start + 45 * 60_000 - 1, 45]);
+  assert.ok(r.calls[0]!.magnifierBarsPath);
+  assert.match(r.magnifiers[0]!, /^timestamp,/);
+  assert.match(String(out.structuredContent.magnifier_bars_source), /Binance.*1m/);
+  assert.equal(existsSync(r.calls[0]!.magnifierBarsPath!), false, "temporary magnifier feed removed after the run");
+});
+
+test("the Binance limit counts both feeds and refuses before fetching too many minute bars", async () => {
+  const r = fakeRunner();
+  const start = Date.UTC(2025, 2, 31);
+  const end = start + 70 * 86_400_000;
+  const calls: unknown[][] = [];
+  const out = await parityToolResult(r, {
+    ...base, pine: 'strategy("x", use_bar_magnifier=true)', symbol: "BINANCE:ETHUSDT.P",
+    range_end: new Date(end).toISOString(),
+  }, {
+    ...deps,
+    async fetchBinanceCsv(...a) {
+      calls.push(a);
+      return { csv: `timestamp,open,high,low,close,volume\n${start},1,1,1,1,1\n${end},1,1,1,1,1\n`, bars: 6722 };
+    },
+  });
+  assert.equal(out.structuredContent.error, "no_bars");
+  assert.match(String(out.structuredContent.message), /chart bars plus .*1-minute magnifier bars.*100000 bars in total/);
+  assert.equal(calls.length, 1);
+  assert.equal(r.calls.length, 0);
+});
+
+test("supplied magnifier feeds share the chart formats and do not cause a network fetch", async () => {
+  const r = fakeRunner();
+  const own = "timestamp,open,high,low,close,volume\n1743379200000,1,1,1,1,1\n";
+  const tv = "time,open,high,low,close,Volume\n1743379200,1,1,1,1,1\n";
+  const noNetwork = { ...deps, fetchBinanceCsv: async () => { throw new Error("unexpected fetch"); } };
+  const args = { ...base, pine: 'strategy("x", use_bar_magnifier=true)', ohlcv_csv: own };
+  for (const magnifier_ohlcv_csv of [own, tv, "\uFEFF" + own]) {
+    const out = await parityToolResult(r, { ...args, magnifier_ohlcv_csv }, noNetwork);
+    assert.equal(out.isError, false, out.content[0]!.text);
+    assert.equal(r.magnifiers.at(-1), own);
+    assert.equal(r.bars.at(-1), own);
+  }
+  const missing = await parityToolResult(r, args, noNetwork);
+  assert.equal(missing.isError, false);
+  assert.equal(r.calls.at(-1)!.magnifierBarsPath, undefined);
+  const both = await parityToolResult(r, { ...args, magnifier_ohlcv_csv: own, magnifier_ohlcv_csv_path: "fine.csv" }, noNetwork);
+  assert.equal(both.structuredContent.error, "bad_request");
+  assert.match(String(both.structuredContent.message), /magnifier_ohlcv_csv or magnifier_ohlcv_csv_path, not both/);
 });

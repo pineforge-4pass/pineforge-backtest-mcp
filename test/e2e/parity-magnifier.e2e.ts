@@ -36,7 +36,7 @@ test("the magnifier reads the final chart bar's tail; user feeds and missing-fee
     const full = await callParity(client, { ...args, magnifier_ohlcv_csv: header + fineRows.join("") });
     console.log(`full 45-minute feed: ${full.data?.tier}; ${harnessLog(full.data)}`);
     assert.equal(full.data?.tier, "excellent", full.text);
-    assert.match(harnessLog(full.data), /magnifier: run:/);
+    assert.match(harnessLog(full.data), /magnifier: declared:/);
     assert.doesNotMatch(full.formatted, /ran without one/);
 
     const path = join(dir, "fine.csv");
@@ -44,7 +44,7 @@ test("the magnifier reads the final chart bar's tail; user feeds and missing-fee
     const cut = await callParity(client, { ...args, magnifier_ohlcv_csv_path: path });
     console.log(`truncated 31-minute feed: ${cut.data?.tier}`);
     assert.equal(cut.data?.tier, "moderate", cut.text);
-    assert.match(harnessLog(cut.data), /magnifier: run:/);
+    assert.match(harnessLog(cut.data), /magnifier: declared:/);
 
     const tvFine = "time,open,high,low,close,Volume\n" + fineRows.map((row) => {
       const [ms, ...rest] = row.trim().split(",");
@@ -79,7 +79,7 @@ test("a magnifier-declaring corpus probe fetches chart and 1-minute bars from Bi
   try {
     const out = await callParity(client, request);
     assert.equal(out.data?.ok, true, out.text);
-    assert.match(harnessLog(out.data), /magnifier: run:.*input_tf=1.*magnifier on/);
+    assert.match(harnessLog(out.data), /magnifier: declared:.*input_tf=1.*magnifier on/);
     assert.match(String(out.data?.bars_source), /Binance.*15m/);
     assert.match(String(out.data?.magnifier_bars_source), /Binance.*1m/);
     assert.doesNotMatch(out.formatted, /ran without one/);

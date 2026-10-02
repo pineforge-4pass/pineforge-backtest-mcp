@@ -5,6 +5,7 @@
  */
 
 export { ParityInputError } from "./errors.js";
+export { declaresMagnifier, magnifierNotRun, magnifierEndMs, magnifierWindow } from "./magnifier.js";
 export { parseCsv, toCsv, csvCell } from "./csv.js";
 export {
   readTradingViewExport,
