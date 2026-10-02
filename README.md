@@ -25,7 +25,7 @@ tools make outbound requests (public endpoints).
 | `binance_symbols`      | Binance public API   | List / filter Binance symbols (5-min in-process cache)                   |
 | `list_coverage_topics` | local (no I/O)       | Every Pine v6 coverage topic with a one-line status + summary            |
 | `check_pine_feature`   | local (no I/O)       | Look up whether a Pine identifier/namespace is supported in PineForge    |
-| `get_coverage_topic`   | local (no I/O)       | Full detail + supported/unsupported feature lists for one coverage topic |
+| `get_coverage_topic`   | local (no I/O)       | Full detail + supported/partial/via_transpiler/unsupported lists for one topic |
 | `engine_info`          | local (no I/O)       | Docker image only: mode, baked-in flag and the bundled `pineforge-release` version (for example `1.0.0`) |
 
 The table is the Docker image's tool list (10 tools). The [npm package](#npm--npx)
@@ -362,16 +362,26 @@ strategy:
 
 - `list_coverage_topics` — every coverage topic with a status (`supported`,
   `partial`, `unsupported`, `via_transpiler`) and a summary, plus the legend.
-- `get_coverage_topic` `{ "topic": "ta" }` — the full `supported` / `unsupported`
-  lists for one topic id (for example `ta`, `strategy_orders`, `request_security`).
+- `get_coverage_topic` `{ "topic": "ta" }` — the full `supported` / `partial` /
+  `via_transpiler` / `unsupported` lists for one topic id (for example `ta`,
+  `strategy_orders`, `request_security`).
 - `check_pine_feature` `{ "feature": "ta.supertrend" }` — one identifier or namespace:
-  `supported` / `partial` / `unsupported` / `via_transpiler` / `not_found`. Visual and
-  alert APIs (`plot`, `label`, `line`, `box`, `table`, `alert`) are parsed and skipped.
+  `supported` / `partial` / `unsupported` / `via_transpiler` / `not_found`, with a note
+  that quotes the catalog entry. Plots, tables and alerts (`plot`, `bgcolor`, `table`,
+  `alert`) are accepted and have no effect; `line`, `box` and `label` objects are data
+  the strategy can read back.
+
+Every status describes what a backtest through this server can do. The server
+installs no other symbol's bars, no recorded request data and no Pine library
+sources, so where the engine supports more, the entry says so: `request.security`
+on another symbol, for example, is supported by the engine, but here a request whose
+value can reach a trade stops the run.
 
 The data is embedded in this package and stamped by the `coverage_version` field
-that `list_coverage_topics` returns (`2026-06-04 / 0fccede` in this version); the
-engine's [`docs/coverage.md`](https://github.com/pineforge-4pass/pineforge-engine/blob/main/docs/coverage.md)
-is the live reference.
+that `list_coverage_topics` returns (`engine v1.0.1 + codegen 1.0.1 (2026-10-02)` in
+this version); the engine's
+[`docs/coverage.md`](https://github.com/pineforge-4pass/pineforge-engine/blob/v1.0.1/docs/coverage.md)
+at that tag is the reference it was checked against.
 
 ## Filesystem scope
 
