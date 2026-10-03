@@ -74,6 +74,37 @@ def main() -> int:
         refused(f"input named {name}", {**base, "inputs": {name: "1"}}, "reserved_input_name")
     refused("unknown runtime key", {**base, "runtime": {"syminfo_metadata": {}}}, "bad_request")
     refused("bad timeframe", {**base, "timeframe": "15 minutes"}, "bad_request")
+
+    # the instrument spec (pineforge-instrument/v1) the Worker resolves
+    inst = {"schema": "pineforge-instrument/v1", "resolved": True, "type": "crypto",
+            "currency": "USDT", "basecurrency": "ETH", "qty_step": 0.0001,
+            "mincontract": 0.0001, "mintick": 0.01, "pointvalue": 1,
+            "source": {"kind": "catalog", "venue": "crypto.binance.com.perp-usdt", "symbol": "ETHUSDT",
+                       "manifest_version": "", "syminfo_schema": "syminfo.v1"}}
+    for name, bad in (("not an object", "x"), ("wrong schema", {**inst, "schema": "v0"}),
+                      ("resolved not a bool", {**inst, "resolved": "yes"}),
+                      ("non-finite number", {**inst, "qty_step": float("inf")}),
+                      ("number out of range", {**inst, "mintick": 1e13}), ("zero number", {**inst, "pointvalue": 0}),
+                      ("bool as number", {**inst, "qty_step": True}),
+                      ("long string", {**inst, "basecurrency": "X" * 65}), ("non-ASCII string", {**inst, "currency": "USD\u20ae"}),
+                      ("unknown key", {**inst, "session": "24x7"}),
+                      ("ticker is not carried", {**inst, "ticker": "ETHUSDT"}),
+                      ("tickerid is not carried", {**inst, "tickerid": "BINANCE:ETHUSDT.P"}),
+                      ("unknown source key", {**inst, "source": {**inst["source"], "url": "x"}}),
+                      ("resolved without qty_step", {k: v for k, v in inst.items() if k != "qty_step"})):
+        refused(f"instrument: {name}", {**base, "instrument": bad}, "bad_request")
+    meta = pf.build_meta({**base, "instrument": inst}, "UTC")
+    check("instrument -> runtime_overrides", meta.get("runtime_overrides") == {
+        "qty_step": 0.0001, "mintick": 0.01, "pointvalue": 1, "type": "crypto", "currency": "USDT",
+        "basecurrency": "ETH", "syminfo_metadata": {"mincontract": 0.0001}}, json.dumps(meta.get("runtime_overrides")))
+    meta = pf.build_meta({**base, "instrument": {"schema": "pineforge-instrument/v1", "resolved": False,
+                                                 "reason": "no lot size", "mintick": 0.01}}, "UTC")
+    check("unresolved instrument: only its valid fields", meta.get("runtime_overrides") == {"mintick": 0.01},
+          json.dumps(meta.get("runtime_overrides")))
+    meta = pf.build_meta({**base, "runtime": {"bar_magnifier": True}, "instrument": inst}, "UTC")
+    check("instrument and runtime settings together", meta["runtime_overrides"].get("bar_magnifier") is True
+          and meta["runtime_overrides"].get("qty_step") == 0.0001)
+    check("no instrument: no runtime_overrides", "runtime_overrides" not in pf.build_meta(base, "UTC"))
     refused("trades before the range start", {**base, "range_start_ms": 1743584400000},
             "trades_before_range_start")
     march = tmp / "march.csv"

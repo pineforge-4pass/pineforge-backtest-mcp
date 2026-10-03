@@ -6,3 +6,4 @@ dist/
 .npmrc
 src/version.ts
 test/.tmp-*
+__pycache__/

@@ -58,6 +58,15 @@ RESERVED_INPUTS = frozenset(_VALIDATION_META_KEYS) | {
     "engine_chart_timezone", "bar_ms", "_comment",
 }
 RUNTIME_KEYS = {"input_tf", "script_tf", "bar_magnifier", "magnifier_samples", "magnifier_dist"}
+# The instrument spec the Worker resolves from the data API's catalog
+# (pineforge-instrument/v1) and where each field goes in runtime_overrides; the
+# harness (vendor/run_strategy.py inputs_run_kwargs) applies them in its own order.
+# The response echoes the spec as applied_instrument: the image build checks that
+# the engine library has every setter the harness applies it with.
+INSTRUMENT_SCHEMA = "pineforge-instrument/v1"
+INSTRUMENT_NUMBERS = ("qty_step", "mincontract", "mintick", "pointvalue")
+INSTRUMENT_STRINGS = ("type", "currency", "basecurrency", "reason")
+INSTRUMENT_SOURCE_STRINGS = ("kind", "venue", "symbol", "manifest_version", "syminfo_schema")
 MAGNIFIER_DISTS = {"uniform", "cosine", "triangle", "endpoints", "front_loaded", "back_loaded"}
 TIMEFRAME = re.compile(r"^(?:[1-9][0-9]{0,4}|[1-9][0-9]{0,3}[SDWM]|[SDWM])$")
 # Environment the harness reads; the caller's values never reach the run.
@@ -261,6 +270,60 @@ def read_bars(path, start_ms: int | None, end_ms: int | None) -> dict:
             "interval_ms": (second - first) if second is not None else None}
 
 
+def _instrument_string(value, field: str, allow_empty: bool = False) -> None:
+    if (not isinstance(value, str) or len(value) > 64 or (not value and not allow_empty)
+            or any(not 0x20 <= ord(c) <= 0x7E for c in value)):
+        raise UserError("bad_request", f"instrument.{field} must be 1-64 printable ASCII characters.")
+
+
+def check_instrument(spec) -> dict | None:
+    """Validate the request's instrument spec; None when there is none."""
+    if spec is None:
+        return None
+    if not isinstance(spec, dict) or spec.get("schema") != INSTRUMENT_SCHEMA \
+            or not isinstance(spec.get("resolved"), bool):
+        raise UserError("bad_request", f"instrument must be a {INSTRUMENT_SCHEMA} object.")
+    for key, value in spec.items():
+        if key in ("schema", "resolved"):
+            continue
+        if key in INSTRUMENT_NUMBERS:
+            if (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+                    or not 1e-12 <= value <= 1e12):
+                raise UserError("bad_request", f"instrument.{key} must be a finite number within 1e-12..1e12.")
+        elif key in INSTRUMENT_STRINGS:
+            _instrument_string(value, key)
+        elif key == "source":
+            if not isinstance(value, dict):
+                raise UserError("bad_request", "instrument.source must be an object.")
+            for sk, sv in value.items():
+                if sk in INSTRUMENT_SOURCE_STRINGS:
+                    _instrument_string(sv, f"source.{sk}", allow_empty=sk == "manifest_version")
+                elif sk == "dropped":
+                    if not isinstance(sv, list) or len(sv) > 16:
+                        raise UserError("bad_request", "instrument.source.dropped must be a list of field names.")
+                    for d in sv:
+                        _instrument_string(d, "source.dropped[]")
+                else:
+                    raise UserError("bad_request", f"instrument.source.{sk} is not a known field.")
+        else:
+            raise UserError("bad_request", f"instrument.{key} is not a known field.")
+    if spec["resolved"] and "qty_step" not in spec:
+        raise UserError("bad_request", "instrument.qty_step is required when resolved.")
+    return spec
+
+
+def instrument_overrides(spec: dict | None) -> dict:
+    """runtime_overrides entries for the instrument's grid, tick, point value, type and
+    currencies (no ticker / tickerid: the engine keeps its own defaults for them)."""
+    if not spec:
+        return {}
+    ro = {k: spec[k] for k in ("qty_step", "mintick", "pointvalue", "type", "currency", "basecurrency")
+          if k in spec}
+    if "mincontract" in spec:
+        ro["syminfo_metadata"] = {"mincontract": spec["mincontract"]}
+    return ro
+
+
 def build_meta(req: dict, grader_tz: str) -> dict:
     inputs = req.get("inputs") or {}
     if not isinstance(inputs, dict):
@@ -301,6 +364,7 @@ def build_meta(req: dict, grader_tz: str) -> dict:
         if dist not in MAGNIFIER_DISTS:
             raise UserError("bad_request", f"runtime.magnifier_dist must be one of {', '.join(sorted(MAGNIFIER_DISTS))}.")
         ro["magnifier_distribution"] = dist.upper()
+    ro.update(instrument_overrides(check_instrument(req.get("instrument"))))
     if ro:
         meta["runtime_overrides"] = ro
     return meta
@@ -841,6 +905,7 @@ def grade(req: dict) -> dict:
                 "harness_log": window_log,
             },
             "versions": versions(),
+            "applied_instrument": check_instrument(req.get("instrument")) if passthrough is None else None,
             "warnings": warnings,
         }
     finally:

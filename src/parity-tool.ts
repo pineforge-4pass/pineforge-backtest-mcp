@@ -10,6 +10,17 @@ import { join } from "node:path";
 import { inflateRawSync } from "node:zlib";
 import type { EngineRunner, ParamMap, RuntimeArgsLike } from "./engine.js";
 import {
+  NUMBER_KEYS,
+  STRING_KEYS,
+  describeInstrument,
+  settleInstrument,
+  unresolvedInstrument,
+  type Instrument,
+  type InstrumentRequest,
+  type Resolution,
+  type UserSyminfo,
+} from "./instrument.js";
+import {
   ParityInputError,
   declaresMagnifier,
   magnifiesChart,
@@ -42,6 +53,8 @@ export interface ParityToolArgs {
   ohlcv_csv_path?: string;
   magnifier_ohlcv_csv?: string;
   magnifier_ohlcv_csv_path?: string;
+  /** The instrument's own values (lot size, tick size, ...); they win over what the symbol resolves. */
+  syminfo?: UserSyminfo;
 }
 
 export interface ParityDeps {
@@ -50,6 +63,11 @@ export interface ParityDeps {
   /** Binance klines as engine CSV text, [startMs, endMs], at most `limit` bars. */
   fetchBinanceCsv(market: "spot" | "usdt_perp", symbol: string, interval: string,
     startMs: number, endMs: number, limit: number): Promise<{ csv: string; bars: number }>;
+  /**
+   * The instrument of a Binance symbol, or (no symbol) of the sidecar next to the user's bars file
+   * (src/instrument.ts). Omitted: no instrument is passed to the grading core.
+   */
+  resolveInstrument?(req: InstrumentRequest, csvPath: string | undefined): Promise<Resolution>;
 }
 
 const MAX_PINE_BYTES = 256 * 1024;
@@ -122,6 +140,8 @@ async function firstLine(path: string): Promise<string> {
 interface Bars {
   path: string;
   source: string;
+  /** The user's own bars file, if that is where they came from (its sidecar may name the instrument). */
+  origin?: string;
   /** Present only for fetched chart bars inside the harness's run bounds. */
   fetched?: { bars: number; firstOpenMs: number; lastOpenMs: number };
 }
@@ -158,13 +178,13 @@ async function suppliedBars(
     const head = await firstLine(abs);
     const path = join(work, `${kind}.csv`);
     if (barsFormat(head) === "engine") {
-      if (!head.startsWith("\uFEFF")) return { path: abs, source: `your file ${abs}` };
+      if (!head.startsWith("\uFEFF")) return { path: abs, source: `your file ${abs}`, origin: abs };
       // The grading core reads the header without a byte-order mark.
       await writeFile(path, (await readFile(abs, "utf8")).replace(/^\uFEFF/, ""), "utf8");
-      return { path, source: `your file ${abs}` };
+      return { path, source: `your file ${abs}`, origin: abs };
     }
     await writeFile(path, fromTradingViewChart(await readFile(abs, "utf8")), "utf8");
-    return { path, source: `your file ${abs} (TradingView chart export, converted)` };
+    return { path, source: `your file ${abs} (TradingView chart export, converted)`, origin: abs };
   }
   return undefined;
 }
@@ -214,6 +234,62 @@ async function findBars(
     source: `Binance ${market === "spot" ? "spot" : "USDT-M perpetual"} ${t.symbol} ${interval} klines ` +
       `(${bars} bars, fetched from the public API)`,
   };
+}
+
+const PARITY_HINT =
+  "Pass `syminfo` (qty_step, mintick, ...) or, for a Binance chart, `symbol` as BINANCE:<SYMBOL> or BINANCE:<SYMBOL>.P " +
+  "(or bars fetched by fetch_binance_ohlcv, which records the instrument next to them).";
+
+/**
+ * The instrument the grading core runs on: the Binance symbol the TradingView ticker names (spot,
+ * or `.P` USD-M), resolved as backtest_pine does (the user's `syminfo`, TradingView's lot size from
+ * the embedded table, Binance's); without a ticker, the sidecar of the user's own bars file. Any
+ * other exchange has no source here: unresolved, unless `syminfo` gives the grid.
+ */
+export async function parityInstrument(
+  args: ParityToolArgs,
+  symbol: string | null,
+  origin: string | undefined,
+  deps: ParityDeps,
+): Promise<Resolution | undefined> {
+  if (!deps.resolveInstrument) return undefined;
+  if (symbol) {
+    const t = parseTicker(symbol);
+    if (t.exchange === "BINANCE") {
+      return deps.resolveInstrument(
+        { symbol: t.symbol, market: t.perpetual ? "usdt_perp" : "spot", syminfo: args.syminfo, hint: PARITY_HINT },
+        undefined,
+      );
+    }
+    return settleInstrument({
+      base: unresolvedInstrument(`no instrument source for ${t.exchange ?? "a ticker without an exchange"}`),
+      user: args.syminfo,
+      label: t.ticker,
+      hint: PARITY_HINT,
+    });
+  }
+  return deps.resolveInstrument({ syminfo: args.syminfo, hint: PARITY_HINT }, origin);
+}
+
+/**
+ * An instrument in the shape the grading core accepts (parity/pf_parity.py check_instrument): known
+ * keys only, `reason` at most 64 characters, `source` limited to kind, venue, symbol and dropped.
+ */
+export function coreInstrument(i: Instrument): Record<string, unknown> {
+  const out: Record<string, unknown> = { schema: i.schema, resolved: i.resolved };
+  if (!i.resolved) out.reason = (i.reason ?? "unknown").slice(0, 64) || "unknown";
+  for (const k of [...NUMBER_KEYS, ...STRING_KEYS]) if (i[k] !== undefined) out[k] = i[k];
+  const s = i.source;
+  if (s) {
+    const where = s.kind === "user" && s.base ? s.base : s;
+    out.source = {
+      kind: s.kind,
+      ...(where.market ? { venue: where.market === "usdt_perp" ? "binance_usdt_perp" : "binance_spot" } : {}),
+      ...(where.symbol ? { symbol: where.symbol } : {}),
+      ...(s.dropped?.length ? { dropped: s.dropped.slice(0, 16) } : {}),
+    };
+  }
+  return out;
 }
 
 // The vendored harness and grader are pineforge-engine v1.0.1's, and the
@@ -300,6 +376,7 @@ export async function checkParity(
       magnifier = { path, source: `Binance ${market === "spot" ? "spot" : "USDT-M perpetual"} ${t.symbol} 1m klines ` +
         `(${fine.bars} bars, fetched from the public API)` };
     }
+    const instrument = await parityInstrument(args, s.symbol, bars.origin, deps);
     const request: Record<string, unknown> = {
       pine: args.pine,
       tradingview_trades_csv: exp.csv,
@@ -311,9 +388,11 @@ export async function checkParity(
       strategy_overrides: s.strategyOverrides,
       runtime: s.runtime,
       max_mismatches: args.max_mismatches ?? 10,
+      ...(instrument ? { instrument: coreInstrument(instrument.instrument) } : {}),
     };
     const response = await runner.parity({ request, barsPath: bars.path, magnifierBarsPath: magnifier?.path });
     notes.push(`Bars: ${bars.source}.`);
+    if (instrument) notes.push(`Instrument: ${describeInstrument(instrument.instrument)}`);
     if (magnifier) notes.push(`Magnifier bars: ${magnifier.source}.`);
     if (s.rangeEndMs === null) {
       notes.push(`Range end: not given, so the export's last row (${span.lastRow} ${s.chartTimezone}) ends the run.`);
@@ -323,6 +402,9 @@ export async function checkParity(
       response.warnings = [...exp.warnings, ...(response.warnings as unknown[])];
     } else if (exp.warnings.length) {
       response.warnings = exp.warnings;
+    }
+    if (instrument?.warnings.length) {
+      response.warnings = [...instrument.warnings, ...(Array.isArray(response.warnings) ? response.warnings : [])];
     }
     const release = releaseWarning(response.versions);
     if (release) response.warnings = [release, ...(Array.isArray(response.warnings) ? response.warnings : [])];

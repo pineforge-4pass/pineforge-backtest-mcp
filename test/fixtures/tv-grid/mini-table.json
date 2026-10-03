@@ -1,0 +1,54 @@
+{
+ "schema": "pineforge-tv-syminfo-receipts/v1",
+ "generated_utc": "2026-10-03T19:19:21Z",
+ "complete": true,
+ "rows": {
+  "crypto.binance.com.spot": {
+   "XRPUSDT": {
+    "tv_symbol": "BINANCE:XRPUSDT",
+    "mincontract": 1.0,
+    "mintick": 0.0001,
+    "pointvalue": 1.0
+   },
+   "BTCUSDT": {
+    "tv_symbol": "BINANCE:BTCUSDT",
+    "mincontract": 1e-05,
+    "mintick": 0.01,
+    "pointvalue": 1.0
+   },
+   "1000SATSUSDT": {
+    "tv_symbol": "BINANCE:1000SATSUSDT",
+    "mincontract": 0.001,
+    "mintick": 1e-07,
+    "pointvalue": 1.0
+   }
+  },
+  "crypto.binance.com.perp-usdt": {
+   "ETHUSDT": {
+    "tv_symbol": "BINANCE:ETHUSDT",
+    "mincontract": 0.0001,
+    "mintick": 0.01,
+    "pointvalue": 1.0
+   },
+   "BTCUSDT": {
+    "tv_symbol": "BINANCE:BTCUSDT",
+    "mincontract": 1e-06,
+    "mintick": 0.1,
+    "pointvalue": 1.0
+   }
+  },
+  "crypto.bybit.com.spot": {
+   "BTCUSDT": {
+    "tv_symbol": "BINANCE:BTCUSDT",
+    "mincontract": 1e-06,
+    "mintick": 0.01,
+    "pointvalue": 1.0
+   }
+  }
+ },
+ "not_on_tv": {
+  "crypto.binance.com.spot": [
+   "AIXBTUSDC"
+  ]
+ }
+}
