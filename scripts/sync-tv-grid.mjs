@@ -65,8 +65,7 @@ for (const [market, venue] of Object.entries(MARKETS)) {
   const entries = [];
   for (const symbol of Object.keys(rows).sort()) {
     const value = rows[symbol]?.mincontract;
-    const ok = typeof value === "number" && Number.isFinite(value) && value >= 1e-12 && value <= 1e12 &&
-      /^[\x21-\x7e]{1,64}$/.test(symbol);
+    const ok = typeof value === "number" && Number.isFinite(value) && value >= 1e-12 && value <= 1e12 && SYMBOL.test(symbol);
     if (ok) entries.push([symbol, value]);
     else bad.push(`${symbol}=${JSON.stringify(rows[symbol]?.mincontract)}`);
   }

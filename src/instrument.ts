@@ -586,7 +586,10 @@ export function settleInstrument(input: {
   const warnings: string[] = [];
   if (!instrument.resolved) warnings.push(unresolvedWarning(input.label, instrument.reason ?? "unknown", input.detail, input.hint));
   warnings.push(...(input.notes ?? []));
-  const origin = lotOrigin(instrument);
+  // A lot size the user gave is theirs, even when it equals the base's (a user who confirms TradingView's usual
+  // 0.001 must be able to silence the warning that says it is only the usual one).
+  const userLot = user !== undefined && (cleanNumber(user.qty_step) !== undefined || cleanNumber(user.mincontract) !== undefined);
+  const origin = userLot ? "user" : lotOrigin(instrument);
   if (origin === "exchange") warnings.push(exchangeLotWarning(input.label));
   else if (origin === "default") warnings.push(defaultLotWarning(input.label, instrument.qty_step!));
   const dropped = instrument.source?.dropped;

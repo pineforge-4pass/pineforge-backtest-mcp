@@ -338,7 +338,8 @@ symbol outside the table is a listing newer than the readings and takes 0.001 (t
 likelier value there than Binance's step; both say so in `warnings`. A table without the two
 lists (an older one, or `PINEFORGE_TV_GRID` pointing at one) has neither, so a symbol outside it
 takes Binance's step with the `exchange` warning. Either way, pass `syminfo.qty_step` (read
-`syminfo.mincontract` off its chart) to set the lot size yourself.
+`syminfo.mincontract` off its chart) to set the lot size yourself: a lot size you give is yours, even
+when it equals the default or Binance's step, and the warning goes.
 
 Returns the standalone `pineforge-release` image's report JSON (`engine`, `input`,
 `summary`, `trades`, `metrics`, `equity_curve`, `fingerprint`, `applied_inputs`,

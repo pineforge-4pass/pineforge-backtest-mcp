@@ -914,7 +914,13 @@ test("settleInstrument: the provenance warning follows the lot size of a user-la
   assert.deepEqual(settleInstrument({ base: exchangeBase, user: { mintick: 0.5 }, label: "L" }).warnings, [EXCHANGE_WARNING("L")]);
   assert.deepEqual(settleInstrument({ base: usualBase, user: { mintick: 0.5 }, label: "L" }).warnings, [DEFAULT_WARNING("L", "0.001")]);
   assert.deepEqual(settleInstrument({ base: usualBase, user: { qty_step: 0.5 }, label: "L" }).warnings, []);
-  assert.deepEqual(settleInstrument({ base: usualBase, user: { qty_step: 0.001 }, label: "L" }).warnings, [DEFAULT_WARNING("L", "0.001")], "the same value as the base's: still the base's");
+  // a lot size the user gave is theirs even when it equals the base's: confirming the usual 0.001 (or Binance's step) silences the warning
+  assert.deepEqual(settleInstrument({ base: usualBase, user: { qty_step: 0.001 }, label: "L" }).warnings, []);
+  assert.deepEqual(settleInstrument({ base: usualBase, user: { mincontract: 0.001 }, label: "L" }).warnings, []);
+  assert.deepEqual(settleInstrument({ base: exchangeBase, user: { qty_step: 0.01 }, label: "L" }).warnings, []);
+  // ... but a lot size that is not usable is not the user's (it is dropped), and a tick or a point value is not a lot size
+  assert.deepEqual(settleInstrument({ base: usualBase, user: { qty_step: 0 } as never, label: "L" }).warnings.filter((w) => w.startsWith("lot size for ")), [DEFAULT_WARNING("L", "0.001")]);
+  assert.deepEqual(settleInstrument({ base: usualBase, user: { pointvalue: 2, mintick: 0.5 }, label: "L" }).warnings, [DEFAULT_WARNING("L", "0.001")]);
   assert.deepEqual(settleInstrument({ base: instrumentFromBinance(spot("BTCUSDT"), "spot", 0.00001), label: "L" }).warnings, []);
 });
 
