@@ -23,6 +23,23 @@ import {
   type ParamGrid,
   type RuntimeArgsLike,
 } from "./engine.js";
+import {
+  NOT_APPLIED_WARNING,
+  SyminfoArgSchema,
+  appliedWarnings,
+  hasApplicableField,
+  instrumentFromBinance,
+  redactCredentials,
+  removeSidecar,
+  resolveInstrument,
+  tvLotFor,
+  unresolvedInstrument,
+  writeSidecar,
+  type BinanceMarket,
+  type BinanceSymbolInfo,
+  type Instrument,
+  type UserSyminfo,
+} from "./instrument.js";
 import { coverageIndex, coverageTopic, checkPineFeature } from "./coverage.js";
 import { parityToolResult, type ParityDeps, type ParityToolArgs } from "./parity-tool.js";
 import { toolMeta } from "./tool-meta.js";
@@ -31,14 +48,23 @@ import { toolMeta } from "./tool-meta.js";
 
 const ALLOW_ANYWHERE = process.env.PINEFORGE_ALLOW_ANYWHERE === "1";
 
-const BINANCE_SPOT_BASE = "https://api.binance.com";
-const BINANCE_FAPI_BASE = "https://fapi.binance.com";
+// Overridable for a mirror or a proxy (api.binance.com is not reachable from every region).
+const BINANCE_SPOT_BASE = process.env.PINEFORGE_BINANCE_SPOT_URL ?? "https://api.binance.com";
+const BINANCE_FAPI_BASE = process.env.PINEFORGE_BINANCE_FAPI_URL ?? "https://fapi.binance.com";
+// One request to Binance (klines page, exchangeInfo): a stalled mirror must not stall a backtest.
+const BINANCE_TIMEOUT_MS = Number(process.env.PINEFORGE_BINANCE_TIMEOUT_MS) || 20_000;
 const BINANCE_KLINES_LIMIT = 1000;
 const BINANCE_PAGE_DELAY_MS = 200;
 
 // ─── Backtest (single + grid) ─────────────────────────────────────────────
 
-interface BacktestArgs {
+interface InstrumentArgs {
+  symbol?: string;
+  market?: BinanceMarket;
+  syminfo?: UserSyminfo;
+}
+
+interface BacktestArgs extends InstrumentArgs {
   source: string;
   ohlcv_csv_path: string;
   image?: string;
@@ -48,7 +74,7 @@ interface BacktestArgs {
   report_path?: string;
 }
 
-interface BacktestGridArgs {
+interface BacktestGridArgs extends InstrumentArgs {
   source: string;
   ohlcv_csv_path: string;
   image?: string;
@@ -113,15 +139,33 @@ async function writeReportFile(value: unknown, explicitPath: string | undefined,
   };
 }
 
+const MAX_REPORT_WARNINGS = 20;
+const MAX_REPORT_WARNING_CHARS = 1000;
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** The `warnings` the engine's report carries itself: strings only, at most 20 of them, each at most 1,000 characters. */
+function reportWarnings(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((w): w is string => typeof w === "string" && w.length > 0)
+    .slice(0, MAX_REPORT_WARNINGS)
+    .map((w) => w.slice(0, MAX_REPORT_WARNING_CHARS));
+}
+
 async function runBacktest(runner: EngineRunner, args: BacktestArgs): Promise<unknown> {
   const csvPath = await resolveCsvPath(args.ohlcv_csv_path);
   const image = args.image ?? DEFAULT_IMAGE;
+  const resolution = await resolveInstrument(args, csvPath, lookupBinanceSymbol);
+  const instrument = resolution.instrument;
+  // An instrument with nothing the engine can be given is not passed: the run is then the image's own.
+  const apply = hasApplicableField(instrument);
   const cpp = await runner.transpile(args.source, args.image);
 
   const tmp = await mkdtemp(join(tmpdir(), "pineforge-bt-"));
   const cppPath = join(tmp, "strategy.cpp");
   await writeFile(cppPath, cpp, "utf8");
 
+  const notices: string[] = [];
   try {
     const report = await runner.backtest({
       cppPath,
@@ -130,9 +174,23 @@ async function runBacktest(runner: EngineRunner, args: BacktestArgs): Promise<un
       inputs: args.inputs,
       overrides: args.overrides,
       runtime: args.runtime,
+      instrument: apply ? instrument : undefined,
+      notices,
     });
+    // Nothing applied (no overlay, or the runner went without it): say so; else check what the engine reports.
+    // The engine's own top-level `warnings` (a later release may have them) come after ours and never replace them.
+    const { warnings: fromEngine, ...engineReport } = (isRecord(report) ? report : {}) as Record<string, unknown>;
+    const warnings = [
+      ...new Set([
+        ...resolution.warnings,
+        ...(!apply ? [NOT_APPLIED_WARNING] : notices.length ? [] : appliedWarnings(instrument, report)),
+        ...notices,
+        ...reportWarnings(fromEngine),
+      ]),
+    ];
     const full = {
-      ...(report as object),
+      ...(warnings.length ? { warnings } : {}),
+      ...engineReport,
       _meta: { strategy_cpp_bytes: cpp.length, image: runner.mode === "docker" ? image : "local" },
     };
 
@@ -144,9 +202,11 @@ async function runBacktest(runner: EngineRunner, args: BacktestArgs): Promise<un
     const r = full as Record<string, unknown>;
     const trades = Array.isArray(r.trades) ? r.trades : undefined;
     return {
+      ...(warnings.length ? { warnings } : {}),
       summary: r.summary,
       applied_inputs: r.applied_inputs,
       applied_overrides: r.applied_overrides,
+      applied_runtime: r.applied_runtime,
       elapsed_seconds: r.elapsed_seconds,
       total_trades: trades ? trades.length : undefined,
       report_path: loc.user_path,
@@ -186,6 +246,11 @@ async function runBacktestGrid(runner: EngineRunner, args: BacktestGridArgs): Pr
     );
   }
 
+  const resolution = await resolveInstrument(args, csvPath, lookupBinanceSymbol);
+  const instrument = resolution.instrument;
+  const apply = hasApplicableField(instrument);
+  const engineWarnings = new Set<string>(apply ? [] : [NOT_APPLIED_WARNING]);
+  let checkedQuantities = false; // one report is enough to see whether the engine floors to the lot size
   const cpp = await runner.transpile(args.source, args.image);
   const tmp = await mkdtemp(join(tmpdir(), "pineforge-grid-"));
   const cppPath = join(tmp, "strategy.cpp");
@@ -207,14 +272,22 @@ async function runBacktestGrid(runner: EngineRunner, args: BacktestGridArgs): Pr
     const rows = await pMap<typeof combos[number], Row>(
       combos, concurrency,
       async (combo) => {
+        const notices: string[] = [];
         try {
           const report = await runner.backtest({
             cppPath, csvPath,
             image: args.image,
             inputs: combo.inputs, overrides: combo.overrides,
             runtime: args.runtime,
+            instrument: apply ? instrument : undefined,
+            notices,
           }) as { summary?: Record<string, unknown>; applied_inputs?: unknown;
                   applied_overrides?: unknown; elapsed_seconds?: number; trades?: unknown[] };
+          if (apply && notices.length === 0) {
+            for (const w of appliedWarnings(instrument, report, !checkedQuantities)) engineWarnings.add(w);
+            checkedQuantities = true;
+          }
+          for (const w of notices) engineWarnings.add(w);
           return {
             ok: true,
             inputs: combo.inputs,
@@ -238,6 +311,7 @@ async function runBacktestGrid(runner: EngineRunner, args: BacktestGridArgs): Pr
 
     const succeeded = rows.filter(r => r.ok);
     const failed = rows.filter(r => !r.ok);
+    const warnings = [...resolution.warnings, ...engineWarnings];
 
     const sortValue = (r: Row): number => {
       if (!r.ok || !r.summary) return -Infinity;
@@ -247,11 +321,13 @@ async function runBacktestGrid(runner: EngineRunner, args: BacktestGridArgs): Pr
     succeeded.sort((a, b) => sortValue(b) - sortValue(a));
 
     const full = {
+      ...(warnings.length ? { warnings } : {}),
       total_combinations: combos.length,
       succeeded: succeeded.length,
       failed: failed.length,
       sort_by: sortBy,
       image: runner.mode === "docker" ? image : "local",
+      instrument,
       _meta: { strategy_cpp_bytes: cpp.length, concurrency },
       best: succeeded[0] ?? null,
       results: [...succeeded, ...failed],
@@ -264,11 +340,13 @@ async function runBacktestGrid(runner: EngineRunner, args: BacktestGridArgs): Pr
     const loc = await writeReportFile(full, args.report_path, "grid");
     const TOP = 10;
     return {
+      ...(warnings.length ? { warnings } : {}),
       total_combinations: full.total_combinations,
       succeeded: full.succeeded,
       failed: full.failed,
       sort_by: full.sort_by,
       image: full.image,
+      instrument,
       _meta: full._meta,
       best: full.best,
       top_results: succeeded.slice(0, TOP),
@@ -412,8 +490,6 @@ const BINANCE_INTERVAL_MS: Record<string, number> = {
 
 const BINANCE_INTERVALS = Object.keys(BINANCE_INTERVAL_MS) as [string, ...string[]];
 
-type BinanceMarket = "spot" | "usdt_perp";
-
 function binanceKlinesUrl(market: BinanceMarket): string {
   return market === "spot"
     ? `${BINANCE_SPOT_BASE}/api/v3/klines`
@@ -427,12 +503,20 @@ function binanceExchangeInfoUrl(market: BinanceMarket): string {
 }
 
 async function binanceGet(url: string): Promise<unknown> {
-  const resp = await fetch(url, {
-    headers: { "user-agent": `pineforge-backtest-mcp/${VERSION}` },
-  });
-  const text = await resp.text();
+  const shown = redactCredentials(url);
+  let resp: Response;
+  let text: string;
+  try {
+    resp = await fetch(url, {
+      headers: { "user-agent": `pineforge-backtest-mcp/${VERSION}` },
+      signal: AbortSignal.timeout(BINANCE_TIMEOUT_MS),
+    });
+    text = await resp.text();
+  } catch (e) {
+    throw new Error(`Binance request to ${shown} failed: ${redactCredentials(e instanceof Error ? e.message : String(e))}`);
+  }
   if (!resp.ok) {
-    throw new Error(`Binance ${resp.status} for ${url}: ${text.slice(0, 500)}`);
+    throw new Error(`Binance ${resp.status} for ${shown}: ${text.slice(0, 500)}`);
   }
   try { return JSON.parse(text); }
   catch { throw new Error(`Binance non-JSON response: ${text.slice(0, 200)}`); }
@@ -554,7 +638,14 @@ async function fetchBinanceOhlcv(args: FetchOhlcvArgs): Promise<unknown> {
 
   const first = collected[0]!;
   const last = collected[collected.length - 1]!;
+  const recorded = await recordInstrument(outAbs, args.market, args.symbol, {
+    interval: args.interval,
+    first_open_time: first[0],
+    last_open_time: last[0],
+    bars: collected.length,
+  });
   return {
+    ...(recorded.warnings.length ? { warnings: recorded.warnings } : {}),
     output_path: outAbs,
     market: args.market,
     symbol: args.symbol.toUpperCase(),
@@ -566,7 +657,41 @@ async function fetchBinanceOhlcv(args: FetchOhlcvArgs): Promise<unknown> {
     first_open_iso: new Date(first[0]).toISOString(),
     last_open_iso: new Date(last[0]).toISOString(),
     bytes: Buffer.byteLength(csv, "utf8"),
+    instrument: recorded.instrument,
+    instrument_path: recorded.path,
   };
+}
+
+// The instrument of a fetched CSV, written next to it (<csv>.instrument.json) for
+// backtest_pine to find. A failure here never fails the fetch: the CSV is already
+// written, and a stale sidecar of an earlier file at this path is removed.
+async function recordInstrument(
+  csvPath: string,
+  market: BinanceMarket,
+  symbol: string,
+  feed: { interval: string; first_open_time: number; last_open_time: number; bars: number },
+): Promise<{ instrument: Instrument; path: string | null; warnings: string[] }> {
+  const name = symbol.toUpperCase();
+  try {
+    const info = await lookupBinanceSymbol(market, name);
+    if (!info) throw new Error(`${name} is not in Binance ${market} exchangeInfo`);
+    const { reading, usual } = tvLotFor(market, name);
+    const instrument = instrumentFromBinance(info, market, reading, usual);
+    if (!instrument.resolved) throw new Error(instrument.reason);
+    instrument.source = { ...instrument.source!, fetched_at: new Date().toISOString() };
+    return { instrument, path: await writeSidecar(csvPath, instrument, feed), warnings: [] };
+  } catch (e) {
+    await removeSidecar(csvPath).catch(() => undefined);
+    const why = redactCredentials(e instanceof Error ? e.message : String(e));
+    return {
+      instrument: unresolvedInstrument(why),
+      path: null,
+      warnings: [
+        `no instrument recorded next to the CSV (${why}): backtest_pine will not know its lot size; ` +
+        "pass `symbol` or `syminfo` to it",
+      ],
+    };
+  }
 }
 
 function sanitizeNumeric(raw: unknown): string {
@@ -588,12 +713,10 @@ function sleep(ms: number): Promise<void> {
 const SYMBOL_CACHE_TTL_MS = 5 * 60_000;
 const symbolCache: Map<BinanceMarket, { ts: number; symbols: BinanceSymbol[] }> = new Map();
 
-interface BinanceSymbol {
-  symbol: string;
+interface BinanceSymbol extends BinanceSymbolInfo {
   status: string;
   baseAsset: string;
   quoteAsset: string;
-  contractType?: string; // futures only
 }
 
 async function listBinanceSymbols(market: BinanceMarket): Promise<BinanceSymbol[]> {
@@ -607,6 +730,11 @@ async function listBinanceSymbols(market: BinanceMarket): Promise<BinanceSymbol[
   }
   symbolCache.set(market, { ts: now, symbols: data.symbols });
   return data.symbols;
+}
+
+async function lookupBinanceSymbol(market: BinanceMarket, symbol: string): Promise<BinanceSymbolInfo | undefined> {
+  const wanted = symbol.toUpperCase();
+  return (await listBinanceSymbols(market)).find((s) => s.symbol.toUpperCase() === wanted);
 }
 
 interface SymbolsArgs {
@@ -672,6 +800,38 @@ const ParamGridSchema = z.record(
 );
 const MarketSchema = z.enum(["spot", "usdt_perp"]);
 const IntervalSchema = z.enum(BINANCE_INTERVALS);
+
+// Where the instrument's numbers come from: one statement, in the words the tool texts and the README share.
+const LOT_AND_TICK_SOURCES =
+  "The lot size is TradingView's own reading for the symbol, from a measured table shipped with this server " +
+  "(Binance's LOT_SIZE.stepSize only for a symbol TradingView does not list; TradingView's usual 0.001 for a " +
+  "listing newer than the table); the tick size and currencies come from Binance's public exchangeInfo " +
+  "(or from the sidecar next to a CSV fetched by fetch_binance_ohlcv).";
+
+// The instrument of a backtest (shared by backtest_pine and backtest_pine_grid).
+const instrumentArgs = {
+  symbol: z.string().min(2).max(40).optional().describe(
+    "Binance symbol the CSV holds, e.g. 'BTCUSDT'. " + LOT_AND_TICK_SOURCES + " TradingView's reading differs " +
+    "from Binance's step for most symbols (USDT-M BTCUSDT is 0.000001 on TradingView, 0.001 on Binance), so " +
+    "order quantities are floored as on TradingView; 0.001 is what TradingView reads for 90.6% of Binance spot " +
+    "symbols and 97.5% of USDT-M ones, and a lot size that is Binance's or that usual 0.001 comes with a warning. " +
+    "Without an instrument the engine can book sub-lot margin-call rows TradingView does not. A CSV written by " +
+    "fetch_binance_ohlcv needs neither `symbol` nor `syminfo`: the instrument is recorded next to it " +
+    "(<csv>.instrument.json) and used. If nothing can be resolved the run still goes ahead without a lot grid " +
+    "and says so in `warnings` and applied_runtime.syminfo."
+  ),
+  market: MarketSchema.optional().describe(
+    "'spot' (default; a warning says when it is assumed) or 'usdt_perp'; the Binance market `symbol` is looked " +
+    "up in. A CSV fetched by fetch_binance_ohlcv for the same symbol keeps the market it was fetched for."
+  ),
+  syminfo: SyminfoArgSchema.optional().describe(
+    "The instrument's own values, for a CSV of any other instrument; they win over what `symbol` or the " +
+    "CSV's sidecar gives. Applied to the engine: qty_step (the lot grid) and mincontract, mintick, " +
+    "pointvalue, type, currency, basecurrency. Without a qty_step (or mincontract) the lot grid stays off " +
+    "and the result carries a warning; without a mintick the engine's 0.01 applies. ticker, tickerid, " +
+    "timezone and session are not applied (engine defaults)."
+  ),
+};
 
 // ─── strategy() header overrides ──────────────────────────────────────────
 //
@@ -971,7 +1131,11 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         "(initial_capital, commission_value, default_qty_value, pyramiding, " +
         "slippage, default_qty_type, commission_type, process_orders_on_close). " +
         "Returns the parsed JSON report (summary, trades, applied_inputs, " +
-        "applied_overrides, elapsed_seconds). If the report is too large to " +
+        "applied_overrides, applied_runtime, elapsed_seconds). The instrument matters: pass `symbol` " +
+        "(a Binance symbol) or `syminfo` (your own qty_step, mintick, ...); a CSV from fetch_binance_ohlcv " +
+        "carries its instrument and needs neither. " + LOT_AND_TICK_SOURCES + " `syminfo` goes over all of it. " +
+        "What was applied is in applied_runtime.syminfo; when the lot grid is unknown, or its lot size is not a " +
+        "TradingView reading, the result has a `warnings` entry. If the report is too large to " +
         "return inline it is written to report_path and a compact summary " +
         "(with that path) is returned instead. Use backtest_pine_grid for sweeps.",
       inputSchema: {
@@ -983,6 +1147,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         image: z.string().optional().describe(
           `Docker image override. Defaults to ${DEFAULT_IMAGE}.`
         ),
+        ...instrumentArgs,
         inputs: ParamMapSchema.optional().describe(
           "Map of Pine input.*() names → value (string/number/bool). " +
           "Sent as PINEFORGE_INPUTS env var to the runtime."
@@ -1012,8 +1177,10 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         ),
       },
     },
-    async ({ source, ohlcv_csv_path, image, inputs, overrides, runtime, report_path }) =>
-      asTextResult(await runBacktest(runner, { source, ohlcv_csv_path, image, inputs, overrides, runtime, report_path })),
+    async ({ source, ohlcv_csv_path, image, symbol, market, syminfo, inputs, overrides, runtime, report_path }) =>
+      asTextResult(await runBacktest(runner, {
+        source, ohlcv_csv_path, image, symbol, market, syminfo, inputs, overrides, runtime, report_path,
+      })),
   );
 
   server.registerTool(
@@ -1029,11 +1196,14 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         "combination in the cartesian product of `inputs` × `overrides` grids. Returns a ranked list " +
         "of {inputs, overrides, summary, elapsed_seconds} entries sorted by `sort_by` " +
         "descending, plus the top entry under `best`. Cap: max_combinations (default " +
-        "64). " + concurrencyHelp,
+        "64). Takes the same `symbol` / `market` / `syminfo` as backtest_pine and applies the instrument to " +
+        "every combination (the result's `instrument` shows it). " + LOT_AND_TICK_SOURCES + " `syminfo` goes over " +
+        "all of it. " + concurrencyHelp,
       inputSchema: {
         source: z.string().describe("PineScript v6 source."),
         ohlcv_csv_path: z.string().describe("Path to OHLCV CSV (same format as backtest_pine)."),
         image: z.string().optional().describe(`Docker image override. Defaults to ${DEFAULT_IMAGE}.`),
+        ...instrumentArgs,
         inputs: ParamGridSchema.optional().describe(
           "Grid of input.*() names → list of values to sweep. " +
           "Example: {\"Fast Length\": [8, 12, 19], \"Slow Length\": [21, 26, 39]}"
@@ -1081,6 +1251,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
       const { collected } = await collectKlines(market, symbol, interval, startMs, endMs, limit);
       return { csv: klinesCsv(collected), bars: collected.length };
     },
+    resolveInstrument: (req, csvPath) => resolveInstrument(req, csvPath, lookupBinanceSymbol),
   };
   const parityWhere = runner.mode === "docker"
     ? "The run and the grading use the pineforge-release Docker image (no network inside the container)."
@@ -1105,7 +1276,11 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         "(coarser than 1 minute, at most 1 day) unless runtime.bar_magnifier is false. With your own bars, optionally pass " +
         "magnifier_ohlcv_csv or magnifier_ohlcv_csv_path; a script that declares the magnifier but runs without one " +
         "gets a warning that fills inside bars may differ from TradingView's. Settings the XLSX Properties sheet states " +
-        "are used; an explicit input that disagrees with one is an error. " + parityWhere,
+        "are used; an explicit input that disagrees with one is an error. The run applies the instrument's lot " +
+        "size and tick size as backtest_pine does, for BINANCE:<SYMBOL> and BINANCE:<SYMBOL>.P. " +
+        LOT_AND_TICK_SOURCES + " `syminfo` gives your own values and goes over all of it. The result's " +
+        "`applied_instrument` shows what was applied, and `warnings` says when no lot size could be found or its " +
+        "lot size is not a TradingView reading. " + parityWhere,
       inputSchema: {
         pine: z.string().describe("The Pine v6 strategy source TradingView ran (at most 262,144 bytes of UTF-8)."),
         tradingview_trades: z.string().describe(
@@ -1148,6 +1323,11 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         max_mismatches: z.number().int().min(0).max(50).optional().describe(
           "How many mismatching trades to list (default 10, at most 50); the counts are always complete."
         ),
+        syminfo: SyminfoArgSchema.optional().describe(
+          "The instrument's own values (qty_step, mintick, pointvalue, ...), as in backtest_pine: they win over " +
+          "what the symbol resolves, and are the whole instrument for a market other than Binance. Without a lot " +
+          "size the run floors nothing and the result warns."
+        ),
         ohlcv_csv: z.string().optional().describe(
           "Your bars as CSV text: header timestamp,open,high,low,close,volume (epoch ms), or " +
           "TradingView's chart export time,open,high,low,close,Volume (epoch seconds or ISO 8601). " +
@@ -1180,7 +1360,11 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         "CSV (header: timestamp,open,high,low,close,volume; timestamp = open time " +
         "in UNIX ms UTC). Supports `spot` and `usdt_perp` (USDT-margined " +
         "perpetual futures). Requests larger than 1000 bars are paginated " +
-        "automatically. The output path must " +
+        "automatically. Also records the symbol's instrument in <output_path>.instrument.json (lot size: " +
+        "TradingView's own reading from a measured table shipped with this server, Binance's LOT_SIZE.stepSize " +
+        "for a symbol TradingView does not list, TradingView's usual 0.001 for a listing newer than the table; " +
+        "tick size and currencies from Binance's public exchangeInfo), which backtest_pine and " +
+        "backtest_pine_grid pick up; the result's `instrument` shows what was recorded. The output path must " +
         "live inside the MCP cwd unless PINEFORGE_ALLOW_ANYWHERE=1.",
       inputSchema: {
         symbol: z.string().min(2).describe("Binance symbol, e.g. 'BTCUSDT'. Use binance_symbols to validate."),

@@ -8,10 +8,12 @@
  *   - readOnlyHint: true for the lookups and check_tradingview_parity, which
  *     works in a temporary directory it deletes; in-process, transpile_pine too.
  *     backtest_pine and backtest_pine_grid write a report file when the result is
- *     too large to return; fetch_binance_ohlcv writes its CSV; the image tools
- *     pull the engine image. In Docker mode transpile_pine, backtest_pine and
- *     backtest_pine_grid take an `image`, which docker run pulls from its
- *     registry when it is missing: there they are not read-only and open-world.
+ *     too large to return; fetch_binance_ohlcv writes its CSV (and the instrument
+ *     file next to it); the image tools pull the engine image. In Docker mode
+ *     transpile_pine takes an `image`, which docker run pulls from its registry
+ *     when it is missing: there it is not read-only and open-world. The two
+ *     backtests are open-world in both modes: their `symbol` is looked up in
+ *     Binance's public exchangeInfo (and in Docker mode `image` is pulled too).
  *     (check_tradingview_parity runs the default image only; its first pull, as
  *     any docker run's, is not counted.)
  *   - destructiveHint: true where the tool writes a file at a path the caller
@@ -30,14 +32,15 @@ export interface ToolMeta {
 
 const LOOKUP = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } as const;
 const WRITES_REPORT = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false } as const;
+const WRITES_REPORT_OPEN = { ...WRITES_REPORT, openWorldHint: true } as const;
 const PULLS_IMAGE = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true } as const;
 
 export function toolMeta(mode: "docker" | "local") {
   const docker = mode === "docker";
   return {
     transpile_pine: { title: "Transpile Pine to C++", annotations: docker ? PULLS_IMAGE : LOOKUP },
-    backtest_pine: { title: "Backtest a Pine strategy", annotations: { ...WRITES_REPORT, openWorldHint: docker } },
-    backtest_pine_grid: { title: "Sweep strategy parameters", annotations: { ...WRITES_REPORT, openWorldHint: docker } },
+    backtest_pine: { title: "Backtest a Pine strategy", annotations: WRITES_REPORT_OPEN },
+    backtest_pine_grid: { title: "Sweep strategy parameters", annotations: WRITES_REPORT_OPEN },
     check_tradingview_parity: { title: "Check TradingView parity", annotations: { ...LOOKUP, openWorldHint: true } },
     fetch_binance_ohlcv: {
       title: "Fetch Binance OHLCV to a file",

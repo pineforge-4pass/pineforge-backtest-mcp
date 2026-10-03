@@ -10,6 +10,8 @@
   "files": [
     "dist",
     "parity",
+    "docker/pf_run_json.py",
+    "src/tv-grid.generated.json",
     "README.md",
     "LICENSE"
   ],
@@ -25,6 +27,7 @@
     "prepublishOnly": "npm run build",
     "test": "node --import tsx --test 'test/**/*.test.ts'",
     "test:e2e:parity": "node --import tsx --test test/e2e/parity-stdio.e2e.ts",
+    "test:e2e:syminfo": "node --import tsx --test test/e2e/syminfo-stdio.e2e.ts",
     "test:e2e:parity-negative": "node --import tsx --test test/e2e/parity-negative.e2e.ts"
   },
   "dependencies": {
