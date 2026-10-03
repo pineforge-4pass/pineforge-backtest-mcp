@@ -258,19 +258,20 @@ not applied (the engine's defaults: UTC, 24x7). Where it comes from:
 1. `symbol` (+ `market`): read from Binance's public exchangeInfo, one request cached
    for 5 minutes: the lot size is the symbol's `LOT_SIZE.stepSize`, the tick is its
    `PRICE_FILTER.tickSize`, the point value is 1.
-2. `syminfo`: your own values, for a CSV of any other instrument. They win over what
-   `symbol` resolves, and with no `symbol` they are the whole instrument. Give
-   `qty_step` (or `mincontract`; each defaults to the other).
-3. With neither `symbol` nor `syminfo`, the sidecar `<csv path>.instrument.json` that `fetch_binance_ohlcv`
+2. Without a `symbol`, the sidecar `<csv path>.instrument.json` that `fetch_binance_ohlcv`
    writes next to every CSV it fetches (its `instrument` result shows it). It is
-   ignored, with the reason in the result, if the CSV's first and last bar are no
-   longer the ones it was written for.
+   ignored, with the reason in the result, if the CSV has changed since (its first or
+   last bar, or its content).
+3. `syminfo`: your own values, for a CSV of any other instrument. They go over what
+   `symbol` or the sidecar gives, and with neither they are the whole instrument. Give
+   `qty_step` (or `mincontract`; each defaults to the other) and, since the engine's
+   default tick is 0.01, `mintick` (the result warns when it is missing).
 
 What was applied is in the report's `applied_runtime.syminfo` and so in
 `fingerprint.provenance.runtime`: a gridless and a gridded run never share a
 fingerprint. **Unresolved** means no lot size was found (no `symbol`, `syminfo` or
 sidecar, Binance unreachable, or a symbol it does not list): the run still goes ahead
-with the engine's defaults (no lot grid, tick 0.01), `applied_runtime.syminfo` reads
+with the engine's defaults (no lot grid, tick 0.01 unless `syminfo` gives one), `applied_runtime.syminfo` reads
 `{"resolved": false, "reason": ...}` and the result starts with a `warnings` entry
 (`instrument grid unavailable for ... : order quantity is not floored to a lot size,
 so the run can contain sub-lot margin-call rows that TradingView does not book`).
@@ -283,8 +284,8 @@ finer for DOGEUSDT and SHIBUSDT spot (0.001 against 1) and coarser for XRPUSDT s
 against 0.1), and finer for all five USD-M perpetuals sampled (BTCUSDT 0.000001
 against 0.001, ETHUSDT 0.0001 against 0.001, DOGEUSDT, 1000PEPEUSDT and ALLUSDT 0.001
 against 1). With `symbol` the engine floors to Binance's step, so under percent-of-equity
-sizing a position can differ from TradingView's by up to one Binance lot (0.001 BTC for
-BTCUSDT USDT-M). The tick size matched TradingView's `syminfo.mintick` on all ten. To
+sizing a position can differ from TradingView's by up to the larger of the two lot
+sizes (0.001 BTC for BTCUSDT USDT-M, 1 XRP for XRPUSDT spot). The tick size matched TradingView's `syminfo.mintick` on all ten. To
 match TradingView's sizing, read `syminfo.mincontract` off its chart and pass it:
 `"syminfo": { "qty_step": 0.000001 }` (with `symbol` for the rest; the lot size then
 comes from `syminfo`).
@@ -596,6 +597,7 @@ sandbox), so any path is accepted there — use absolute `/work/...` paths.
 | `PINEFORGE_DOCKER_TIMEOUT_MS`   | `120000` | Hard kill for each engine run and for `docker pull` |
 | `PINEFORGE_MAX_INLINE_BYTES`    | `200000` | Largest report returned inline; bigger ones are written to `report_path` |
 | `PINEFORGE_PARITY_TIMEOUT_MS`   | `600000` | Time limit of one `check_tradingview_parity` run (transpile, compile, backtest, grading) |
+| `PINEFORGE_BINANCE_TIMEOUT_MS`  | `20000` | Time limit of each request to Binance (klines page, exchangeInfo); a backtest with a `symbol` that cannot reach Binance still runs, without a lot grid, and says so |
 | `PINEFORGE_BINANCE_SPOT_URL` / `PINEFORGE_BINANCE_FAPI_URL` | `https://api.binance.com` / `https://fapi.binance.com` | Base URLs of Binance's spot and USD-M public APIs (klines, exchangeInfo): a mirror or proxy where api.binance.com is not reachable |
 | `PINEFORGE_HOST_WORKDIR`        | unset | Docker: the host dir mounted at `/work`; when set, `report_path` is an absolute host path — correct only when the server runs with `/work` as its working directory (see the end of [`backtest_pine` example](#backtest_pine-example)) |
 

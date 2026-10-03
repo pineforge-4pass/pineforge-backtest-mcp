@@ -117,6 +117,13 @@ class ApplyInstrument(unittest.TestCase):
         for key in ("qty_step", "mincontract", "mintick", "pointvalue", "type", "ticker"):
             self.assertNotIn(key, applied)
 
+    def test_an_integer_too_large_for_a_float_is_dropped_not_a_crash(self):
+        self.assertIsNone(shim.clean_number(10 ** 400))
+        lib = FakeLib()
+        applied = shim.apply_instrument(lib, "S", {"schema": FULL["schema"], "qty_step": 10 ** 400, "mintick": 0.5})
+        self.assertEqual(lib.calls, [("strategy_set_syminfo_mintick", "S", 0.5)])
+        self.assertIs(applied["resolved"], False)
+
     def test_number_bounds_are_inclusive(self):
         lib = FakeLib()
         shim.apply_instrument(lib, "S", {"schema": FULL["schema"], "qty_step": 1e-12, "mintick": 1e12})
@@ -281,20 +288,37 @@ class Subprocess(unittest.TestCase):
         done = self.run_shim("--syminfo", self.spec_file(FULL))
         self.assertEqual(json.loads(done.stdout)["prog"], "run_json.py")
 
-    def test_image_without_a_required_function_exits_2_and_names_it(self):
-        for name in ("apply_syminfo", "build_report_dict", "main"):
-            self.write_real(FAKE_RUN_JSON.replace(f"def {name}(", f"def not_{name}("))
-            done = self.run_shim("--syminfo", self.spec_file(FULL))
-            self.assertEqual(done.returncode, 2, name)
-            self.assertIn(name, done.stderr)
-            self.assertIn("cannot apply the instrument grid", done.stderr)
-            self.assertEqual(done.stdout, "")
-
-    def test_build_report_dict_without_applied_runtime_exits_2(self):
-        self.write_real(FAKE_RUN_JSON.replace("applied_runtime=None,", "runtime=None,"))
+    def test_image_without_main_exits_2_and_says_so(self):
+        self.write_real(FAKE_RUN_JSON.replace("def main(", "def not_main("))
         done = self.run_shim("--syminfo", self.spec_file(FULL))
         self.assertEqual(done.returncode, 2)
-        self.assertIn("applied_runtime", done.stderr)
+        self.assertIn("no main()", done.stderr)
+        self.assertEqual(done.stdout, "")
+
+    def test_image_without_apply_syminfo_runs_unchanged_and_says_so(self):
+        # an image from before the hooks: its own main() runs, no instrument is applied or reported
+        self.write_real(FAKE_RUN_JSON.replace("def apply_syminfo(", "def not_apply_syminfo("))
+        done = self.run_shim()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("lacks apply_syminfo", done.stderr)
+        self.assertIn("running it without the instrument grid", done.stderr)
+        out = json.loads(done.stdout)
+        self.assertEqual(out["applied_runtime"], {"input_tf": ""})
+        self.assertEqual(out["calls"], [])
+        self.assertEqual(out["prog"], "run_json.py")
+
+    def test_image_whose_build_report_dict_has_no_applied_runtime_runs_unchanged(self):
+        text = FAKE_RUN_JSON.replace("applied_runtime=None,", "runtime=None,").replace("applied_runtime or {}", "runtime or {}")
+        self.write_real(text)
+        done = self.run_shim("--syminfo", self.spec_file(FULL))
+        self.assertIn("lacks build_report_dict(applied_runtime=...)", done.stderr)
+        self.assertEqual(done.returncode, 1, "the image's own apply_syminfo ran and refused: it is unchanged")
+        self.assertIn("must not run", done.stderr)
+
+    def test_exit_code_of_an_unchanged_image_is_its_own(self):
+        self.write_real(FAKE_RUN_JSON.replace("def apply_syminfo(", "def not_apply_syminfo(").replace("return 0\n", "return 7\n"))
+        done = self.run_shim()
+        self.assertEqual(done.returncode, 7)
 
     def test_missing_real_run_json_exits_2(self):
         done = self.run_shim("--syminfo", self.spec_file(FULL), real=os.path.join(self.tmp.name, "nowhere"))

@@ -48,7 +48,14 @@ test("layoutOf lists a prefix's top level and its bin/", async () => {
 
 test("the overlay mirrors the prefix, except bin/run_json.py (the shim) and instrument.json", async () => {
   const layout = await layoutOf(PREFIX);
-  const overlay = await createOverlay(BTC, PREFIX, layout);
+  // permissions must not depend on the caller's umask: a container user reads the overlay
+  const umask = process.umask(0o077);
+  let overlay: Awaited<ReturnType<typeof createOverlay>>;
+  try {
+    overlay = await createOverlay(BTC, PREFIX, layout);
+  } finally {
+    process.umask(umask);
+  }
   try {
     assert.deepEqual(readdirSync(overlay.dir).sort(), ["bin", "include", "instrument.json", "lib", "pycodegen"]);
     for (const name of ["include", "lib", "pycodegen"]) {

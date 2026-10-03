@@ -3,6 +3,7 @@
 // CSV, resolution and its warnings.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -15,6 +16,7 @@ import {
   instrumentFromBinance,
   layerUserSyminfo,
   readSidecar,
+  redactCredentials,
   removeSidecar,
   resolveInstrument,
   sidecarPath,
@@ -96,15 +98,20 @@ test("the lot grid is LOT_SIZE.stepSize, not MARKET_LOT_SIZE.stepSize (0 on spot
 
 test("USD-M perpetuals: .P tickerid, coarser tick and lot sizes", () => {
   const btc = instrumentFromBinance(fapi("BTCUSDT"), "usdt_perp");
-  assert.deepEqual([btc.qty_step, btc.mincontract, btc.mintick, btc.tickerid, btc.ticker], [0.001, 0.001, 0.1, "BINANCE:BTCUSDT.P", "BTCUSDT"]);
+  assert.deepEqual([btc.qty_step, btc.mincontract, btc.mintick, btc.tickerid, btc.ticker], [0.001, 0.001, 0.1, "BINANCE:BTCUSDT.P", "BTCUSDT.P"]);
   assert.deepEqual(btc.source, { kind: "binance_exchange_info", market: "usdt_perp", symbol: "BTCUSDT" });
   const pepe = instrumentFromBinance(fapi("1000PEPEUSDT"), "usdt_perp");
   assert.deepEqual([pepe.qty_step, pepe.mintick, pepe.basecurrency], [1, 0.0000001, "1000PEPEUSDT".slice(0, 8)]);
   assert.equal(instrumentFromBinance(fapi("TSLAUSDT"), "usdt_perp").tickerid, "BINANCE:TSLAUSDT.P");
 });
 
-test("a delivery contract is not a .P perpetual", () => {
-  assert.equal(instrumentFromBinance(fapi("BTCUSDT_261225"), "usdt_perp").tickerid, "BINANCE:BTCUSDT_261225");
+test("a delivery contract is not a .P perpetual; a perpetual that is being delisted still is", () => {
+  const delivery = instrumentFromBinance(fapi("BTCUSDT_261225"), "usdt_perp");
+  assert.deepEqual([delivery.tickerid, delivery.ticker], ["BINANCE:BTCUSDT_261225", "BTCUSDT_261225"]);
+  const delisting = instrumentFromBinance({ ...fapi("BTCUSDT"), contractType: "PERPETUAL_DELIVERING" }, "usdt_perp");
+  assert.deepEqual([delisting.tickerid, delisting.ticker], ["BINANCE:BTCUSDT.P", "BTCUSDT.P"]);
+  // a spot symbol is never a perpetual
+  assert.equal(instrumentFromBinance(spot("BTCUSDT"), "spot").ticker, "BTCUSDT");
 });
 
 test("a missing LOT_SIZE filter leaves the instrument unresolved, with the other values", () => {
@@ -223,7 +230,7 @@ test("sidecar: written next to the CSV, read back as a sidecar instrument", asyn
   const onDisk = JSON.parse(readFileSync(sidecarPath(path), "utf8"));
   assert.equal(onDisk.schema, INSTRUMENT_SCHEMA);
   assert.equal(onDisk.source.fetched_at, "2026-10-04T00:00:00.000Z");
-  assert.deepEqual(onDisk.csv, FEED);
+  assert.deepEqual(onDisk.csv, { ...FEED, sha256: createHash("sha256").update(readFileSync(path)).digest("hex") });
   const read = await readSidecar(path);
   assert.equal(read.ignored, undefined);
   // what a run applies carries no fetch time and says where it came from
@@ -245,6 +252,23 @@ test("a sidecar the CSV contradicts is ignored, naming both ranges", async () =>
   assert.match(read.ignored!, /written for bars 1000\.\.3000 and the CSV now holds 1000\.\.9000/);
 });
 
+test("a sidecar is ignored when the CSV changed though its first and last bar did not (same range, other instrument)", async () => {
+  const path = csv(["1000,1,1,1,1,1", "2000,1,1,1,1,1", "3000,1,1,1,1,1"]);
+  await writeSidecar(path, instrumentFromBinance(spot("BTCUSDT"), "spot"), FEED);
+  assert.ok((await readSidecar(path)).instrument, "unchanged CSV: used");
+  writeFileSync(path, `timestamp,open,high,low,close,volume\n1000,9,9,9,9,9\n2000,9,9,9,9,9\n3000,9,9,9,9,9\n`);
+  const read = await readSidecar(path);
+  assert.equal(read.instrument, undefined);
+  assert.match(read.ignored!, /written for a different CSV \(the bars' range is the same, the content differs\)/);
+});
+
+test("a sidecar with only a mincontract has that lot size, and the reverse", async () => {
+  const path = csv();
+  writeFileSync(sidecarPath(path), JSON.stringify({ schema: INSTRUMENT_SCHEMA, mincontract: 0.25 }));
+  const read = await readSidecar(path);
+  assert.deepEqual([read.instrument!.resolved, read.instrument!.qty_step, read.instrument!.mincontract], [true, 0.25, 0.25]);
+});
+
 test("a hand-written sidecar without a bar range is used; its values are validated", async () => {
   const path = csv();
   writeFileSync(sidecarPath(path), JSON.stringify({
@@ -253,7 +277,7 @@ test("a hand-written sidecar without a bar range is used; its values are validat
   }));
   const read = await readSidecar(path);
   assert.deepEqual(read.instrument, {
-    schema: INSTRUMENT_SCHEMA, resolved: true, qty_step: 0.5, currency: "EUR",
+    schema: INSTRUMENT_SCHEMA, resolved: true, qty_step: 0.5, mincontract: 0.5, currency: "EUR",
     source: { kind: "user", symbol: "ABC", via: "sidecar" },
   });
 });
@@ -348,9 +372,23 @@ test("symbol Binance does not list: unresolved, warned, never refused", async ()
 test("Binance unreachable: unresolved with the reason, warned, never refused", async () => {
   const got = await resolveInstrument({ symbol: "BTCUSDT" }, csv(), async () => { throw new Error("Binance 451 for https://api.binance.com/x: blocked"); });
   assert.equal(got.instrument.resolved, false);
-  assert.match(got.instrument.reason!, /^Binance spot exchangeInfo unavailable: Binance 451/);
+  // fixed text in the instrument (it is part of the fingerprint); the error text is in the warning only
+  assert.equal(got.instrument.reason, "Binance spot exchangeInfo unavailable");
   assert.equal(got.instrument.source!.symbol, "BTCUSDT");
   assert.equal(got.warnings.length, 1);
+  assert.match(got.warnings[0]!, /\(Binance spot exchangeInfo unavailable: Binance 451 for https:\/\/api\.binance\.com\/x: blocked\): order quantity/);
+});
+
+test("the error text of an unreachable Binance never reaches the instrument, and credentials never reach the warning", async () => {
+  const a = await resolveInstrument({ symbol: "BTCUSDT" }, csv(), async () => { throw new Error("fetch failed"); });
+  const b = await resolveInstrument({ symbol: "BTCUSDT" }, csv(), async () => {
+    throw new Error("Binance request to https://user:secret@mirror.example/api failed: Binance 503");
+  });
+  assert.deepEqual(a.instrument, b.instrument, "two different failures, one instrument (one fingerprint)");
+  assert.ok(!JSON.stringify(b).includes("secret"), JSON.stringify(b));
+  assert.match(b.warnings[0]!, /https:\/\/mirror\.example\/api/);
+  assert.equal(redactCredentials("GET http://u:p@h/x and https://a@b/y"), "GET http://h/x and https://b/y");
+  assert.equal(redactCredentials("no urls here"), "no urls here");
 });
 
 test("syminfo wins over symbol; both are named; the lookup still supplies the rest", async () => {
@@ -361,13 +399,41 @@ test("syminfo wins over symbol; both are named; the lookup still supplies the re
   assert.deepEqual(got.warnings, []);
 });
 
-test("syminfo alone never looks anything up and never reads the sidecar", async () => {
-  const path = csv();
-  await writeSidecar(path, instrumentFromBinance(spot("BTCUSDT"), "spot"), FEED);
-  const got = await resolveInstrument({ syminfo: { qty_step: 0.5, mintick: 0.5 } }, path, neverLookup);
+test("syminfo alone never looks anything up", async () => {
+  const got = await resolveInstrument({ syminfo: { qty_step: 0.5, mintick: 0.5 } }, csv(), neverLookup);
   assert.deepEqual([got.instrument.resolved, got.instrument.qty_step, got.instrument.ticker], [true, 0.5, undefined]);
   assert.deepEqual(got.instrument.source, { kind: "user" });
   assert.deepEqual(got.warnings, []);
+});
+
+test("syminfo goes over the CSV's sidecar: a partial one keeps the sidecar's tick (no lookup)", async () => {
+  const path = csv();
+  await writeSidecar(path, instrumentFromBinance(spot("DOGEUSDT"), "spot"), FEED);
+  const got = await resolveInstrument({ syminfo: { qty_step: 0.001 } }, path, neverLookup);
+  assert.deepEqual([got.instrument.qty_step, got.instrument.mincontract, got.instrument.mintick, got.instrument.ticker], [0.001, 0.001, 0.00001, "DOGEUSDT"]);
+  assert.deepEqual(got.instrument.source, {
+    kind: "user",
+    base: { kind: "binance_exchange_info", market: "spot", symbol: "DOGEUSDT", via: "sidecar" },
+    overridden: ["qty_step", "mincontract"],
+  });
+  assert.deepEqual(got.warnings, []);
+});
+
+test("a resolved instrument without a mintick warns that the engine's 0.01 tick applies", async () => {
+  const got = await resolveInstrument({ syminfo: { qty_step: 0.001 } }, csv(), neverLookup);
+  assert.equal(got.instrument.resolved, true);
+  assert.equal(got.warnings.length, 1);
+  assert.match(got.warnings[0]!, /no mintick.*default tick of 0\.01.*pass `syminfo\.mintick`/);
+});
+
+test("an empty syminfo says nothing: the sidecar is still read", async () => {
+  const path = csv();
+  await writeSidecar(path, instrumentFromBinance(spot("ETHUSDT"), "spot"), FEED);
+  const got = await resolveInstrument({ syminfo: {} }, path, neverLookup);
+  assert.equal(got.instrument.resolved, true);
+  assert.equal(got.instrument.source!.via, "sidecar");
+  const none = await resolveInstrument({ syminfo: {} }, csv(), neverLookup);
+  assert.equal(none.instrument.reason, "no symbol, syminfo or sidecar was given");
 });
 
 test("syminfo without a lot size warns", async () => {
@@ -396,13 +462,14 @@ test("neither and no sidecar: unresolved, warned, says what to pass", async () =
   assert.match(got.warnings[0]!, /Pass `symbol`.*`syminfo`.*fetch_binance_ohlcv/);
 });
 
-test("a stale sidecar is not used and the reason says why", async () => {
+test("a stale sidecar is not used and the warning says why (the instrument's reason stays fixed text)", async () => {
   const path = csv(["1000,1,1,1,1,1", "9000,1,1,1,1,1"]);
   await writeSidecar(path, instrumentFromBinance(spot("BTCUSDT"), "spot"), FEED);
   const got = await resolveInstrument({}, path, neverLookup);
   assert.equal(got.instrument.resolved, false);
-  assert.match(got.instrument.reason!, /^sidecar ignored: bars-\d+\.csv\.instrument\.json was written for bars 1000\.\.3000/);
+  assert.equal(got.instrument.reason, "sidecar ignored");
   assert.equal(got.warnings.length, 1);
+  assert.match(got.warnings[0]!, /\(sidecar ignored: bars-\d+\.csv\.instrument\.json was written for bars 1000\.\.3000 and the CSV now holds 1000\.\.9000\): order quantity/);
 });
 
 test("dropped values are warned about even when the lot size resolved", async () => {
@@ -410,8 +477,9 @@ test("dropped values are warned about even when the lot size resolved", async ()
   const got = await resolveInstrument({ symbol: "BTCUSDT" }, csv(), lookup);
   assert.equal(got.instrument.resolved, true);
   assert.deepEqual(got.instrument.source!.dropped, ["mintick"]);
-  assert.equal(got.warnings.length, 1);
+  assert.equal(got.warnings.length, 2);
   assert.match(got.warnings[0]!, /instrument values dropped.*: mintick;/);
+  assert.match(got.warnings[1]!, /no mintick, so the engine's default tick of 0\.01 applies/);
 });
 
 test("the warning text is the contract's", () => {

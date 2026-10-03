@@ -62,9 +62,11 @@ export async function createOverlay(instrument: Instrument, realPrefix: string, 
   const dir = await mkdtemp(join(tmpdir(), "pineforge-overlay-"));
   const cleanup = () => rm(dir, { recursive: true, force: true });
   try {
-    // mkdtemp makes it 0700; a container user other than the caller must read it.
+    // mkdtemp makes it 0700, and the umask shapes the rest; a container user other than
+    // the caller must read all of it.
     await chmod(dir, 0o755);
-    await mkdir(join(dir, "bin"), { mode: 0o755 });
+    await mkdir(join(dir, "bin"));
+    await chmod(join(dir, "bin"), 0o755);
     for (const name of layout.top) {
       if (name !== "bin") await symlink(posix.join(realPrefix, name), join(dir, name));
     }
@@ -73,7 +75,8 @@ export async function createOverlay(instrument: Instrument, realPrefix: string, 
     }
     await copyFile(shimPath(), join(dir, "bin", "run_json.py"));
     await chmod(join(dir, "bin", "run_json.py"), 0o644);
-    await writeFile(join(dir, "instrument.json"), JSON.stringify(instrument) + "\n", { mode: 0o644 });
+    await writeFile(join(dir, "instrument.json"), JSON.stringify(instrument) + "\n");
+    await chmod(join(dir, "instrument.json"), 0o644);
     return { dir, cleanup };
   } catch (e) {
     await cleanup().catch(() => undefined);

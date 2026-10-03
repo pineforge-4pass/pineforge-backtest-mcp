@@ -11,7 +11,10 @@ a sub-lot margin-call row that TradingView does not.
 
 What this file does, nothing more:
   1. loads the image's run_json.py from ${REAL_PREFIX:-/opt/pineforge}/bin and checks
-     that apply_syminfo, build_report_dict and main are there (else exit 2);
+     that apply_syminfo, build_report_dict and main are there. An image whose run_json.py
+     predates them (apply_syminfo came with release 0.10.11) is run as it is, with a note on
+     stderr: its report has no applied_runtime.syminfo, which the MCP reports as a warning;
+     without a main() there is nothing to run (exit 2);
   2. replaces its apply_syminfo with `apply_instrument` below;
   3. wraps its build_report_dict so the report's applied_runtime gets a "syminfo"
      object holding what was applied. The image builds the fingerprint from the same
@@ -32,6 +35,7 @@ import inspect
 import json
 import math
 import os
+import runpy
 import sys
 
 SCHEMA = "pineforge-instrument/v1"
@@ -57,7 +61,10 @@ def clean_number(value):
     """The value as a float when it is a finite number within range, else None."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError:  # an integer too large for a float
+        return None
     if not math.isfinite(number) or not NUMBER_MIN <= number <= NUMBER_MAX:
         return None
     return number
@@ -222,6 +229,7 @@ def real_run_json_path() -> str:
 
 
 def load_real(path: str):
+    """The image's run_json module, and what it lacks of what this file hooks into."""
     if not os.path.isfile(path):
         sys.stderr.write(f"[pineforge] {path} not found; REAL_PREFIX must name the pineforge-release prefix\n")
         sys.exit(2)
@@ -232,17 +240,22 @@ def load_real(path: str):
     missing = [name for name in REQUIRED if not callable(getattr(module, name, None))]
     if not missing and "applied_runtime" not in inspect.signature(module.build_report_dict).parameters:
         missing = ["build_report_dict(applied_runtime=...)"]
-    if missing:
-        sys.stderr.write(
-            f"[pineforge] cannot apply the instrument grid: {path} lacks {', '.join(missing)}; "
-            "use a pineforge-release image whose run_json.py has them\n")
-        sys.exit(2)
-    return module
+    return module, missing
 
 
 def main() -> int:
     path = real_run_json_path()
-    real = load_real(path)
+    real, missing = load_real(path)
+    if missing:
+        if "main" in missing:
+            sys.stderr.write(f"[pineforge] cannot run {path}: it has no main()\n")
+            sys.exit(2)
+        sys.stderr.write(
+            f"[pineforge] {path} lacks {', '.join(missing)}: running it without the instrument grid "
+            "(a pineforge-release image from before 0.10.11)\n")
+        sys.argv[0] = path
+        runpy.run_path(path, run_name="__main__")  # ends in its own sys.exit(main())
+        return 0
     real.apply_syminfo = apply_syminfo
     real.build_report_dict = wrap_build_report_dict(real.build_report_dict)
     sys.argv[0] = path

@@ -27,6 +27,7 @@ import {
   SyminfoArgSchema,
   appliedWarnings,
   instrumentFromBinance,
+  redactCredentials,
   removeSidecar,
   resolveInstrument,
   unresolvedInstrument,
@@ -47,6 +48,8 @@ const ALLOW_ANYWHERE = process.env.PINEFORGE_ALLOW_ANYWHERE === "1";
 // Overridable for a mirror or a proxy (api.binance.com is not reachable from every region).
 const BINANCE_SPOT_BASE = process.env.PINEFORGE_BINANCE_SPOT_URL ?? "https://api.binance.com";
 const BINANCE_FAPI_BASE = process.env.PINEFORGE_BINANCE_FAPI_URL ?? "https://fapi.binance.com";
+// One request to Binance (klines page, exchangeInfo): a stalled mirror must not stall a backtest.
+const BINANCE_TIMEOUT_MS = Number(process.env.PINEFORGE_BINANCE_TIMEOUT_MS) || 20_000;
 const BINANCE_KLINES_LIMIT = 1000;
 const BINANCE_PAGE_DELAY_MS = 200;
 
@@ -462,12 +465,20 @@ function binanceExchangeInfoUrl(market: BinanceMarket): string {
 }
 
 async function binanceGet(url: string): Promise<unknown> {
-  const resp = await fetch(url, {
-    headers: { "user-agent": `pineforge-backtest-mcp/${VERSION}` },
-  });
-  const text = await resp.text();
+  const shown = redactCredentials(url);
+  let resp: Response;
+  let text: string;
+  try {
+    resp = await fetch(url, {
+      headers: { "user-agent": `pineforge-backtest-mcp/${VERSION}` },
+      signal: AbortSignal.timeout(BINANCE_TIMEOUT_MS),
+    });
+    text = await resp.text();
+  } catch (e) {
+    throw new Error(`Binance request to ${shown} failed: ${redactCredentials(e instanceof Error ? e.message : String(e))}`);
+  }
   if (!resp.ok) {
-    throw new Error(`Binance ${resp.status} for ${url}: ${text.slice(0, 500)}`);
+    throw new Error(`Binance ${resp.status} for ${shown}: ${text.slice(0, 500)}`);
   }
   try { return JSON.parse(text); }
   catch { throw new Error(`Binance non-JSON response: ${text.slice(0, 200)}`); }
@@ -632,7 +643,7 @@ async function recordInstrument(
     return { instrument, path: await writeSidecar(csvPath, instrument, feed), warnings: [] };
   } catch (e) {
     await removeSidecar(csvPath).catch(() => undefined);
-    const why = e instanceof Error ? e.message : String(e);
+    const why = redactCredentials(e instanceof Error ? e.message : String(e));
     return {
       instrument: unresolvedInstrument(why),
       path: null,
@@ -756,7 +767,7 @@ const instrumentArgs = {
   symbol: z.string().min(2).max(40).optional().describe(
     "Binance symbol the CSV holds, e.g. 'BTCUSDT'. Its lot size (LOT_SIZE.stepSize) and tick size are read " +
     "from Binance's public exchangeInfo and applied to the run, so order quantities are floored to the lot " +
-    "size; without one the engine books sub-lot margin-call rows TradingView does not. TradingView's own lot " +
+    "size; without one the engine can book sub-lot margin-call rows TradingView does not. TradingView's own lot " +
     "size is its own data and differs from Binance's for many symbols (BTCUSDT and ETHUSDT spot match; USDT-M " +
     "BTCUSDT is 0.001 on Binance, 0.000001 on TradingView): for TradingView-exact sizing pass `syminfo.qty_step`. " +
     "A CSV written by fetch_binance_ohlcv needs neither `symbol` nor `syminfo`: the instrument is recorded " +

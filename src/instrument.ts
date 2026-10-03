@@ -14,6 +14,7 @@
  * `applied_runtime.syminfo`, and carries a warning.
  */
 
+import { createHash } from "node:crypto";
 import { lstat, open, readFile, rm, writeFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { z } from "zod";
@@ -85,6 +86,11 @@ export function reasonText(text: string): string {
   return text.replace(/[^\x20-\x7e]+/g, "?").trim().slice(0, REASON_MAX) || "unknown";
 }
 
+/** Error text without the credentials of any URL in it (user:password@host). */
+export function redactCredentials(text: string): string {
+  return text.replace(/\/\/[^/@\s]*@/g, "//");
+}
+
 // ─── The `syminfo` tool argument ──────────────────────────────────────────
 
 const stepNumber = z.number().min(NUMBER_MIN).max(NUMBER_MAX);
@@ -140,16 +146,18 @@ export function instrumentFromBinance(info: BinanceSymbolInfo, market: BinanceMa
   const symbol = info.symbol.toUpperCase();
   const step = binanceNumber(filterOf(info, "LOT_SIZE")?.stepSize);
   const tick = binanceNumber(filterOf(info, "PRICE_FILTER")?.tickSize);
-  const perpetual = info.contractType === undefined || /PERPETUAL$/.test(info.contractType);
+  const perpetual = market === "usdt_perp" && /PERPETUAL/.test(info.contractType ?? "");
+  const ticker = `${symbol}${perpetual ? ".P" : ""}`;
   const out: Instrument = {
     schema: INSTRUMENT_SCHEMA,
     resolved: step !== undefined,
     ...(step === undefined ? { reason: reasonText(`Binance ${market} exchangeInfo has no usable LOT_SIZE.stepSize for ${symbol}`) } : {}),
   };
+  // TradingView names a perpetual BTCUSDT.P in both syminfo.ticker and syminfo.tickerid.
   const text = {
     type: "crypto",
-    ticker: symbol,
-    tickerid: `BINANCE:${symbol}${market === "usdt_perp" && perpetual ? ".P" : ""}`,
+    ticker,
+    tickerid: `BINANCE:${ticker}`,
     currency: info.quoteAsset,
     basecurrency: info.baseAsset,
   };
@@ -208,9 +216,9 @@ export function layerUserSyminfo(base: Instrument | undefined, user: UserSyminfo
 // ─── Warnings ─────────────────────────────────────────────────────────────
 
 /** The warning for an instrument whose lot grid is unknown (docs: "what unresolved means"). */
-export function unresolvedWarning(label: string, reason: string): string {
+export function unresolvedWarning(label: string, reason: string, detail?: string): string {
   return (
-    `instrument grid unavailable for ${label} (${reason}): order quantity is not floored to a lot size, ` +
+    `instrument grid unavailable for ${label} (${reason}${detail ? `: ${detail}` : ""}): order quantity is not floored to a lot size, ` +
     "so the run can contain sub-lot margin-call rows that TradingView does not book. " +
     "Pass `symbol` (a Binance symbol) or `syminfo` (qty_step, mintick, ...), or fetch the CSV with " +
     "fetch_binance_ohlcv, which records the instrument next to it."
@@ -281,9 +289,14 @@ export async function csvBarRange(csvPath: string): Promise<{ first: number; las
  */
 export async function writeSidecar(csvPath: string, instrument: Instrument, feed: SidecarFeed): Promise<string> {
   const path = sidecarPath(csvPath);
+  const sha256 = await sha256Of(csvPath);
   await rm(path, { force: true });
-  await writeFile(path, JSON.stringify({ ...instrument, csv: feed }, null, 2) + "\n", { encoding: "utf8", flag: "wx" });
+  await writeFile(path, JSON.stringify({ ...instrument, csv: { ...feed, sha256 } }, null, 2) + "\n", { encoding: "utf8", flag: "wx" });
   return path;
+}
+
+async function sha256Of(path: string): Promise<string> {
+  return createHash("sha256").update(await readFile(path)).digest("hex");
 }
 
 export async function removeSidecar(csvPath: string): Promise<void> {
@@ -302,6 +315,9 @@ function sanitize(raw: Record<string, unknown>): Instrument {
     const v = cleanString(raw[k]);
     if (v !== undefined) o[k] = v;
   }
+  // As for the user's values: either one is the lot size.
+  if (out.qty_step === undefined && out.mincontract !== undefined) out.qty_step = out.mincontract;
+  if (out.mincontract === undefined && out.qty_step !== undefined) out.mincontract = out.qty_step;
   out.resolved = out.qty_step !== undefined;
   if (!out.resolved) out.reason = reasonText(typeof raw.reason === "string" ? raw.reason : "the sidecar has no usable qty_step");
   const src = (typeof raw.source === "object" && raw.source !== null ? raw.source : {}) as Record<string, unknown>;
@@ -339,7 +355,7 @@ export async function readSidecar(csvPath: string): Promise<SidecarRead> {
     return { ignored: `${name} is not a ${INSTRUMENT_SCHEMA} file` };
   }
   const rec = raw as Record<string, unknown>;
-  const csv = rec.csv as Partial<SidecarFeed> | undefined;
+  const csv = rec.csv as (Partial<SidecarFeed> & { sha256?: unknown }) | undefined;
   if (csv && typeof csv === "object") {
     const range = await csvBarRange(csvPath).catch(() => undefined);
     if (!range || range.first !== csv.first_open_time || range.last !== csv.last_open_time) {
@@ -348,6 +364,9 @@ export async function readSidecar(csvPath: string): Promise<SidecarRead> {
           `${name} was written for bars ${csv.first_open_time}..${csv.last_open_time} and the CSV now holds ` +
           `${range ? `${range.first}..${range.last}` : "no readable bars"}`,
       };
+    }
+    if (typeof csv.sha256 === "string" && csv.sha256 !== (await sha256Of(csvPath).catch(() => ""))) {
+      return { ignored: `${name} was written for a different CSV (the bars' range is the same, the content differs)` };
     }
   }
   return { instrument: sanitize(rec) };
@@ -367,10 +386,10 @@ export interface Resolution {
 }
 
 /**
- * Settle the instrument of one run. `symbol` resolves from Binance's exchangeInfo
- * (`lookup`), `syminfo` is the user's own values and wins over it; with neither,
- * the sidecar next to the CSV is used. Nothing resolvable is not an error: the
- * result is an unresolved instrument and a warning.
+ * Settle the instrument of one run. The base is `symbol` resolved from Binance's
+ * exchangeInfo (`lookup`) or, without a symbol, the sidecar next to the CSV;
+ * `syminfo` is the user's own values and wins over it. Nothing resolvable is not
+ * an error: the result is an unresolved instrument and a warning.
  */
 export async function resolveInstrument(
   req: InstrumentRequest,
@@ -379,8 +398,13 @@ export async function resolveInstrument(
 ): Promise<Resolution> {
   const market = req.market ?? "spot";
   const symbol = req.symbol?.trim().toUpperCase();
+  // `syminfo: {}` says nothing.
+  const user = req.syminfo && Object.keys(req.syminfo).length > 0 ? req.syminfo : undefined;
   let base: Instrument | undefined;
   let label = basename(csvPath);
+  // What the warning adds to the short reason in the instrument. The reason is part of the
+  // fingerprint, so it is fixed text; error text, which varies, is not.
+  let detail: string | undefined;
 
   if (symbol) {
     label = `Binance ${market} ${symbol}`;
@@ -394,29 +418,40 @@ export async function resolveInstrument(
         base = unresolvedInstrument(`${symbol} is not in Binance ${market} exchangeInfo`, source);
       }
     } catch (e) {
-      base = unresolvedInstrument(`Binance ${market} exchangeInfo unavailable: ${e instanceof Error ? e.message : String(e)}`, source);
+      base = unresolvedInstrument(`Binance ${market} exchangeInfo unavailable`, source);
+      detail = reasonText(redactCredentials(e instanceof Error ? e.message : String(e)));
     }
-  } else if (!req.syminfo) {
+  } else {
+    // The CSV's own instrument; the user's values, if any, go over it.
     const read = await readSidecar(csvPath);
     if (read.instrument) {
       base = read.instrument;
       const s = base.source;
       if (s?.symbol) label = `Binance ${s.market ?? "spot"} ${s.symbol}`;
+    } else if (user) {
+      detail = read.ignored; // the user's values are the instrument; why the sidecar was not used goes in the warning
+    } else if (read.ignored) {
+      base = unresolvedInstrument("sidecar ignored");
+      detail = read.ignored;
     } else {
-      base = unresolvedInstrument(
-        read.ignored ? `sidecar ignored: ${read.ignored}` : "no symbol, syminfo or sidecar was given",
-      );
+      base = unresolvedInstrument("no symbol, syminfo or sidecar was given");
     }
   }
 
-  const instrument = req.syminfo ? layerUserSyminfo(base, req.syminfo) : base!;
+  const instrument = user ? layerUserSyminfo(base, user) : base!;
   const warnings: string[] = [];
-  if (!instrument.resolved) warnings.push(unresolvedWarning(label, instrument.reason ?? "unknown"));
+  if (!instrument.resolved) warnings.push(unresolvedWarning(label, instrument.reason ?? "unknown", detail));
   const dropped = instrument.source?.dropped;
   if (dropped?.length) {
     warnings.push(
       `instrument values dropped (not finite numbers within ${NUMBER_MIN}..${NUMBER_MAX}, or not printable ASCII): ` +
       `${dropped.join(", ")}; the engine's default applies to them`,
+    );
+  }
+  if (instrument.resolved && instrument.mintick === undefined) {
+    warnings.push(
+      "the instrument has no mintick, so the engine's default tick of 0.01 applies and rounds every fill to it " +
+      "(a price below 0.01 fills at 0): pass `syminfo.mintick`",
     );
   }
   return { instrument, warnings };

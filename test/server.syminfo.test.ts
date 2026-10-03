@@ -26,6 +26,7 @@ let reportSyminfo: "echo" | "missing" | "unapplied" = "echo";
 const realFetch = globalThis.fetch;
 const realNow = Date.now;
 let hits: string[] = [];
+let signals: Array<AbortSignal | null | undefined> = [];
 let binanceDown = false;
 let shift = 0;
 
@@ -56,9 +57,10 @@ const runner = {
 before(async () => {
   assert.notEqual(process.env.PINEFORGE_ALLOW_ANYWHERE, "1", "these cases need the cwd scope");
   dir = mkdtempSync(join(process.cwd(), "test", ".tmp-pf-syminfo-"));
-  globalThis.fetch = (async (input: string | URL | Request) => {
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     hits.push(url);
+    signals.push(init?.signal);
     if (url.includes("/exchangeInfo")) {
       if (binanceDown) return new Response("Service unavailable from a restricted location", { status: 451 });
       return new Response(JSON.stringify(url.includes("fapi") ? FAPI_INFO : SPOT_INFO));
@@ -82,6 +84,7 @@ after(async () => {
 beforeEach(() => {
   calls.length = 0;
   hits = [];
+  signals = [];
   binanceDown = false;
   bigReport = false;
   reportSyminfo = "echo";
@@ -155,7 +158,14 @@ test("symbol with market usdt_perp reads the USD-M exchangeInfo", async () => {
   assert.equal(r.isError, false, r.text);
   const inst = calls[0]!.instrument!;
   assert.deepEqual([inst.qty_step, inst.mintick, inst.tickerid], [0.001, 0.1, "BINANCE:BTCUSDT.P"]);
-  assert.ok(hits.some((u) => u.startsWith("https://fapi.binance.com/fapi/v1/exchangeInfo")));
+  assert.ok(hits.some((u) => u.includes("/fapi/v1/exchangeInfo")));
+});
+
+test("every request to Binance has a timeout, so a stalled mirror cannot stall a backtest", async () => {
+  const r = await backtest({ symbol: "BTCUSDT" });
+  assert.equal(r.isError, false, r.text);
+  assert.equal(signals.length, 1);
+  assert.ok(signals[0] instanceof AbortSignal, "fetch got no abort signal");
 });
 
 test("syminfo alone: the user's values, no Binance call, resolved", async () => {
@@ -193,8 +203,8 @@ test("Binance unreachable: still runs, unresolved, the reason and a warning", as
   const r = await backtest({ symbol: "BTCUSDT" });
   assert.equal(r.isError, false, r.text);
   assert.equal(calls[0]!.instrument!.resolved, false);
-  assert.match(calls[0]!.instrument!.reason!, /^Binance spot exchangeInfo unavailable: Binance 451/);
-  assert.match(r.data.warnings[0], /^instrument grid unavailable for Binance spot BTCUSDT \(Binance spot exchangeInfo unavailable/);
+  assert.equal(calls[0]!.instrument!.reason, "Binance spot exchangeInfo unavailable");
+  assert.match(r.data.warnings[0], /^instrument grid unavailable for Binance spot BTCUSDT \(Binance spot exchangeInfo unavailable: Binance 451/);
 });
 
 test("a symbol Binance does not list: still runs, unresolved", async () => {
@@ -253,7 +263,8 @@ test("fetch_binance_ohlcv records the instrument next to the CSV and says so", a
   assert.equal(inst.source.kind, "binance_exchange_info");
   assert.match(inst.source.fetched_at, /^\d{4}-\d\d-\d\dT/);
   const onDisk = JSON.parse(readFileSync(sidecarPath(out), "utf8"));
-  assert.deepEqual(onDisk, { ...inst, csv: { interval: "4h", first_open_time: 1000, last_open_time: 3000, bars: 3 } });
+  assert.match(onDisk.csv.sha256, /^[0-9a-f]{64}$/);
+  assert.deepEqual(onDisk, { ...inst, csv: { interval: "4h", first_open_time: 1000, last_open_time: 3000, bars: 3, sha256: onDisk.csv.sha256 } });
 });
 
 test("backtest_pine finds the sidecar of a fetched CSV: no symbol, no lookup, no warning", async () => {
@@ -277,7 +288,8 @@ test("a sidecar the CSV no longer matches is ignored, and says why", async () =>
   const r = await call("backtest_pine", { source: PINE, ohlcv_csv_path: out });
   assert.equal(r.isError, false, r.text);
   assert.equal(calls[0]!.instrument!.resolved, false);
-  assert.match(calls[0]!.instrument!.reason!, /^sidecar ignored: stale-4h\.csv\.instrument\.json was written for bars 1000\.\.3000 and the CSV now holds 5000\.\.6000/);
+  assert.equal(calls[0]!.instrument!.reason, "sidecar ignored");
+  assert.match(r.data.warnings[0], /\(sidecar ignored: stale-4h\.csv\.instrument\.json was written for bars 1000\.\.3000 and the CSV now holds 5000\.\.6000\)/);
 });
 
 test("usdt_perp fetch records the USD-M instrument", async () => {
