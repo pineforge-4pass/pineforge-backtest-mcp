@@ -14,7 +14,7 @@
  * `applied_runtime.syminfo`, and carries a warning.
  */
 
-import { open, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, open, readFile, rm, writeFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { z } from "zod";
 
@@ -249,10 +249,16 @@ export async function csvBarRange(csvPath: string): Promise<{ first: number; las
   }
 }
 
-/** Write the sidecar of `csvPath`: the instrument, plus the bar range it was fetched for. */
+/**
+ * Write the sidecar of `csvPath`: the instrument, plus the bar range it was fetched for.
+ * The CSV's path was scoped by the caller; the sidecar sits beside it, so what is already
+ * at its name is removed first (a symbolic link itself, never its target) and the file is
+ * created exclusively: nothing is ever written through a link.
+ */
 export async function writeSidecar(csvPath: string, instrument: Instrument, feed: SidecarFeed): Promise<string> {
   const path = sidecarPath(csvPath);
-  await writeFile(path, JSON.stringify({ ...instrument, csv: feed }, null, 2) + "\n", "utf8");
+  await rm(path, { force: true });
+  await writeFile(path, JSON.stringify({ ...instrument, csv: feed }, null, 2) + "\n", { encoding: "utf8", flag: "wx" });
   return path;
 }
 
@@ -295,7 +301,7 @@ export interface SidecarRead {
 /** The instrument recorded next to `csvPath`, if there is one and the CSV does not contradict it. */
 export async function readSidecar(csvPath: string): Promise<SidecarRead> {
   const path = sidecarPath(csvPath);
-  const st = await stat(path).catch(() => null);
+  const st = await lstat(path).catch(() => null);
   if (!st) return {};
   const name = basename(path);
   if (!st.isFile() || st.size > SIDECAR_MAX_BYTES) return { ignored: `${name} is not a small regular file` };

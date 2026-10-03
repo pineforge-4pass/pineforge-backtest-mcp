@@ -3,7 +3,7 @@
 // CSV, resolution and its warnings.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   INSTRUMENT_SCHEMA,
@@ -271,6 +271,33 @@ test("a sidecar that is not ours is ignored with a reason", async () => {
     assert.equal(read.instrument, undefined);
     assert.match(read.ignored!, why);
   }
+});
+
+test("writeSidecar never writes through a symbolic link already at its name", async () => {
+  const path = csv();
+  const target = join(tmp, `precious-${n}.txt`);
+  writeFileSync(target, "keep me");
+  symlinkSync(target, sidecarPath(path));
+  await writeSidecar(path, instrumentFromBinance(spot("BTCUSDT"), "spot"), FEED);
+  assert.equal(readFileSync(target, "utf8"), "keep me");
+  assert.equal(lstatSync(sidecarPath(path)).isSymbolicLink(), false);
+  assert.equal(JSON.parse(readFileSync(sidecarPath(path), "utf8")).schema, INSTRUMENT_SCHEMA);
+  // a dangling link, too
+  const other = csv();
+  const nowhere = join(tmp, `nowhere-${n}.json`);
+  symlinkSync(nowhere, sidecarPath(other));
+  await writeSidecar(other, instrumentFromBinance(spot("BTCUSDT"), "spot"), FEED);
+  assert.equal(existsSync(nowhere), false);
+});
+
+test("a symbolic-link sidecar is ignored, not read", async () => {
+  const path = csv();
+  const real = join(tmp, `real-sidecar-${n}.json`);
+  writeFileSync(real, JSON.stringify({ schema: INSTRUMENT_SCHEMA, qty_step: 1 }));
+  symlinkSync(real, sidecarPath(path));
+  const read = await readSidecar(path);
+  assert.equal(read.instrument, undefined);
+  assert.match(read.ignored!, /not a small regular file/);
 });
 
 test("removeSidecar deletes it and tolerates its absence", async () => {
