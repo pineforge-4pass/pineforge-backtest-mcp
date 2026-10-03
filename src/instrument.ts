@@ -217,6 +217,30 @@ export function unresolvedWarning(label: string, reason: string): string {
   );
 }
 
+/**
+ * What the engine says it applied against what was asked for. An image whose
+ * entrypoint ignores the instrument, or a library without the setters, must not
+ * leave the result claiming a lot grid that was never set.
+ */
+export function appliedWarnings(asked: Instrument, report: unknown): string[] {
+  const runtime = (report as { applied_runtime?: { syminfo?: unknown } } | null)?.applied_runtime;
+  const applied = runtime?.syminfo as { resolved?: unknown; reason?: unknown; skipped?: unknown } | undefined;
+  if (typeof applied !== "object" || applied === null) {
+    return [
+      "the engine did not report the instrument it applied (applied_runtime.syminfo is missing): " +
+      "its image may be too old to take one, so the lot grid was probably not applied",
+    ];
+  }
+  const out: string[] = [];
+  if (asked.resolved && applied.resolved !== true) {
+    out.push(`the engine did not apply the instrument's lot grid (${typeof applied.reason === "string" ? applied.reason : "no reason given"})`);
+  }
+  if (Array.isArray(applied.skipped) && applied.skipped.length > 0) {
+    out.push(`the engine library could not set ${applied.skipped.filter((k) => typeof k === "string").join(", ")} from the instrument`);
+  }
+  return out;
+}
+
 // ─── The sidecar next to a fetched CSV ────────────────────────────────────
 
 export function sidecarPath(csvPath: string): string {

@@ -25,6 +25,7 @@ import {
 } from "./engine.js";
 import {
   SyminfoArgSchema,
+  appliedWarnings,
   instrumentFromBinance,
   removeSidecar,
   resolveInstrument,
@@ -135,7 +136,8 @@ async function writeReportFile(value: unknown, explicitPath: string | undefined,
 async function runBacktest(runner: EngineRunner, args: BacktestArgs): Promise<unknown> {
   const csvPath = await resolveCsvPath(args.ohlcv_csv_path);
   const image = args.image ?? DEFAULT_IMAGE;
-  const { instrument, warnings } = await resolveInstrument(args, csvPath, lookupBinanceSymbol);
+  const resolution = await resolveInstrument(args, csvPath, lookupBinanceSymbol);
+  const instrument = resolution.instrument;
   const cpp = await runner.transpile(args.source, args.image);
 
   const tmp = await mkdtemp(join(tmpdir(), "pineforge-bt-"));
@@ -152,6 +154,7 @@ async function runBacktest(runner: EngineRunner, args: BacktestArgs): Promise<un
       runtime: args.runtime,
       instrument,
     });
+    const warnings = [...resolution.warnings, ...appliedWarnings(instrument, report)];
     const full = {
       ...(warnings.length ? { warnings } : {}),
       ...(report as object),
@@ -210,7 +213,9 @@ async function runBacktestGrid(runner: EngineRunner, args: BacktestGridArgs): Pr
     );
   }
 
-  const { instrument, warnings } = await resolveInstrument(args, csvPath, lookupBinanceSymbol);
+  const resolution = await resolveInstrument(args, csvPath, lookupBinanceSymbol);
+  const instrument = resolution.instrument;
+  const engineWarnings = new Set<string>();
   const cpp = await runner.transpile(args.source, args.image);
   const tmp = await mkdtemp(join(tmpdir(), "pineforge-grid-"));
   const cppPath = join(tmp, "strategy.cpp");
@@ -241,6 +246,7 @@ async function runBacktestGrid(runner: EngineRunner, args: BacktestGridArgs): Pr
             instrument,
           }) as { summary?: Record<string, unknown>; applied_inputs?: unknown;
                   applied_overrides?: unknown; elapsed_seconds?: number; trades?: unknown[] };
+          for (const w of appliedWarnings(instrument, report)) engineWarnings.add(w);
           return {
             ok: true,
             inputs: combo.inputs,
@@ -264,6 +270,7 @@ async function runBacktestGrid(runner: EngineRunner, args: BacktestGridArgs): Pr
 
     const succeeded = rows.filter(r => r.ok);
     const failed = rows.filter(r => !r.ok);
+    const warnings = [...resolution.warnings, ...engineWarnings];
 
     const sortValue = (r: Row): number => {
       if (!r.ok || !r.summary) return -Infinity;
@@ -747,9 +754,11 @@ const IntervalSchema = z.enum(BINANCE_INTERVALS);
 // The instrument of a backtest (shared by backtest_pine and backtest_pine_grid).
 const instrumentArgs = {
   symbol: z.string().min(2).max(40).optional().describe(
-    "Binance symbol the CSV holds, e.g. 'BTCUSDT'. Its lot size and tick size are read from Binance's " +
-    "public exchangeInfo and applied to the run, so order quantities are floored to the lot grid as on " +
-    "TradingView; without one the engine books sub-lot margin-call rows TradingView does not. " +
+    "Binance symbol the CSV holds, e.g. 'BTCUSDT'. Its lot size (LOT_SIZE.stepSize) and tick size are read " +
+    "from Binance's public exchangeInfo and applied to the run, so order quantities are floored to the lot " +
+    "size; without one the engine books sub-lot margin-call rows TradingView does not. TradingView's own lot " +
+    "size is its own data and differs from Binance's for many symbols (BTCUSDT and ETHUSDT spot match; USDT-M " +
+    "BTCUSDT is 0.001 on Binance, 0.000001 on TradingView): for TradingView-exact sizing pass `syminfo.qty_step`. " +
     "A CSV written by fetch_binance_ohlcv needs neither `symbol` nor `syminfo`: the instrument is recorded " +
     "next to it (<csv>.instrument.json) and used. If Binance cannot be reached or does not list the symbol, " +
     "the run still goes ahead without a lot grid and says so in `warnings` and applied_runtime.syminfo."

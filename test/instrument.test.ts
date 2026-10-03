@@ -8,6 +8,7 @@ import { join } from "node:path";
 import {
   INSTRUMENT_SCHEMA,
   SyminfoArgSchema,
+  appliedWarnings,
   cleanNumber,
   cleanString,
   csvBarRange,
@@ -423,4 +424,33 @@ test("reasons are printable ASCII of at most 200 characters", () => {
   const got = unresolvedInstrument("café " + "x".repeat(300));
   assert.equal(got.reason!.length, 200);
   assert.match(got.reason!, /^caf\? /);
+});
+
+// ─── what the engine says it applied ──────────────────────────────────────
+
+test("appliedWarnings: silent when the engine applied what was asked", () => {
+  const asked = instrumentFromBinance(spot("BTCUSDT"), "spot");
+  assert.deepEqual(appliedWarnings(asked, { applied_runtime: { syminfo: { resolved: true, qty_step: 0.00001 } } }), []);
+  // an unresolved instrument was asked for and is reported as such: nothing more to say
+  assert.deepEqual(appliedWarnings(unresolvedInstrument("x"), { applied_runtime: { syminfo: { resolved: false } } }), []);
+});
+
+test("appliedWarnings: an image that reports no instrument is named", () => {
+  const asked = instrumentFromBinance(spot("BTCUSDT"), "spot");
+  for (const report of [{}, { applied_runtime: {} }, { applied_runtime: { syminfo: null } }, null, "x"]) {
+    const w = appliedWarnings(asked, report);
+    assert.equal(w.length, 1, JSON.stringify(report));
+    assert.match(w[0]!, /did not report the instrument it applied.*too old.*lot grid was probably not applied/);
+  }
+});
+
+test("appliedWarnings: a resolved instrument the engine did not apply, and what it could not set", () => {
+  const asked = instrumentFromBinance(spot("BTCUSDT"), "spot");
+  const refused = appliedWarnings(asked, { applied_runtime: { syminfo: { resolved: false, reason: "the engine library cannot set the lot grid", skipped: ["qty_step", "mincontract"] } } });
+  assert.deepEqual(refused, [
+    "the engine did not apply the instrument's lot grid (the engine library cannot set the lot grid)",
+    "the engine library could not set qty_step, mincontract from the instrument",
+  ]);
+  const partial = appliedWarnings(asked, { applied_runtime: { syminfo: { resolved: true, skipped: ["ticker"] } } });
+  assert.deepEqual(partial, ["the engine library could not set ticker from the instrument"]);
 });

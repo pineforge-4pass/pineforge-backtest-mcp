@@ -276,13 +276,18 @@ with the engine's defaults (no lot grid, tick 0.01), `applied_runtime.syminfo` r
 so the run can contain sub-lot margin-call rows that TradingView does not book`).
 A run is never refused for want of an instrument.
 
-TradingView's own `syminfo.mincontract` is TradingView's data, not a Binance field:
-it equals the lot size above for BTCUSDT and ETHUSDT spot but differs for many
-symbols (for example DOGEUSDT, XRPUSDT, and most USD-M perpetuals, where TradingView
-reports a finer or coarser step than Binance's `LOT_SIZE.stepSize`). The tick size
-matched TradingView's `syminfo.mintick` on every symbol sampled. To use TradingView's
-lot size for a symbol, read `syminfo.mincontract` off its chart and pass it as
-`syminfo.qty_step`.
+**Binance's lot size is not always TradingView's.** TradingView's `syminfo.mincontract`
+is TradingView's own data, not a Binance field. In a sample of ten Binance symbols it
+equalled `LOT_SIZE.stepSize` for BTCUSDT and ETHUSDT spot only: TradingView's step was
+finer for DOGEUSDT and SHIBUSDT spot (0.001 against 1) and coarser for XRPUSDT spot (1
+against 0.1), and finer for all five USD-M perpetuals sampled (BTCUSDT 0.000001
+against 0.001, ETHUSDT 0.0001 against 0.001, DOGEUSDT, 1000PEPEUSDT and ALLUSDT 0.001
+against 1). With `symbol` the engine floors to Binance's step, so under percent-of-equity
+sizing a position can differ from TradingView's by up to one Binance lot (0.001 BTC for
+BTCUSDT USDT-M). The tick size matched TradingView's `syminfo.mintick` on all ten. To
+match TradingView's sizing, read `syminfo.mincontract` off its chart and pass it:
+`"syminfo": { "qty_step": 0.000001 }` (with `symbol` for the rest; the lot size then
+comes from `syminfo`).
 
 Returns the standalone `pineforge-release` image's report JSON (`engine`, `input`,
 `summary`, `trades`, `metrics`, `equity_curve`, `fingerprint`, `applied_inputs`,

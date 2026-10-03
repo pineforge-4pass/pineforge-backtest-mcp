@@ -22,6 +22,7 @@ let dir: string;
 let client: Client;
 const calls: BacktestCall[] = [];
 let bigReport = false;
+let reportSyminfo: "echo" | "missing" | "unapplied" = "echo";
 const realFetch = globalThis.fetch;
 const realNow = Date.now;
 let hits: string[] = [];
@@ -37,7 +38,11 @@ const runner = {
     return {
       engine: "pineforge",
       applied_inputs: {}, applied_overrides: {},
-      applied_runtime: { input_tf: "", syminfo: call.instrument },
+      applied_runtime: {
+        input_tf: "",
+        ...(reportSyminfo === "echo" ? { syminfo: call.instrument }
+          : reportSyminfo === "unapplied" ? { syminfo: { schema: INSTRUMENT_SCHEMA, resolved: false, reason: "no instrument was supplied" } } : {}),
+      },
       elapsed_seconds: 0.1,
       summary: { total_trades: 1, net_pnl: 1 },
       trades: bigReport ? Array.from({ length: 4000 }, (_, i) => ({ n: i, side: "long", entry_price: 1, exit_price: 2 })) : [{ n: 1 }],
@@ -79,6 +84,7 @@ beforeEach(() => {
   hits = [];
   binanceDown = false;
   bigReport = false;
+  reportSyminfo = "echo";
   // exchangeInfo is cached for 5 minutes in process: step past it so each case starts cold
   shift += 6 * 60_000;
   Date.now = () => realNow() + shift;
@@ -206,6 +212,28 @@ test("a report too large to return inline still states the instrument and the wa
   assert.equal(r.data.applied_runtime.syminfo.resolved, false);
   assert.equal(r.data.warnings.length, 1);
   assert.equal(JSON.parse(readFileSync(join(dir, "big-report.json"), "utf8")).applied_runtime.syminfo.resolved, false);
+});
+
+test("an engine image that does not report or apply the instrument is named in the result", async () => {
+  reportSyminfo = "missing";
+  const missing = await backtest({ symbol: "BTCUSDT" });
+  assert.equal(missing.isError, false, missing.text);
+  assert.equal(missing.data.warnings.length, 1);
+  assert.match(missing.data.warnings[0], /did not report the instrument it applied/);
+  reportSyminfo = "unapplied";
+  const unapplied = await backtest({ symbol: "BTCUSDT" });
+  assert.equal(unapplied.data.warnings.length, 1);
+  assert.match(unapplied.data.warnings[0], /did not apply the instrument's lot grid \(no instrument was supplied\)/);
+});
+
+test("the grid names an engine that did not apply the instrument once, not once per combination", async () => {
+  reportSyminfo = "unapplied";
+  const r = await call("backtest_pine_grid", {
+    source: PINE, ohlcv_csv_path: bars(), symbol: "BTCUSDT", overrides: { commission_value: [0.04, 0.1, 0.2] },
+  });
+  assert.equal(r.isError, false, r.text);
+  assert.equal(calls.length, 3);
+  assert.equal(r.data.warnings.length, 1);
 });
 
 // ─── fetch_binance_ohlcv and its sidecar ──────────────────────────────────
