@@ -49,6 +49,10 @@ RUN chown -R 10001 /app
 # harness and grader), copied after the chown so it stays root-owned and
 # read-only to the runtime user.
 COPY --from=mcp /app/parity ./parity
+# The instrument shim: the in-process runner copies it into a per-run overlay of
+# the engine prefix (src/overlay.ts), where it applies the lot grid and tick size
+# through the engine's C ABI. Root-owned and read-only to the runtime user.
+COPY --from=mcp /app/docker/pf_run_json.py ./docker/pf_run_json.py
 ENV PINEFORGE_PREFIX=/opt/pineforge \
     PINEFORGE_ALLOW_ANYWHERE=1 \
     PINEFORGE_VERSION=${PINEFORGE_RELEASE_VERSION}

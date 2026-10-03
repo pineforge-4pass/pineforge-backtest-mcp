@@ -10,8 +10,10 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, writeFile, rm, readFile, readdir, readlink, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Instrument } from "./instrument.js";
+import { IMAGE_LAYOUT, IMAGE_PREFIX, OVERLAY_MOUNT, createOverlay, layoutOf, overlayEnv } from "./overlay.js";
 
 // ─── Config ───────────────────────────────────────────────────────────────
 
@@ -214,14 +216,22 @@ export function stringifyParams(p?: ParamMap): Record<string, string> {
 
 interface DockerResult { stdout: string; stderr: string; code: number; }
 
-export async function dockerBacktest(args: {
+export interface DockerBacktestArgs {
   image: string;
   cppPath: string;
   csvPath: string;
   inputs?: ParamMap | Record<string, string>;
   overrides?: ParamMap | Record<string, string>;
   runtime?: RuntimeArgsLike;
-}): Promise<unknown> {
+  instrument?: Instrument;
+}
+
+/**
+ * The `docker run` arguments of one backtest. `overlayDir` is the instrument's
+ * prefix overlay on the host (see overlay.ts): mounted read-only, with the
+ * entrypoint pointed at it.
+ */
+export function dockerBacktestArgs(args: DockerBacktestArgs, overlayDir?: string): string[] {
   const dockerArgs: string[] = [
     "run", "--rm",
     "--network=none",
@@ -250,26 +260,38 @@ export async function dockerBacktest(args: {
   if (r.magnifier_dist !== undefined) {
     dockerArgs.push("-e", `PINEFORGE_MAGNIFIER_DIST=${r.magnifier_dist}`);
   }
+  if (overlayDir) {
+    dockerArgs.push("-v", `${overlayDir}:${OVERLAY_MOUNT}:ro`);
+    for (const [k, v] of Object.entries(overlayEnv(OVERLAY_MOUNT, IMAGE_PREFIX))) dockerArgs.push("-e", `${k}=${v}`);
+  }
   dockerArgs.push(
     "-v", `${args.cppPath}:/in/strategy.cpp:ro`,
     "-v", `${args.csvPath}:/in/ohlcv.csv:ro`,
     args.image,
   );
+  return dockerArgs;
+}
 
-  const child = spawn("docker", dockerArgs, { stdio: ["ignore", "pipe", "pipe"] });
-  const { stdout, stderr, code } = await collectChild(child, DOCKER_TIMEOUT_MS);
-  if (code !== 0) {
-    throw new Error(
-      `docker exited ${code}\n` +
-      `stderr (last 2KB):\n${stderr.slice(-2048)}`
-    );
-  }
+export async function dockerBacktest(args: DockerBacktestArgs): Promise<unknown> {
+  const overlay = args.instrument ? await createOverlay(args.instrument, IMAGE_PREFIX, IMAGE_LAYOUT) : undefined;
   try {
-    return JSON.parse(stdout);
-  } catch {
-    throw new Error(
-      `backtest produced non-JSON output (first 500B):\n${stdout.slice(0, 500)}`
-    );
+    const child = spawn("docker", dockerBacktestArgs(args, overlay?.dir), { stdio: ["ignore", "pipe", "pipe"] });
+    const { stdout, stderr, code } = await collectChild(child, DOCKER_TIMEOUT_MS);
+    if (code !== 0) {
+      throw new Error(
+        `docker exited ${code}\n` +
+        `stderr (last 2KB):\n${stderr.slice(-2048)}`
+      );
+    }
+    try {
+      return JSON.parse(stdout);
+    } catch {
+      throw new Error(
+        `backtest produced non-JSON output (first 500B):\n${stdout.slice(0, 500)}`
+      );
+    }
+  } finally {
+    await overlay?.cleanup().catch(() => undefined);
   }
 }
 
@@ -308,6 +330,8 @@ export interface BacktestCall {
   inputs?: ParamMap;
   overrides?: ParamMap;
   runtime?: RuntimeArgsLike;
+  /** The instrument's grid, applied before the run (src/instrument.ts); omitted: the engine's own defaults. */
+  instrument?: Instrument;
 }
 
 export interface ParityCall {
@@ -437,16 +461,24 @@ export class LocalRunner implements EngineRunner {
 
   async backtest(call: BacktestCall): Promise<unknown> {
     const dir = await mkdtemp(join(tmpdir(), "pineforge-lr-bt-"));
+    let overlay: Awaited<ReturnType<typeof createOverlay>> | undefined;
     try {
       const cpp = await readFile(call.cppPath, "utf8");
       await writeFile(join(dir, "strategy.cpp"), cpp, "utf8");
       const csv = await readFile(call.csvPath, "utf8");
       await writeFile(join(dir, "ohlcv.csv"), csv, "utf8");
-      const out = await this.run(dir, engineEnv(call));
+      const env = engineEnv(call);
+      if (call.instrument) {
+        const real = resolve(this.prefix);
+        overlay = await createOverlay(call.instrument, real, await layoutOf(real));
+        Object.assign(env, overlayEnv(overlay.dir, real));
+      }
+      const out = await this.run(dir, env);
       try { return JSON.parse(out); }
       catch { throw new Error(`backtest produced non-JSON output (first 500B):\n${out.slice(0, 500)}`); }
     } finally {
       rm(dir, { recursive: true, force: true }).catch(() => undefined);
+      await overlay?.cleanup().catch(() => undefined);
     }
   }
 

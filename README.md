@@ -42,8 +42,8 @@ report too large to return is written to a file), `fetch_binance_ohlcv` (writes
 its CSV) and the two image tools; in the npm package also `transpile_pine`, since
 there it and the backtests take an `image` that Docker pulls when missing.
 Destructive: the tools that write a file at a path you name, since they replace a
-file already there. Open-world: the tools that reach Binance's public API or an
-image registry.
+file already there. Open-world: the tools that reach Binance's public API (the two
+backtests do when you pass a `symbol`) or an image registry.
 
 ## Install
 
@@ -196,6 +196,11 @@ the engine accepts before composing a `backtest_pine` request.
   "source": "//@version=6\nstrategy(\"sma cross\")\n...",
   "ohlcv_csv_path": "/work/btcusdt_15m_7d.csv",
 
+  // Optional: the instrument of the CSV (see "The instrument" below). Either a
+  // Binance symbol, or your own values; a CSV from fetch_binance_ohlcv needs neither.
+  "symbol":  "BTCUSDT",            // + "market": "spot" (default) | "usdt_perp"
+  "syminfo": { "qty_step": 0.00001, "mintick": 0.01 },   // wins over what `symbol` resolves
+
   // Optional: override Pine input.*() values without touching the source.
   // Keys = the second arg of input.*(...) (e.g. "Fast Length").
   "inputs":    { "Fast Length": 8, "Slow Length": 21 },
@@ -239,6 +244,46 @@ the engine accepts before composing a `backtest_pine` request.
 unset → defaults from `strategy.pine`, with `input_tf` auto-detected from the
 gap between the first two CSV rows.
 
+### The instrument
+
+The engine runs a strategy on the instrument's lot size (`qty_step`) and tick size
+(`mintick`). Without a lot size an order of 100% of equity can overshoot margin by a
+hair, and the engine books a tiny sub-lot margin-call row (for example 2.6e-08 BTC,
+entry equal to exit) that TradingView does not book. So `backtest_pine` (and
+`backtest_pine_grid`) applies the instrument to the engine before the run, through
+its C ABI: `qty_step` and `mincontract` (the lot size), `mintick`, `pointvalue`,
+`type`, `ticker`, `tickerid`, `currency`, `basecurrency`. Timezone and session are
+not applied (the engine's defaults: UTC, 24x7). Where it comes from, first match:
+
+1. `symbol` (+ `market`): read from Binance's public exchangeInfo, one request cached
+   for 5 minutes: the lot size is the symbol's `LOT_SIZE.stepSize`, the tick is its
+   `PRICE_FILTER.tickSize`, the point value is 1.
+2. `syminfo`: your own values, for a CSV of any other instrument. They win over what
+   `symbol` resolves, and with no `symbol` they are the whole instrument. Give
+   `qty_step` (or `mincontract`; each defaults to the other).
+3. With neither, the sidecar `<csv path>.instrument.json` that `fetch_binance_ohlcv`
+   writes next to every CSV it fetches (its `instrument` result shows it). It is
+   ignored, with the reason in the result, if the CSV's first and last bar are no
+   longer the ones it was written for.
+
+What was applied is in the report's `applied_runtime.syminfo` and so in
+`fingerprint.provenance.runtime`: a gridless and a gridded run never share a
+fingerprint. **Unresolved** means no lot size was found (no `symbol`, `syminfo` or
+sidecar, Binance unreachable, or a symbol it does not list): the run still goes ahead
+with the engine's defaults (no lot grid, tick 0.01), `applied_runtime.syminfo` reads
+`{"resolved": false, "reason": ...}` and the result starts with a `warnings` entry
+(`instrument grid unavailable for ... : order quantity is not floored to a lot size,
+so the run can contain sub-lot margin-call rows that TradingView does not book`).
+A run is never refused for want of an instrument.
+
+TradingView's own `syminfo.mincontract` is TradingView's data, not a Binance field:
+it equals the lot size above for BTCUSDT and ETHUSDT spot but differs for many
+symbols (for example DOGEUSDT, XRPUSDT, and most USD-M perpetuals, where TradingView
+reports a finer or coarser step than Binance's `LOT_SIZE.stepSize`). The tick size
+matched TradingView's `syminfo.mintick` on every symbol sampled. To use TradingView's
+lot size for a symbol, read `syminfo.mincontract` off its chart and pass it as
+`syminfo.qty_step`.
+
 Returns the standalone `pineforge-release` image's report JSON (`engine`, `input`,
 `summary`, `trades`, `metrics`, `equity_curve`, `fingerprint`, `applied_inputs`,
 `applied_overrides`, `applied_runtime`, `diagnostics`, `elapsed_seconds`) plus a
@@ -250,6 +295,7 @@ Returns the standalone `pineforge-release` image's report JSON (`engine`, `input
   "summary": { "total_trades": 49, "net_pnl": -190.85, ... },
   "applied_inputs":    { "Fast Length": "8", "Slow Length": "21" },
   "applied_overrides": { "default_qty_value": "5" },
+  "applied_runtime":   { "input_tf": "15", ..., "syminfo": { "resolved": true, "qty_step": 0.00001, ... } },
   "trades": [ ... ],
   "equity_curve": [ ... ],
   "elapsed_seconds": 0.0042,
@@ -263,7 +309,7 @@ in the server's working directory — and the tool returns a compact result inst
 
 ```jsonc
 {
-  "summary": { ... }, "applied_inputs": { ... }, "applied_overrides": { ... },
+  "summary": { ... }, "applied_inputs": { ... }, "applied_overrides": { ... }, "applied_runtime": { ... },
   "elapsed_seconds": 0.0008, "total_trades": 73,
   "report_path": "...", "report_path_in_container": "/work/report.json",
   "truncated": true, "note": "...", "_meta": { ... }
@@ -468,6 +514,12 @@ directory unless `PINEFORGE_ALLOW_ANYWHERE=1`.
 }
 ```
 
+It also writes `<output_path>.instrument.json`: the symbol's lot size and tick size
+from Binance's public exchangeInfo, which `backtest_pine` picks up (see [The
+instrument](#the-instrument)); the result's `instrument` and `instrument_path` show
+it. If exchangeInfo cannot be read the CSV is still written, `instrument` says why and
+a `warnings` entry says what to pass to `backtest_pine`.
+
 ## `binance_symbols` — discover / validate symbols
 
 Returns the list of symbols available on the Binance public API for OHLCV
@@ -539,6 +591,7 @@ sandbox), so any path is accepted there — use absolute `/work/...` paths.
 | `PINEFORGE_DOCKER_TIMEOUT_MS`   | `120000` | Hard kill for each engine run and for `docker pull` |
 | `PINEFORGE_MAX_INLINE_BYTES`    | `200000` | Largest report returned inline; bigger ones are written to `report_path` |
 | `PINEFORGE_PARITY_TIMEOUT_MS`   | `600000` | Time limit of one `check_tradingview_parity` run (transpile, compile, backtest, grading) |
+| `PINEFORGE_BINANCE_SPOT_URL` / `PINEFORGE_BINANCE_FAPI_URL` | `https://api.binance.com` / `https://fapi.binance.com` | Base URLs of Binance's spot and USD-M public APIs (klines, exchangeInfo): a mirror or proxy where api.binance.com is not reachable |
 | `PINEFORGE_HOST_WORKDIR`        | unset | Docker: the host dir mounted at `/work`; when set, `report_path` is an absolute host path — correct only when the server runs with `/work` as its working directory (see the end of [`backtest_pine` example](#backtest_pine-example)) |
 
 With Docker, pass these as `-e NAME=value`.

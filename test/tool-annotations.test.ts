@@ -20,20 +20,22 @@ const SHARED: Record<string, [string, boolean, boolean, boolean, boolean]> = {
   get_coverage_topic: ["Get a Pine coverage topic", true, false, true, false],
   check_pine_feature: ["Check a Pine feature", true, false, true, false],
 };
-// Docker mode: transpile_pine and the backtests take an `image`, which docker run
-// pulls from its registry when missing (not read-only, open-world).
-const DOCKER_ONLY: typeof SHARED = {
-  transpile_pine: ["Transpile Pine to C++", false, false, true, true],
+// The backtests are open-world in both modes: their `symbol` is looked up in Binance's
+// public exchangeInfo.
+const BACKTESTS: typeof SHARED = {
   backtest_pine: ["Backtest a Pine strategy", false, true, false, true],
   backtest_pine_grid: ["Sweep strategy parameters", false, true, false, true],
+};
+// Docker mode: transpile_pine takes an `image`, which docker run pulls from its
+// registry when missing (not read-only, open-world).
+const DOCKER_ONLY: typeof SHARED = {
+  transpile_pine: ["Transpile Pine to C++", false, false, true, true],
   pull_engine_image: ["Pull the engine image", false, false, true, true],
   check_engine_image: ["Check the engine image", false, false, true, true],
 };
 // In-process: the image is baked in and `image` is ignored.
 const LOCAL_ONLY: typeof SHARED = {
   transpile_pine: ["Transpile Pine to C++", true, false, true, false],
-  backtest_pine: ["Backtest a Pine strategy", false, true, false, false],
-  backtest_pine_grid: ["Sweep strategy parameters", false, true, false, false],
   engine_info: ["Get engine info", true, false, true, false],
 };
 
@@ -53,7 +55,7 @@ async function listTools(mode: "docker" | "local") {
 
 for (const [mode, extra] of [["docker", DOCKER_ONLY], ["local", LOCAL_ONLY]] as const) {
   test(`tools/list (${mode} mode): every tool has its title and all four annotation hints`, async () => {
-    const want = { ...SHARED, ...extra };
+    const want = { ...SHARED, ...BACKTESTS, ...extra };
     const tools = await listTools(mode);
     assert.deepEqual(tools.map((t) => t.name).sort(), Object.keys(want).sort());
     for (const t of tools) {

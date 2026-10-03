@@ -1,0 +1,352 @@
+{
+  "_recorded": "api.binance.com /api/v3/exchangeInfo?symbols=[BTCUSDT,ETHUSDT,DOGEUSDT,SHIBUSDT,XRPUSDT], 2026-10-04, symbols trimmed to the keys the MCP reads",
+  "timezone": "UTC",
+  "serverTime": 1791052587669,
+  "symbols": [
+    {
+      "symbol": "BTCUSDT",
+      "status": "TRADING",
+      "baseAsset": "BTC",
+      "quoteAsset": "USDT",
+      "filters": [
+        {
+          "filterType": "PRICE_FILTER",
+          "minPrice": "0.01000000",
+          "maxPrice": "1000000.00000000",
+          "tickSize": "0.01000000"
+        },
+        {
+          "filterType": "LOT_SIZE",
+          "minQty": "0.00001000",
+          "maxQty": "9000.00000000",
+          "stepSize": "0.00001000"
+        },
+        {
+          "filterType": "ICEBERG_PARTS",
+          "limit": 100
+        },
+        {
+          "filterType": "MARKET_LOT_SIZE",
+          "minQty": "0.00000000",
+          "maxQty": "130.20980279",
+          "stepSize": "0.00000000"
+        },
+        {
+          "filterType": "TRAILING_DELTA",
+          "minTrailingAboveDelta": 10,
+          "maxTrailingAboveDelta": 2000,
+          "minTrailingBelowDelta": 10,
+          "maxTrailingBelowDelta": 2000
+        },
+        {
+          "filterType": "PERCENT_PRICE_BY_SIDE",
+          "bidMultiplierUp": "1.2",
+          "bidMultiplierDown": "0.5",
+          "askMultiplierUp": "2",
+          "askMultiplierDown": "0.8",
+          "avgPriceMins": 5
+        },
+        {
+          "filterType": "NOTIONAL",
+          "minNotional": "5.00000000",
+          "applyMinToMarket": true,
+          "maxNotional": "9000000.00000000",
+          "applyMaxToMarket": false,
+          "avgPriceMins": 5
+        },
+        {
+          "filterType": "MAX_NUM_ORDERS",
+          "maxNumOrders": 200
+        },
+        {
+          "filterType": "MAX_NUM_ORDER_LISTS",
+          "maxNumOrderLists": 20
+        },
+        {
+          "filterType": "MAX_NUM_ALGO_ORDERS",
+          "maxNumAlgoOrders": 5
+        },
+        {
+          "filterType": "MAX_NUM_ORDER_AMENDS",
+          "maxNumOrderAmends": 10
+        }
+      ]
+    },
+    {
+      "symbol": "ETHUSDT",
+      "status": "TRADING",
+      "baseAsset": "ETH",
+      "quoteAsset": "USDT",
+      "filters": [
+        {
+          "filterType": "PRICE_FILTER",
+          "minPrice": "0.01000000",
+          "maxPrice": "1000000.00000000",
+          "tickSize": "0.01000000"
+        },
+        {
+          "filterType": "LOT_SIZE",
+          "minQty": "0.00010000",
+          "maxQty": "9000.00000000",
+          "stepSize": "0.00010000"
+        },
+        {
+          "filterType": "ICEBERG_PARTS",
+          "limit": 100
+        },
+        {
+          "filterType": "MARKET_LOT_SIZE",
+          "minQty": "0.00000000",
+          "maxQty": "2643.47757541",
+          "stepSize": "0.00000000"
+        },
+        {
+          "filterType": "TRAILING_DELTA",
+          "minTrailingAboveDelta": 10,
+          "maxTrailingAboveDelta": 2000,
+          "minTrailingBelowDelta": 10,
+          "maxTrailingBelowDelta": 2000
+        },
+        {
+          "filterType": "PERCENT_PRICE_BY_SIDE",
+          "bidMultiplierUp": "1.2",
+          "bidMultiplierDown": "0.5",
+          "askMultiplierUp": "2",
+          "askMultiplierDown": "0.8",
+          "avgPriceMins": 5
+        },
+        {
+          "filterType": "NOTIONAL",
+          "minNotional": "5.00000000",
+          "applyMinToMarket": true,
+          "maxNotional": "9000000.00000000",
+          "applyMaxToMarket": false,
+          "avgPriceMins": 5
+        },
+        {
+          "filterType": "MAX_NUM_ORDERS",
+          "maxNumOrders": 200
+        },
+        {
+          "filterType": "MAX_NUM_ORDER_LISTS",
+          "maxNumOrderLists": 20
+        },
+        {
+          "filterType": "MAX_NUM_ALGO_ORDERS",
+          "maxNumAlgoOrders": 5
+        },
+        {
+          "filterType": "MAX_NUM_ORDER_AMENDS",
+          "maxNumOrderAmends": 10
+        }
+      ]
+    },
+    {
+      "symbol": "XRPUSDT",
+      "status": "TRADING",
+      "baseAsset": "XRP",
+      "quoteAsset": "USDT",
+      "filters": [
+        {
+          "filterType": "PRICE_FILTER",
+          "minPrice": "0.00010000",
+          "maxPrice": "10000.00000000",
+          "tickSize": "0.00010000"
+        },
+        {
+          "filterType": "LOT_SIZE",
+          "minQty": "0.10000000",
+          "maxQty": "9222449.00000000",
+          "stepSize": "0.10000000"
+        },
+        {
+          "filterType": "ICEBERG_PARTS",
+          "limit": 100
+        },
+        {
+          "filterType": "MARKET_LOT_SIZE",
+          "minQty": "0.00000000",
+          "maxQty": "3674702.95000000",
+          "stepSize": "0.00000000"
+        },
+        {
+          "filterType": "TRAILING_DELTA",
+          "minTrailingAboveDelta": 10,
+          "maxTrailingAboveDelta": 2000,
+          "minTrailingBelowDelta": 10,
+          "maxTrailingBelowDelta": 2000
+        },
+        {
+          "filterType": "PERCENT_PRICE_BY_SIDE",
+          "bidMultiplierUp": "1.2",
+          "bidMultiplierDown": "0.5",
+          "askMultiplierUp": "2",
+          "askMultiplierDown": "0.8",
+          "avgPriceMins": 5
+        },
+        {
+          "filterType": "NOTIONAL",
+          "minNotional": "5.00000000",
+          "applyMinToMarket": true,
+          "maxNotional": "9000000.00000000",
+          "applyMaxToMarket": false,
+          "avgPriceMins": 5
+        },
+        {
+          "filterType": "MAX_NUM_ORDERS",
+          "maxNumOrders": 200
+        },
+        {
+          "filterType": "MAX_NUM_ORDER_LISTS",
+          "maxNumOrderLists": 20
+        },
+        {
+          "filterType": "MAX_NUM_ALGO_ORDERS",
+          "maxNumAlgoOrders": 5
+        },
+        {
+          "filterType": "MAX_NUM_ORDER_AMENDS",
+          "maxNumOrderAmends": 10
+        }
+      ]
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "status": "TRADING",
+      "baseAsset": "DOGE",
+      "quoteAsset": "USDT",
+      "filters": [
+        {
+          "filterType": "PRICE_FILTER",
+          "minPrice": "0.00001000",
+          "maxPrice": "1000.00000000",
+          "tickSize": "0.00001000"
+        },
+        {
+          "filterType": "LOT_SIZE",
+          "minQty": "1.00000000",
+          "maxQty": "9000000.00000000",
+          "stepSize": "1.00000000"
+        },
+        {
+          "filterType": "ICEBERG_PARTS",
+          "limit": 100
+        },
+        {
+          "filterType": "MARKET_LOT_SIZE",
+          "minQty": "0.00000000",
+          "maxQty": "34618491.07083333",
+          "stepSize": "0.00000000"
+        },
+        {
+          "filterType": "TRAILING_DELTA",
+          "minTrailingAboveDelta": 10,
+          "maxTrailingAboveDelta": 2000,
+          "minTrailingBelowDelta": 10,
+          "maxTrailingBelowDelta": 2000
+        },
+        {
+          "filterType": "PERCENT_PRICE_BY_SIDE",
+          "bidMultiplierUp": "1.2",
+          "bidMultiplierDown": "0.5",
+          "askMultiplierUp": "2",
+          "askMultiplierDown": "0.8",
+          "avgPriceMins": 5
+        },
+        {
+          "filterType": "NOTIONAL",
+          "minNotional": "1.00000000",
+          "applyMinToMarket": true,
+          "maxNotional": "9000000.00000000",
+          "applyMaxToMarket": false,
+          "avgPriceMins": 5
+        },
+        {
+          "filterType": "MAX_NUM_ORDERS",
+          "maxNumOrders": 200
+        },
+        {
+          "filterType": "MAX_NUM_ORDER_LISTS",
+          "maxNumOrderLists": 20
+        },
+        {
+          "filterType": "MAX_NUM_ALGO_ORDERS",
+          "maxNumAlgoOrders": 5
+        },
+        {
+          "filterType": "MAX_NUM_ORDER_AMENDS",
+          "maxNumOrderAmends": 10
+        }
+      ]
+    },
+    {
+      "symbol": "SHIBUSDT",
+      "status": "TRADING",
+      "baseAsset": "SHIB",
+      "quoteAsset": "USDT",
+      "filters": [
+        {
+          "filterType": "PRICE_FILTER",
+          "minPrice": "0.00000001",
+          "maxPrice": "1.00000000",
+          "tickSize": "0.00000001"
+        },
+        {
+          "filterType": "LOT_SIZE",
+          "minQty": "1.00",
+          "maxQty": "46116860414.00",
+          "stepSize": "1.00"
+        },
+        {
+          "filterType": "ICEBERG_PARTS",
+          "limit": 100
+        },
+        {
+          "filterType": "MARKET_LOT_SIZE",
+          "minQty": "0.00",
+          "maxQty": "42920576472.31",
+          "stepSize": "0.00"
+        },
+        {
+          "filterType": "TRAILING_DELTA",
+          "minTrailingAboveDelta": 10,
+          "maxTrailingAboveDelta": 2000,
+          "minTrailingBelowDelta": 10,
+          "maxTrailingBelowDelta": 2000
+        },
+        {
+          "filterType": "PERCENT_PRICE_BY_SIDE",
+          "bidMultiplierUp": "1.2",
+          "bidMultiplierDown": "0.5",
+          "askMultiplierUp": "2",
+          "askMultiplierDown": "0.8",
+          "avgPriceMins": 5
+        },
+        {
+          "filterType": "NOTIONAL",
+          "minNotional": "1.00000000",
+          "applyMinToMarket": true,
+          "maxNotional": "9000000.00000000",
+          "applyMaxToMarket": false,
+          "avgPriceMins": 5
+        },
+        {
+          "filterType": "MAX_NUM_ORDERS",
+          "maxNumOrders": 200
+        },
+        {
+          "filterType": "MAX_NUM_ORDER_LISTS",
+          "maxNumOrderLists": 20
+        },
+        {
+          "filterType": "MAX_NUM_ALGO_ORDERS",
+          "maxNumAlgoOrders": 5
+        },
+        {
+          "filterType": "MAX_NUM_ORDER_AMENDS",
+          "maxNumOrderAmends": 10
+        }
+      ]
+    }
+  ]
+}
