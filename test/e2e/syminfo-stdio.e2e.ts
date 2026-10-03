@@ -8,11 +8,12 @@
  *
  *   PF_E2E_SYMINFO_CSV   the frozen feed (2188 bars; sha256 checked), on this machine
  *   PF_E2E_SYMINFO_PINE  the Pine file, default test/fixtures/syminfo/btc-ema-crossover.pine
- *   PF_E2E_SERVER        JSON argv of the server, default ["node","dist/index.js"] (Docker
- *                        runner); the Glama image: ["docker","run","-i","--rm","--network","host",
- *                        "-v","<dir>:<dir>","-e","PINEFORGE_BINANCE_SPOT_URL=http://127.0.0.1:<port>",
- *                        "-e","PINEFORGE_BINANCE_FAPI_URL=http://127.0.0.1:<port>",
- *                        "-e","PINEFORGE_MAX_INLINE_BYTES=50000000","<image>"]
+ *   PF_E2E_SERVER        JSON argv of the server, default ["node","dist/index.js"] (the Docker runner,
+ *                        on this machine's docker daemon)
+ *   PF_E2E_DOCKER_IMAGE  instead: run the Glama image (the in-process runner) with `docker run -i
+ *                        --network host --user <uid>:<gid> -v $PF_E2E_MOUNT:/work`; then also set
+ *                        PF_E2E_MOUNT (a host dir holding the feed and the workdir),
+ *                        PF_E2E_PATH_MAP="$PF_E2E_MOUNT=/work" and PF_E2E_STUB_PORT
  *   PF_E2E_PATH_MAP      "<host prefix>=<server prefix>" for paths in tool args (Docker image)
  *   PF_E2E_STUB_PORT     port of the local Binance stub (default: any free one)
  *   PF_E2E_WORKDIR       where fetch_binance_ohlcv writes (default test/.tmp-e2e-syminfo-<time>)
@@ -33,6 +34,19 @@ import type { AddressInfo } from "node:net";
 import { join, resolve } from "node:path";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { connect, pathMapper } from "./client.js";
+
+/** The server under test, started with `env` (the stub's URLs, the inline limit). */
+function startServer(env: Record<string, string>): Promise<Client> {
+  const image = process.env.PF_E2E_DOCKER_IMAGE;
+  if (!image) return connect({ env });
+  const mount = process.env.PF_E2E_MOUNT;
+  assert.ok(mount, "PF_E2E_DOCKER_IMAGE needs PF_E2E_MOUNT");
+  const flags = Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
+  return connect({
+    argv: ["docker", "run", "-i", "--rm", "--network", "host", "--user", `${process.getuid!()}:${process.getgid!()}`,
+      "-v", `${mount}:/work`, ...flags, image],
+  });
+}
 
 const here = (rel: string) => new URL(rel, import.meta.url);
 const EXPECTED = JSON.parse(readFileSync(here("../fixtures/syminfo/btcusdt-4h-ema-trades.json"), "utf8")) as {
@@ -104,12 +118,10 @@ before(async () => {
   await new Promise<void>((ok) => stub.listen(Number(process.env.PF_E2E_STUB_PORT ?? 0), "127.0.0.1", ok));
   stubUrl = `http://127.0.0.1:${(stub.address() as AddressInfo).port}`;
 
-  client = await connect({
-    env: {
-      PINEFORGE_BINANCE_SPOT_URL: stubUrl,
-      PINEFORGE_BINANCE_FAPI_URL: stubUrl,
-      PINEFORGE_MAX_INLINE_BYTES: "50000000",
-    },
+  client = await startServer({
+    PINEFORGE_BINANCE_SPOT_URL: stubUrl,
+    PINEFORGE_BINANCE_FAPI_URL: stubUrl,
+    PINEFORGE_MAX_INLINE_BYTES: "50000000",
   });
 });
 
@@ -212,8 +224,8 @@ test("fetch_binance_ohlcv records the instrument; backtest_pine uses it with no 
 });
 
 test("a report too large to return inline still carries the instrument and the warning", async () => {
-  const small = await connect({
-    env: { PINEFORGE_BINANCE_SPOT_URL: stubUrl, PINEFORGE_BINANCE_FAPI_URL: stubUrl, PINEFORGE_MAX_INLINE_BYTES: "20000" },
+  const small = await startServer({
+    PINEFORGE_BINANCE_SPOT_URL: stubUrl, PINEFORGE_BINANCE_FAPI_URL: stubUrl, PINEFORGE_MAX_INLINE_BYTES: "20000",
   });
   try {
     const r = await tool("backtest_pine", {
