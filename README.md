@@ -512,7 +512,8 @@ may differ from TradingView's.
 **Instrument.** The run applies the instrument's lot size and tick size, as
 [`backtest_pine` does](#the-instrument): for `BINANCE:<SYMBOL>` and `BINANCE:<SYMBOL>.P`,
 TradingView's own lot size from the shipped table (Binance's `LOT_SIZE.stepSize` for a symbol
-the table lacks) and the tick size from Binance's exchangeInfo; with your own bars and no
+TradingView does not list, TradingView's usual 0.001 for a listing newer than the table, each with a
+warning) and the tick size from Binance's exchangeInfo; with your own bars and no
 ticker, the sidecar next to your bars file; any other exchange needs `syminfo`. Without a lot
 size the engine floors no order, can book sub-lot margin-call rows TradingView does not, and
 the trade lists then pair worse: the result warns. The result shows what was applied under
@@ -583,7 +584,8 @@ directory unless `PINEFORGE_ALLOW_ANYWHERE=1`.
 ```
 
 It also writes `<output_path>.instrument.json`: the symbol's instrument (TradingView's lot
-size from the shipped table, Binance's for a symbol the table lacks; the tick size and
+size from the shipped table, Binance's for a symbol TradingView does not list, TradingView's usual
+0.001 for a listing newer than the table; the tick size and
 currencies from Binance's public exchangeInfo), which `backtest_pine` and
 `check_tradingview_parity` pick up (see [The instrument](#the-instrument)); the result's
 `instrument` and `instrument_path` show it. If exchangeInfo cannot be read the CSV is still

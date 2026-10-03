@@ -242,9 +242,11 @@ const PARITY_HINT =
 
 /**
  * The instrument the grading core runs on: the Binance symbol the TradingView ticker names (spot,
- * or `.P` USD-M), resolved as backtest_pine does (the user's `syminfo`, TradingView's lot size from
- * the embedded table, Binance's); without a ticker, the sidecar of the user's own bars file. Any
- * other exchange has no source here: unresolved, unless `syminfo` gives the grid.
+ * or `.P` USD-M), resolved as backtest_pine does (the user's `syminfo`, else the lot size by the
+ * three tiers of resolveInstrument: TradingView's reading in the embedded table, Binance's step for
+ * a symbol TradingView does not list, TradingView's usual 0.001 for a listing newer than the table);
+ * without a ticker, the sidecar of the user's own bars file. Any other exchange has no source here:
+ * unresolved, unless `syminfo` gives the grid.
  */
 export async function parityInstrument(
   args: ParityToolArgs,
