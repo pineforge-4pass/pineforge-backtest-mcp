@@ -359,10 +359,13 @@ export async function readSidecar(csvPath: string): Promise<SidecarRead> {
   if (csv && typeof csv === "object") {
     const range = await csvBarRange(csvPath).catch(() => undefined);
     if (!range || range.first !== csv.first_open_time || range.last !== csv.last_open_time) {
+      // The sidecar is a file anyone may have written: only numbers go into text the model reads.
+      const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? String(v) : "?");
       return {
-        ignored:
-          `${name} was written for bars ${csv.first_open_time}..${csv.last_open_time} and the CSV now holds ` +
+        ignored: reasonText(
+          `${name} was written for bars ${num(csv.first_open_time)}..${num(csv.last_open_time)} and the CSV now holds ` +
           `${range ? `${range.first}..${range.last}` : "no readable bars"}`,
+        ),
       };
     }
     if (typeof csv.sha256 === "string" && csv.sha256 !== (await sha256Of(csvPath).catch(() => ""))) {
@@ -429,10 +432,10 @@ export async function resolveInstrument(
       const s = base.source;
       if (s?.symbol) label = `Binance ${s.market ?? "spot"} ${s.symbol}`;
     } else if (user) {
-      detail = read.ignored; // the user's values are the instrument; why the sidecar was not used goes in the warning
+      detail = read.ignored && reasonText(read.ignored); // the user's values are the instrument; why the sidecar was not used goes in the warning
     } else if (read.ignored) {
       base = unresolvedInstrument("sidecar ignored");
-      detail = read.ignored;
+      detail = reasonText(read.ignored);
     } else {
       base = unresolvedInstrument("no symbol, syminfo or sidecar was given");
     }
