@@ -253,7 +253,7 @@ entry equal to exit) that TradingView does not book. So `backtest_pine` (and
 `backtest_pine_grid`) applies the instrument to the engine before the run, through
 its C ABI: `qty_step` and `mincontract` (the lot size), `mintick`, `pointvalue`,
 `type`, `ticker`, `tickerid`, `currency`, `basecurrency`. Timezone and session are
-not applied (the engine's defaults: UTC, 24x7). Where it comes from, first match:
+not applied (the engine's defaults: UTC, 24x7). Where it comes from:
 
 1. `symbol` (+ `market`): read from Binance's public exchangeInfo, one request cached
    for 5 minutes: the lot size is the symbol's `LOT_SIZE.stepSize`, the tick is its
@@ -261,7 +261,7 @@ not applied (the engine's defaults: UTC, 24x7). Where it comes from, first match
 2. `syminfo`: your own values, for a CSV of any other instrument. They win over what
    `symbol` resolves, and with no `symbol` they are the whole instrument. Give
    `qty_step` (or `mincontract`; each defaults to the other).
-3. With neither, the sidecar `<csv path>.instrument.json` that `fetch_binance_ohlcv`
+3. With neither `symbol` nor `syminfo`, the sidecar `<csv path>.instrument.json` that `fetch_binance_ohlcv`
    writes next to every CSV it fetches (its `instrument` result shows it). It is
    ignored, with the reason in the result, if the CSV's first and last bar are no
    longer the ones it was written for.
