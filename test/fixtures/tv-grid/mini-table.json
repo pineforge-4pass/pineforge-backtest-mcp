@@ -49,6 +49,7 @@
  "not_on_tv": {
   "crypto.binance.com.spot": [
    "AIXBTUSDC"
-  ]
+  ],
+  "crypto.binance.com.perp-usdt": []
  }
 }

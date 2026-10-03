@@ -63,6 +63,8 @@ export function parseTvGrid(text: string): TvGrid {
   }
   checkNotOnTv(g.not_on_tv);
   checkDefaults(g.defaults);
+  // A usual lot size without the list of unlisted symbols would give a symbol TradingView does not list the "new listing" default.
+  if (g.defaults !== undefined && g.not_on_tv === undefined) throw new Error("defaults without not_on_tv");
   return g;
 }
 

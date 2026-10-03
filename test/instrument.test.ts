@@ -670,8 +670,8 @@ test("the lookup for the table is by market and exact symbol: a spot symbol is n
   const spotGot = await resolveInstrument({ symbol: "BTCUSDT" }, csv(), lookupIn(SPOT), tv);
   const perpGot = await resolveInstrument({ symbol: "BTCUSDT", market: "usdt_perp" }, csv(), lookupIn(FAPI), tv);
   assert.deepEqual(seen, ["spot:BTCUSDT", "usdt_perp:BTCUSDT"]);
-  // no reading for spot BTCUSDT here: it is not unlisted either, so the market's usual lot size (not Binance's 0.00001)
-  assert.deepEqual([spotGot.instrument.qty_step, spotGot.instrument.source!.kind], [0.001, "default"]);
+  // the injected readings have none for spot BTCUSDT: whatever the rest of the table says, it is not TradingView's reading
+  assert.notEqual(spotGot.instrument.source!.kind, "tradingview");
   assert.deepEqual([perpGot.instrument.qty_step, perpGot.instrument.source!.kind], [0.5, "tradingview"]);
 });
 

@@ -8,8 +8,8 @@
 // symbols TradingView does not list), and, per market, TradingView's usual lot size (0.001) with the
 // share of the readings that are it, written only when that share is at least 0.80. The output is
 // deterministic (sorted, one symbol per line), so re-running on the same table changes nothing.
-// A table that is not complete, has a value outside 1e-12..1e12, or has no usable `not_on_tv`, is refused,
-// not trimmed. `content_sha256` covers all of it: the readings, then each market's not-on-TradingView
+// A table that is not complete, has a value outside 1e-12..1e12, or has no `not_on_tv` list for either
+// Binance venue (an empty one is fine), is refused, not trimmed. `content_sha256` covers all of it: the readings, then each market's not-on-TradingView
 // symbols (`not_on_tv <market>`, one per line), then each market's default (`defaults <market>`,
 // `mincontract=.. share=.. n=..` or `none`). `--out <path>` writes elsewhere (the tests do).
 import { createHash } from "node:crypto";
@@ -73,10 +73,11 @@ for (const [market, venue] of Object.entries(MARKETS)) {
   if (entries.length === 0) fail(`${venue} has no rows`);
   grids[market] = entries;
 
-  // The symbols TradingView does not list (a venue with none may be left out); none may also have a reading.
-  const unlisted = notListed[venue] ?? [];
+  // The symbols TradingView does not list: an explicit list per venue ([] when there are none), so that a
+  // table that forgot one cannot turn an unlisted symbol into a "new listing"; none may also have a reading.
+  const unlisted = notListed[venue];
   if (!Array.isArray(unlisted) || !unlisted.every((s) => typeof s === "string" && SYMBOL.test(s))) {
-    fail(`not_on_tv of ${venue} is not a list of symbols`);
+    fail(`not_on_tv of ${venue} is not a list of symbols (give [] when TradingView lists every symbol)`);
   }
   const both = unlisted.filter((s) => Object.prototype.hasOwnProperty.call(rows, s)).sort();
   if (both.length) fail(`${venue}: ${both[0]} is both read and not on TradingView${both.length > 1 ? ` (and ${both.length - 1} more)` : ""}`);

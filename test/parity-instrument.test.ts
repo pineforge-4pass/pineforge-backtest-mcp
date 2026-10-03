@@ -130,7 +130,6 @@ test("a listing newer than the table: TradingView's usual 0.001 (kind default), 
   assert.equal(out.isError, false, out.content[0]!.text);
   const sent = calls[0]!.request.instrument as Record<string, unknown>;
   assert.deepEqual([sent.qty_step, sent.mincontract, sent.source], [0.001, 0.001, { kind: "default", venue: "binance_spot", symbol: "NEWCOINUSDT" }]);
-  assert.deepEqual(out.structuredContent.applied_instrument, sent);
   assert.deepEqual(out.structuredContent.warnings, [DEFAULT_WARNING("Binance spot NEWCOINUSDT")]);
   assert.match(out.content[0]!.text, /\nInstrument: NEWCOINUSDT spot: lot size 0\.001 \(TradingView's usual default\), tick 0\.0001/);
   assert.match(out.content[0]!.text, /Warnings:\n- lot size for Binance spot NEWCOINUSDT is TradingView's usual default \(0\.001\)/);

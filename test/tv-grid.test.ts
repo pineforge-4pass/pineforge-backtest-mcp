@@ -87,6 +87,8 @@ test("src/tv-grid.generated.json: shape, counts, and TradingView's own values fo
   assert.equal(g.spot.XRPUSDT, 1);
 });
 
+// Other test files use AIXBTUSDC (spot) and STGUSDT (USD-M) as the symbols this table says TradingView does not list: if a
+// refresh changes them, this is the test that says so; update those cases with it.
 test("src/tv-grid.generated.json: the symbols TradingView does not list, and TradingView's usual lot size per market", () => {
   const g = parseTvGrid(readFileSync(ASSET, "utf8"));
   // the usual lot size, with the share of readings it rests on (pinned literals: 1,237 of 1,366 and 510 of 523 read 0.001)
@@ -247,6 +249,8 @@ test("sync-tv-grid refuses what it cannot trust, writes nothing, and says why", 
     ["out of range", table((t) => { t.rows["crypto.binance.com.spot"].XRPUSDT.mincontract = 1e13; }), /XRPUSDT=10000000000000/],
     ["a bad symbol", table((t) => { t.rows["crypto.binance.com.spot"]["BAD SYMBOL"] = { mincontract: 1 }; }), /BAD SYMBOL=1/],
     ["no not_on_tv", table((t) => { delete t.not_on_tv; }), /has no not_on_tv/],
+    ["a venue's list left out", table((t) => { delete t.not_on_tv["crypto.binance.com.spot"]; }), /not_on_tv of crypto\.binance\.com\.spot is not a list of symbols \(give \[\] when TradingView lists every symbol\)/],
+    ["the other venue's list left out", table((t) => { delete t.not_on_tv["crypto.binance.com.perp-usdt"]; }), /not_on_tv of crypto\.binance\.com\.perp-usdt is not a list of symbols/],
     ["not_on_tv a list", table((t) => { t.not_on_tv = ["AIXBTUSDC"]; }), /has no not_on_tv/],
     ["a venue's not_on_tv not a list", table((t) => { t.not_on_tv["crypto.binance.com.spot"] = "AIXBTUSDC"; }), /not_on_tv of crypto\.binance\.com\.spot is not a list of symbols/],
     ["a bad unlisted symbol", table((t) => { t.not_on_tv["crypto.binance.com.spot"] = ["AIXBTUSDC", "BAD SYMBOL"]; }), /not_on_tv of crypto\.binance\.com\.spot is not a list of symbols/],
@@ -329,6 +333,8 @@ test("parseTvGrid refuses anything that is not a generated table", () => {
   assert.throws(() => parseTvGrid(bad((g) => { g.not_on_tv.spot = "AIXBTUSDC"; })), /not_on_tv\.spot is not a list of symbols/);
   assert.throws(() => parseTvGrid(bad((g) => { g.not_on_tv.usdt_perp = [1]; })), /not_on_tv\.usdt_perp is not a list of symbols/);
   assert.throws(() => parseTvGrid(bad((g) => { g.defaults = 0.001; })), /defaults is not an object/);
+  assert.throws(() => parseTvGrid(bad((g) => { delete g.not_on_tv; })), /defaults without not_on_tv/);
+  assert.doesNotThrow(() => parseTvGrid(bad((g) => { delete g.defaults; })), "the list without a default is a table that simply has no default");
   assert.throws(() => parseTvGrid(bad((g) => { g.defaults.spot.mincontract = 0; })), /defaults\.spot has a bad mincontract/);
   assert.throws(() => parseTvGrid(bad((g) => { g.defaults.spot.share = 0.79; })), /defaults\.spot has a bad share/);
   assert.throws(() => parseTvGrid(bad((g) => { g.defaults.spot.share = 1.01; })), /defaults\.spot has a bad share/);

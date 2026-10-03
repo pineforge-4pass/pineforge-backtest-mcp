@@ -690,7 +690,7 @@ It keeps only the two Binance venues: each symbol's `mincontract`, the venue's `
 market TradingView's usual lot size (0.001, with the share of readings that are it and their count, only
 when that share is at least 0.80). It writes sorted symbols one per line, records the table's `generated_utc`
 and sha256 and its own content hash (which covers the readings, the lists and the defaults), and refuses a
-table that is not complete, has no `not_on_tv`, or has a value outside 1e-12..1e12. The same table gives the same bytes;
+table that is not complete, has no `not_on_tv` list for either Binance venue (an empty one is fine), or has a value outside 1e-12..1e12. The same table gives the same bytes;
 `PF_TV_GRID_SOURCE=<path to the table> npm test` also checks that the committed file was made from it.
 
 To build the image, pass the `pineforge-release` version to build on (a tag from
