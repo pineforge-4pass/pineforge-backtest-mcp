@@ -505,6 +505,28 @@ test("usdt_perp fetch records the USD-M instrument", async () => {
   assert.deepEqual([r.data.instrument.qty_step, r.data.instrument.mintick, r.data.instrument.source.kind], [0.000001, 0.1, "tradingview"]);
 });
 
+test("fetch_binance_ohlcv records the lot size by the same tiers, and backtest_pine then warns from the sidecar", async () => {
+  // a listing newer than the table: TradingView's usual 0.001, kind default
+  const fresh = join(dir, "newcoin-4h.csv");
+  const f = await call("fetch_binance_ohlcv", fetchArgs(fresh, { symbol: "NEWCOINUSDT" }));
+  assert.equal(f.isError, false, f.text);
+  assert.deepEqual([f.data.instrument.resolved, f.data.instrument.qty_step, f.data.instrument.source.kind], [true, 0.001, "default"]);
+  assert.equal(JSON.parse(readFileSync(sidecarPath(fresh), "utf8")).source.kind, "default");
+  hits = [];
+  const r = await call("backtest_pine", { source: PINE, ohlcv_csv_path: fresh });
+  assert.equal(r.isError, false, r.text);
+  assert.deepEqual(hits, [], "the sidecar was enough: nothing was looked up");
+  assert.deepEqual(calls.at(-1)!.instrument!.source, { kind: "default", market: "spot", symbol: "NEWCOINUSDT", via: "sidecar" });
+  assert.deepEqual(r.data.warnings, [DEFAULT_WARNING("Binance spot NEWCOINUSDT")]);
+  // a symbol TradingView does not list: Binance's lot step, kind exchange
+  const unlisted = join(dir, "aixbt-4h.csv");
+  const g = await call("fetch_binance_ohlcv", fetchArgs(unlisted, { symbol: "AIXBTUSDC" }));
+  assert.equal(g.isError, false, g.text);
+  assert.deepEqual([g.data.instrument.qty_step, g.data.instrument.source.kind], [0.01, "exchange"]);
+  const r2 = await call("backtest_pine", { source: PINE, ohlcv_csv_path: unlisted });
+  assert.deepEqual(r2.data.warnings, [EXCHANGE_WARNING("Binance spot AIXBTUSDC")]);
+});
+
 test("exchangeInfo down: the CSV is still written, no instrument, a warning, and a stale sidecar is removed", async () => {
   const out = join(dir, "down-4h.csv");
   await call("fetch_binance_ohlcv", fetchArgs(out));
