@@ -31,6 +31,16 @@ const NEWCOIN: BinanceSymbolInfo = {
   symbol: "NEWCOINUSDT", baseAsset: "NEWCOIN", quoteAsset: "USDT",
   filters: [{ filterType: "PRICE_FILTER", tickSize: "0.0001" }, { filterType: "LOT_SIZE", stepSize: "0.1" }],
 };
+// A symbol Binance lists and TradingView does not (the table's not_on_tv): only Binance's lot step exists for it.
+const UNLISTED: BinanceSymbolInfo = {
+  symbol: "AIXBTUSDC", baseAsset: "AIXBT", quoteAsset: "USDC",
+  filters: [{ filterType: "PRICE_FILTER", tickSize: "0.0001" }, { filterType: "LOT_SIZE", stepSize: "0.01" }],
+};
+const EXCHANGE_WARNING = (label: string) =>
+  `lot size for ${label} is the exchange's lot step, not a TradingView reading: order quantities may differ from TradingView's`;
+const DEFAULT_WARNING = (label: string) =>
+  `lot size for ${label} is TradingView's usual default (0.001), not a reading for this symbol (a listing newer than the readings): ` +
+  "order quantities may differ from TradingView's";
 const BARS = "timestamp,open,high,low,close,volume\n1743379200000,1,1,1,1,1\n";
 
 const tmp = mkdtempSync(join(tmpdir(), "pf-parity-instrument-"));
@@ -62,7 +72,7 @@ function fakeRunner() {
 const seenLookups: string[] = [];
 const lookup = async (market: string, symbol: string) => {
   seenLookups.push(`${market}:${symbol}`);
-  return [...(market === "spot" ? SPOT : FAPI), NEWCOIN].find((s) => s.symbol === symbol);
+  return [...(market === "spot" ? SPOT : FAPI), NEWCOIN, UNLISTED].find((s) => s.symbol === symbol);
 };
 const depsWith = (lookupFn: typeof lookup = lookup): ParityDeps => ({
   resolvePath: (p) => resolve(p),
@@ -114,16 +124,40 @@ test("fetched bars and the instrument come from the same ticker (one lookup, one
   assert.equal((calls[0]!.request.instrument as Record<string, unknown>).qty_step, 0.0001);
 });
 
-test("a symbol the table lacks: Binance's lot size and the note in the warnings", async () => {
+test("a listing newer than the table: TradingView's usual 0.001 (kind default), with the default warning, as backtest_pine gives", async () => {
   const { runner, calls } = fakeRunner();
   const out = await parityToolResult(runner, { ...base, symbol: "BINANCE:NEWCOINUSDT", ohlcv_csv_path: barsFile() }, depsWith());
   assert.equal(out.isError, false, out.content[0]!.text);
   const sent = calls[0]!.request.instrument as Record<string, unknown>;
-  assert.deepEqual([sent.qty_step, sent.source], [0.1, { kind: "exchange", venue: "binance_spot", symbol: "NEWCOINUSDT" }]);
-  const warnings = out.structuredContent.warnings as string[];
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0]!, /^the lot size 0\.1 is Binance's LOT_SIZE\.stepSize: NEWCOINUSDT is not in the embedded TradingView lot-size table/);
-  assert.match(out.content[0]!.text, /Warnings:\n- the lot size 0\.1 is Binance's/);
+  assert.deepEqual([sent.qty_step, sent.mincontract, sent.source], [0.001, 0.001, { kind: "default", venue: "binance_spot", symbol: "NEWCOINUSDT" }]);
+  assert.deepEqual(out.structuredContent.applied_instrument, sent);
+  assert.deepEqual(out.structuredContent.warnings, [DEFAULT_WARNING("Binance spot NEWCOINUSDT")]);
+  assert.match(out.content[0]!.text, /\nInstrument: NEWCOINUSDT spot: lot size 0\.001 \(TradingView's usual default\), tick 0\.0001/);
+  assert.match(out.content[0]!.text, /Warnings:\n- lot size for Binance spot NEWCOINUSDT is TradingView's usual default \(0\.001\)/);
+  // a .P ticker is the USD-M market: the label says so
+  const perp = await parityToolResult(runner, { ...base, symbol: "BINANCE:NEWCOINUSDT.P", ohlcv_csv_path: barsFile() }, depsWith());
+  assert.deepEqual(perp.structuredContent.warnings, [DEFAULT_WARNING("Binance usdt_perp NEWCOINUSDT")]);
+});
+
+test("a symbol TradingView does not list: Binance's lot step (kind exchange), with the exchange warning", async () => {
+  const { runner, calls } = fakeRunner();
+  const out = await parityToolResult(runner, { ...base, symbol: "BINANCE:AIXBTUSDC", ohlcv_csv_path: barsFile() }, depsWith());
+  assert.equal(out.isError, false, out.content[0]!.text);
+  const sent = calls[0]!.request.instrument as Record<string, unknown>;
+  assert.deepEqual([sent.qty_step, sent.source], [0.01, { kind: "exchange", venue: "binance_spot", symbol: "AIXBTUSDC" }]);
+  assert.deepEqual(out.structuredContent.warnings, [EXCHANGE_WARNING("Binance spot AIXBTUSDC")]);
+  assert.match(out.content[0]!.text, /Warnings:\n- lot size for Binance spot AIXBTUSDC is the exchange's lot step/);
+});
+
+test("the ticker names the market, so the parity tool never has the backtest's `market not given` warning", async () => {
+  const { runner } = fakeRunner();
+  for (const symbol of ["BINANCE:BTCUSDT", "BINANCE:BTCUSDT.P", "binance:ethusdt"]) {
+    const out = await parityToolResult(runner, { ...base, symbol, ohlcv_csv_path: barsFile() }, depsWith());
+    assert.deepEqual(out.structuredContent.warnings, [], symbol);
+  }
+  // with bars of the user's own and no ticker the instrument is the bars' sidecar or `syminfo`: no market is assumed either
+  const own = await parityToolResult(runner, { ...base, ohlcv_csv: BARS, syminfo: { qty_step: 0.001, mintick: 0.1 } }, depsWith());
+  assert.deepEqual(own.structuredContent.warnings, []);
 });
 
 test("no lot size anywhere: the run goes ahead, the core is told it is unresolved, and the result warns", async () => {
@@ -221,7 +255,7 @@ test("instrument warnings come before the export's and the core's, and after not
   const warnings = out.structuredContent.warnings as string[];
   assert.equal(warnings.length, 3);
   assert.match(warnings[0]!, /^This check ran on engine 0\.9\.0/);
-  assert.match(warnings[1]!, /^the lot size 0\.1 is Binance's/);
+  assert.equal(warnings[1], DEFAULT_WARNING("Binance spot NEWCOINUSDT"));
   assert.equal(warnings[2], "the core's own warning");
 });
 

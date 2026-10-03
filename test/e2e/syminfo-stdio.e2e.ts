@@ -52,14 +52,20 @@ const here = (rel: string) => new URL(rel, import.meta.url);
 const EXPECTED = JSON.parse(readFileSync(here("../fixtures/syminfo/btcusdt-4h-ema-trades.json"), "utf8")) as {
   pine_sha256: string; csv_sha256: string; bars: number; gridless: Row[]; gridded: Row[];
 };
-// A listing newer than the embedded TradingView lot-size table (lot size 0.0001 so the BTC feed still trades).
+// A listing newer than the embedded TradingView lot-size table: Binance has it, the table does not. Binance's own
+// step (0.01) is not TradingView's usual 0.001, so which one the engine was given shows in `qty_step`.
 const NEWCOIN = {
   symbol: "NEWCOINUSDT", status: "TRADING", baseAsset: "NEWCOIN", quoteAsset: "USDT",
+  filters: [{ filterType: "PRICE_FILTER", tickSize: "0.01" }, { filterType: "LOT_SIZE", stepSize: "0.01" }],
+};
+// A spot symbol the table lists under not_on_tv (TradingView does not list it): only Binance's lot step exists for it.
+const NOT_ON_TV = {
+  symbol: "AIXBTUSDC", status: "TRADING", baseAsset: "AIXBT", quoteAsset: "USDC",
   filters: [{ filterType: "PRICE_FILTER", tickSize: "0.01" }, { filterType: "LOT_SIZE", stepSize: "0.0001" }],
 };
 const SPOT_INFO = (() => {
   const info = JSON.parse(readFileSync(here("../fixtures/binance/spot-exchangeinfo.json"), "utf8"));
-  info.symbols.push(NEWCOIN);
+  info.symbols.push(NEWCOIN, NOT_ON_TV);
   return JSON.stringify(info);
 })();
 const FAPI_INFO = readFileSync(here("../fixtures/binance/fapi-exchangeinfo.json"), "utf8");
@@ -81,6 +87,14 @@ const INSTRUMENT = {
   qty_step: 0.00001, mintick: 0.01, pointvalue: 1, mincontract: 0.00001, type: "crypto",
   currency: "USDT", basecurrency: "BTC",
 };
+// The provenance warnings and the market note, written out (the contract's text).
+const EXCHANGE_WARNING = (label: string) =>
+  `lot size for ${label} is the exchange's lot step, not a TradingView reading: order quantities may differ from TradingView's`;
+const DEFAULT_WARNING = (label: string, value: string) =>
+  `lot size for ${label} is TradingView's usual default (${value}), not a reading for this symbol (a listing newer than the readings): ` +
+  "order quantities may differ from TradingView's";
+const NO_MARKET_WARNING = (symbol: string) =>
+  `market not given: spot assumed for ${symbol} (pass market "usdt_perp" for a USD-M perpetual)`;
 const WARNING_START =
   "instrument grid unavailable for ";
 const WARNING_BODY =
@@ -202,7 +216,7 @@ test("a gridless and a gridded run never share a fingerprint", async () => {
 
 test("symbol: the instrument resolved from Binance's exchangeInfo gives the same rows", async () => {
   stubHits.length = 0;
-  const r = await backtest({ symbol: "BTCUSDT" });
+  const r = await backtest({ symbol: "BTCUSDT", market: "spot" });
   assert.deepEqual(rowsOf(r.trades), EXPECTED.gridded);
   assert.deepEqual(stubHits, ["/api/v3/exchangeInfo"]);
   const applied = r.applied_runtime.syminfo;
@@ -255,13 +269,32 @@ test("TradingView's lot size beats Binance's on the real engine: USD-M BTCUSDT i
   assert.deepEqual(r.fingerprint.provenance.runtime.syminfo, applied);
 });
 
-test("a listing the table lacks gets Binance's lot size on the real engine, and the result says so", async () => {
-  const r = await backtest({ symbol: "NEWCOINUSDT" });
+test("a listing newer than the table gets TradingView's usual 0.001 on the real engine (not Binance's 0.01), and the result says so", async () => {
+  const r = await backtest({ symbol: "NEWCOINUSDT", market: "spot" });
   const applied = r.applied_runtime.syminfo;
-  assert.deepEqual([applied.resolved, applied.qty_step, applied.mintick, applied.source.kind], [true, 0.0001, 0.01, "exchange"]);
-  assert.equal(r.warnings.length, 1);
-  assert.match(r.warnings[0], /^the lot size 0\.0001 is Binance's LOT_SIZE\.stepSize: NEWCOINUSDT is not in the embedded TradingView lot-size table/);
-  assert.ok(r.trades.length > 0);
+  assert.deepEqual([applied.resolved, applied.qty_step, applied.mincontract, applied.mintick, applied.source.kind], [true, 0.001, 0.001, 0.01, "default"]);
+  assert.deepEqual(r.warnings, [DEFAULT_WARNING("Binance spot NEWCOINUSDT", "0.001")]);
+  assert.ok(r.trades.length > 0, "the run traded");
+  assert.equal(r.trades.filter((t: { qty: number }) => t.qty < 0.001).length, 0, "no row below one lot");
+  assert.deepEqual(r.fingerprint.provenance.runtime.syminfo, applied);
+});
+
+test("a symbol TradingView does not list gets Binance's lot step on the real engine, kind exchange, and the exchange warning", async () => {
+  const r = await backtest({ symbol: "AIXBTUSDC", market: "spot" });
+  const applied = r.applied_runtime.syminfo;
+  assert.deepEqual([applied.resolved, applied.qty_step, applied.mincontract, applied.mintick, applied.currency, applied.source.kind],
+    [true, 0.0001, 0.0001, 0.01, "USDC", "exchange"]);
+  assert.deepEqual(r.warnings, [EXCHANGE_WARNING("Binance spot AIXBTUSDC")]);
+  assert.ok(r.trades.length > 0, "the run traded");
+  assert.equal(r.trades.filter((t: { qty: number }) => t.qty < 0.0001).length, 0, "no row below one lot");
+  assert.deepEqual(r.fingerprint.provenance.runtime.syminfo, applied);
+});
+
+test("symbol without market: spot is assumed, and the result says so; the rows are the spot ones", async () => {
+  const r = await backtest({ symbol: "BTCUSDT" });
+  assert.deepEqual(rowsOf(r.trades), EXPECTED.gridded);
+  assert.deepEqual(r.applied_runtime.syminfo.source, { kind: "tradingview", market: "spot", symbol: "BTCUSDT", via: "symbol" });
+  assert.deepEqual(r.warnings, [NO_MARKET_WARNING("BTCUSDT")]);
 });
 
 test("a report too large to return inline still carries the instrument and the warning", async () => {

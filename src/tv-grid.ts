@@ -8,6 +8,11 @@
  * The measured values ship in src/tv-grid.generated.json, written by
  * `node scripts/sync-tv-grid.mjs <tv-grid-table.json>` (see the README maintenance
  * note); they are looked up here by market and native symbol, nothing is inferred.
+ *
+ * Besides the readings the table says, per market, which Binance symbols TradingView does not
+ * list (`not_on_tv`) and, where at least 80% of the readings agree, TradingView's usual lot size
+ * (`defaults`): what a listing newer than the readings most likely reads. A table written before
+ * those two sections still loads; it simply has neither.
  */
 
 import { readFileSync } from "node:fs";
@@ -16,6 +21,13 @@ import type { BinanceMarket } from "./instrument.js";
 
 export const TV_GRID_SCHEMA = "pineforge-tv-grid/v1";
 
+/** TradingView's usual lot size on a market, with the share of the readings that are it and how many readings that is. */
+export interface TvDefault {
+  mincontract: number;
+  share: number;
+  n: number;
+}
+
 export interface TvGrid {
   schema: string;
   source: { schema: string; generated_utc: string; sha256: string; venues: Record<string, string> };
@@ -23,7 +35,15 @@ export interface TvGrid {
   content_sha256: string;
   spot: Record<string, number>;
   usdt_perp: Record<string, number>;
+  /** Per market, the symbols the exchange lists and TradingView does not. Absent in a table that predates it. */
+  not_on_tv?: Partial<Record<BinanceMarket, string[]>>;
+  /** Per market, TradingView's usual lot size, only where at least 80% of the readings are it. Absent in a table that predates it. */
+  defaults?: Partial<Record<BinanceMarket, TvDefault>>;
 }
+
+/** The share of a market's readings that must agree before their value is called TradingView's usual one (sync-tv-grid.mjs applies the same line). */
+export const TV_DEFAULT_MIN_SHARE = 0.8;
+const MARKETS: readonly BinanceMarket[] = ["spot", "usdt_perp"];
 
 /** src/tv-grid.generated.json at the package root (npm `files` and the Docker image ship it). */
 export function tvGridPath(): string {
@@ -41,7 +61,38 @@ export function parseTvGrid(text: string): TvGrid {
   if (typeof g.source?.generated_utc !== "string" || !/^[0-9a-f]{64}$/.test(String(g.source?.sha256))) {
     throw new Error("the source block is incomplete");
   }
+  checkNotOnTv(g.not_on_tv);
+  checkDefaults(g.defaults);
   return g;
+}
+
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** `not_on_tv`, when the table has it: an object whose market entries are lists of symbols. */
+function checkNotOnTv(section: unknown): void {
+  if (section === undefined) return;
+  if (!isObject(section)) throw new Error("not_on_tv is not an object of symbol lists");
+  for (const m of MARKETS) {
+    const list = section[m];
+    if (list !== undefined && !(Array.isArray(list) && list.every((s) => typeof s === "string" && /^[\x21-\x7e]{1,64}$/.test(s)))) {
+      throw new Error(`not_on_tv.${m} is not a list of symbols`);
+    }
+  }
+}
+
+/** `defaults`, when the table has it: per market a lot size in range, a share of at least 0.8 and at most 1, and a count. */
+function checkDefaults(section: unknown): void {
+  if (section === undefined) return;
+  if (!isObject(section)) throw new Error("defaults is not an object");
+  for (const m of MARKETS) {
+    const d = section[m];
+    if (d === undefined) continue;
+    const e = isObject(d) ? d : {};
+    const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+    if (!num(e.mincontract) || e.mincontract < 1e-12 || e.mincontract > 1e12) throw new Error(`defaults.${m} has a bad mincontract`);
+    if (!num(e.share) || e.share < TV_DEFAULT_MIN_SHARE || e.share > 1) throw new Error(`defaults.${m} has a bad share`);
+    if (!num(e.n) || !Number.isInteger(e.n) || e.n < 1) throw new Error(`defaults.${m} has a bad n`);
+  }
 }
 
 let loaded: { grid?: TvGrid; error?: string } | undefined;
@@ -70,7 +121,13 @@ export function tvLotStep(market: BinanceMarket, symbol: string): number | undef
   return map && Object.prototype.hasOwnProperty.call(map, key) ? map[key] : undefined;
 }
 
-/** When the table was measured, as UTC text ("2026-10-03"), or "unknown". */
-export function tvGridDate(): string {
-  return tvGrid().grid?.source.generated_utc.slice(0, 10) ?? "unknown";
+/** Whether the table says TradingView does not list this symbol on that Binance market (never, for a table without the list). */
+export function tvNotListed(market: BinanceMarket, symbol: string): boolean {
+  return tvGrid().grid?.not_on_tv?.[market]?.includes(symbol.toUpperCase()) === true;
 }
+
+/** TradingView's usual lot size on a market, when the table has one (at least 80% of its readings are it). */
+export function tvDefaultLot(market: BinanceMarket): TvDefault | undefined {
+  return tvGrid().grid?.defaults?.[market];
+}
+

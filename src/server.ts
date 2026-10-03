@@ -32,6 +32,7 @@ import {
   redactCredentials,
   removeSidecar,
   resolveInstrument,
+  tvLotFor,
   unresolvedInstrument,
   writeSidecar,
   type BinanceMarket,
@@ -39,7 +40,6 @@ import {
   type Instrument,
   type UserSyminfo,
 } from "./instrument.js";
-import { tvLotStep } from "./tv-grid.js";
 import { coverageIndex, coverageTopic, checkPineFeature } from "./coverage.js";
 import { parityToolResult, type ParityDeps, type ParityToolArgs } from "./parity-tool.js";
 import { toolMeta } from "./tool-meta.js";
@@ -139,6 +139,19 @@ async function writeReportFile(value: unknown, explicitPath: string | undefined,
   };
 }
 
+const MAX_REPORT_WARNINGS = 20;
+const MAX_REPORT_WARNING_CHARS = 1000;
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** The `warnings` the engine's report carries itself: strings only, at most 20 of them, each at most 1,000 characters. */
+function reportWarnings(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((w): w is string => typeof w === "string" && w.length > 0)
+    .slice(0, MAX_REPORT_WARNINGS)
+    .map((w) => w.slice(0, MAX_REPORT_WARNING_CHARS));
+}
+
 async function runBacktest(runner: EngineRunner, args: BacktestArgs): Promise<unknown> {
   const csvPath = await resolveCsvPath(args.ohlcv_csv_path);
   const image = args.image ?? DEFAULT_IMAGE;
@@ -165,14 +178,19 @@ async function runBacktest(runner: EngineRunner, args: BacktestArgs): Promise<un
       notices,
     });
     // Nothing applied (no overlay, or the runner went without it): say so; else check what the engine reports.
+    // The engine's own top-level `warnings` (a later release may have them) come after ours and never replace them.
+    const { warnings: fromEngine, ...engineReport } = (isRecord(report) ? report : {}) as Record<string, unknown>;
     const warnings = [
-      ...resolution.warnings,
-      ...(!apply ? [NOT_APPLIED_WARNING] : notices.length ? [] : appliedWarnings(instrument, report)),
-      ...notices,
+      ...new Set([
+        ...resolution.warnings,
+        ...(!apply ? [NOT_APPLIED_WARNING] : notices.length ? [] : appliedWarnings(instrument, report)),
+        ...notices,
+        ...reportWarnings(fromEngine),
+      ]),
     ];
     const full = {
       ...(warnings.length ? { warnings } : {}),
-      ...(report as object),
+      ...engineReport,
       _meta: { strategy_cpp_bytes: cpp.length, image: runner.mode === "docker" ? image : "local" },
     };
 
@@ -657,7 +675,8 @@ async function recordInstrument(
   try {
     const info = await lookupBinanceSymbol(market, name);
     if (!info) throw new Error(`${name} is not in Binance ${market} exchangeInfo`);
-    const instrument = instrumentFromBinance(info, market, tvLotStep(market, name));
+    const { reading, usual } = tvLotFor(market, name);
+    const instrument = instrumentFromBinance(info, market, reading, usual);
     if (!instrument.resolved) throw new Error(instrument.reason);
     instrument.source = { ...instrument.source!, fetched_at: new Date().toISOString() };
     return { instrument, path: await writeSidecar(csvPath, instrument, feed), warnings: [] };
@@ -782,20 +801,29 @@ const ParamGridSchema = z.record(
 const MarketSchema = z.enum(["spot", "usdt_perp"]);
 const IntervalSchema = z.enum(BINANCE_INTERVALS);
 
+// Where the instrument's numbers come from: one statement, in the words the tool texts and the README share.
+const LOT_AND_TICK_SOURCES =
+  "The lot size is TradingView's own reading for the symbol, from a measured table shipped with this server " +
+  "(Binance's LOT_SIZE.stepSize only for a symbol TradingView does not list; TradingView's usual 0.001 for a " +
+  "listing newer than the table); the tick size and currencies come from Binance's public exchangeInfo " +
+  "(or from the sidecar next to a CSV fetched by fetch_binance_ohlcv).";
+
 // The instrument of a backtest (shared by backtest_pine and backtest_pine_grid).
 const instrumentArgs = {
   symbol: z.string().min(2).max(40).optional().describe(
-    "Binance symbol the CSV holds, e.g. 'BTCUSDT'. Its lot size is TradingView's own for that symbol (a " +
-    "measured table shipped with this server: it differs from Binance's LOT_SIZE.stepSize for most symbols, " +
-    "e.g. USDT-M BTCUSDT is 0.000001 on TradingView, 0.001 on Binance), so order quantities are floored as " +
-    "on TradingView; a symbol the table lacks (a newer listing) gets Binance's LOT_SIZE.stepSize, with a " +
-    "note. The tick size and currencies are read from Binance's public exchangeInfo. Without an instrument " +
-    "the engine can book sub-lot margin-call rows TradingView does not. A CSV written by fetch_binance_ohlcv " +
-    "needs neither `symbol` nor `syminfo`: the instrument is recorded next to it (<csv>.instrument.json) and " +
-    "used. If nothing can be resolved the run still goes ahead without a lot grid and says so in `warnings` " +
-    "and applied_runtime.syminfo."
+    "Binance symbol the CSV holds, e.g. 'BTCUSDT'. " + LOT_AND_TICK_SOURCES + " TradingView's reading differs " +
+    "from Binance's step for most symbols (USDT-M BTCUSDT is 0.000001 on TradingView, 0.001 on Binance), so " +
+    "order quantities are floored as on TradingView; 0.001 is what TradingView reads for 90.6% of Binance spot " +
+    "symbols and 97.5% of USDT-M ones, and a lot size that is Binance's or that usual 0.001 comes with a warning. " +
+    "Without an instrument the engine can book sub-lot margin-call rows TradingView does not. A CSV written by " +
+    "fetch_binance_ohlcv needs neither `symbol` nor `syminfo`: the instrument is recorded next to it " +
+    "(<csv>.instrument.json) and used. If nothing can be resolved the run still goes ahead without a lot grid " +
+    "and says so in `warnings` and applied_runtime.syminfo."
   ),
-  market: MarketSchema.optional().describe("'spot' (default) or 'usdt_perp'; the Binance market `symbol` is looked up in."),
+  market: MarketSchema.optional().describe(
+    "'spot' (default; a warning says when it is assumed) or 'usdt_perp'; the Binance market `symbol` is looked " +
+    "up in. A CSV fetched by fetch_binance_ohlcv for the same symbol keeps the market it was fetched for."
+  ),
   syminfo: SyminfoArgSchema.optional().describe(
     "The instrument's own values, for a CSV of any other instrument; they win over what `symbol` or the " +
     "CSV's sidecar gives. Applied to the engine: qty_step (the lot grid) and mincontract, mintick, " +
@@ -1104,10 +1132,10 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         "slippage, default_qty_type, commission_type, process_orders_on_close). " +
         "Returns the parsed JSON report (summary, trades, applied_inputs, " +
         "applied_overrides, applied_runtime, elapsed_seconds). The instrument matters: pass `symbol` " +
-        "(a Binance symbol; lot size and tick size come from Binance's public exchangeInfo) or `syminfo` " +
-        "(your own qty_step, mintick, ...); a CSV from fetch_binance_ohlcv carries its instrument and needs " +
-        "neither. What was applied is in applied_runtime.syminfo; when the lot grid is unknown the result " +
-        "has a `warnings` entry. If the report is too large to " +
+        "(a Binance symbol) or `syminfo` (your own qty_step, mintick, ...); a CSV from fetch_binance_ohlcv " +
+        "carries its instrument and needs neither. " + LOT_AND_TICK_SOURCES + " `syminfo` goes over all of it. " +
+        "What was applied is in applied_runtime.syminfo; when the lot grid is unknown, or its lot size is not a " +
+        "TradingView reading, the result has a `warnings` entry. If the report is too large to " +
         "return inline it is written to report_path and a compact summary " +
         "(with that path) is returned instead. Use backtest_pine_grid for sweeps.",
       inputSchema: {
@@ -1169,7 +1197,8 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         "of {inputs, overrides, summary, elapsed_seconds} entries sorted by `sort_by` " +
         "descending, plus the top entry under `best`. Cap: max_combinations (default " +
         "64). Takes the same `symbol` / `market` / `syminfo` as backtest_pine and applies the instrument to " +
-        "every combination (the result's `instrument` shows it). " + concurrencyHelp,
+        "every combination (the result's `instrument` shows it). " + LOT_AND_TICK_SOURCES + " `syminfo` goes over " +
+        "all of it. " + concurrencyHelp,
       inputSchema: {
         source: z.string().describe("PineScript v6 source."),
         ohlcv_csv_path: z.string().describe("Path to OHLCV CSV (same format as backtest_pine)."),
@@ -1248,10 +1277,10 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         "magnifier_ohlcv_csv or magnifier_ohlcv_csv_path; a script that declares the magnifier but runs without one " +
         "gets a warning that fills inside bars may differ from TradingView's. Settings the XLSX Properties sheet states " +
         "are used; an explicit input that disagrees with one is an error. The run applies the instrument's lot " +
-        "size and tick size as backtest_pine does: for BINANCE:<SYMBOL> and BINANCE:<SYMBOL>.P, TradingView's own " +
-        "lot size from a measured table shipped with this server (Binance's LOT_SIZE.stepSize for a symbol the table " +
-        "lacks), the tick size from Binance's public exchangeInfo; `syminfo` gives your own values. The result's " +
-        "`applied_instrument` shows what was applied, and `warnings` says when no lot size could be found. " + parityWhere,
+        "size and tick size as backtest_pine does, for BINANCE:<SYMBOL> and BINANCE:<SYMBOL>.P. " +
+        LOT_AND_TICK_SOURCES + " `syminfo` gives your own values and goes over all of it. The result's " +
+        "`applied_instrument` shows what was applied, and `warnings` says when no lot size could be found or its " +
+        "lot size is not a TradingView reading. " + parityWhere,
       inputSchema: {
         pine: z.string().describe("The Pine v6 strategy source TradingView ran (at most 262,144 bytes of UTF-8)."),
         tradingview_trades: z.string().describe(
@@ -1331,10 +1360,11 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         "CSV (header: timestamp,open,high,low,close,volume; timestamp = open time " +
         "in UNIX ms UTC). Supports `spot` and `usdt_perp` (USDT-margined " +
         "perpetual futures). Requests larger than 1000 bars are paginated " +
-        "automatically. Also records the symbol's instrument (TradingView's lot size from a measured table " +
-        "shipped with this server, else Binance's; tick size and currencies from Binance's public " +
-        "exchangeInfo) in <output_path>.instrument.json, which backtest_pine and backtest_pine_grid " +
-        "pick up; the result's `instrument` shows what was recorded. The output path must " +
+        "automatically. Also records the symbol's instrument in <output_path>.instrument.json (lot size: " +
+        "TradingView's own reading from a measured table shipped with this server, Binance's LOT_SIZE.stepSize " +
+        "for a symbol TradingView does not list, TradingView's usual 0.001 for a listing newer than the table; " +
+        "tick size and currencies from Binance's public exchangeInfo), which backtest_pine and " +
+        "backtest_pine_grid pick up; the result's `instrument` shows what was recorded. The output path must " +
         "live inside the MCP cwd unless PINEFORGE_ALLOW_ANYWHERE=1.",
       inputSchema: {
         symbol: z.string().min(2).describe("Binance symbol, e.g. 'BTCUSDT'. Use binance_symbols to validate."),

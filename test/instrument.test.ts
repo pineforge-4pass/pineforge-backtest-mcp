@@ -16,7 +16,8 @@ import {
   cleanToken,
   csvBarRange,
   describeInstrument,
-  exchangeLotNote,
+  defaultLotWarning,
+  exchangeLotWarning,
   hasApplicableField,
   instrumentFromBinance,
   instrumentFromTable,
@@ -35,6 +36,7 @@ import {
   type Instrument,
 } from "../src/instrument.js";
 import { resetTvGrid, tvLotStep } from "../src/tv-grid.js";
+import { fileURLToPath } from "node:url";
 
 const fixture = (name: string): BinanceSymbolInfo[] =>
   JSON.parse(readFileSync(new URL(`./fixtures/binance/${name}`, import.meta.url), "utf8")).symbols;
@@ -420,10 +422,46 @@ const NEWCOIN: BinanceSymbolInfo = {
   symbol: "NEWCOINUSDT", status: "TRADING", baseAsset: "NEWCOIN", quoteAsset: "USDT",
   filters: [{ filterType: "PRICE_FILTER", tickSize: "0.0001" }, { filterType: "LOT_SIZE", stepSize: "0.1" }],
 };
+// Symbols Binance lists and TradingView does not (the table's not_on_tv): Binance's lot step is the only one there is.
+const exchangeRecord = (symbol: string, step: string, base: string): BinanceSymbolInfo => ({
+  symbol, status: "TRADING", baseAsset: base, quoteAsset: symbol.slice(base.length),
+  filters: [{ filterType: "PRICE_FILTER", tickSize: "0.0001" }, { filterType: "LOT_SIZE", stepSize: step }],
+});
+const UNLISTED_SPOT = exchangeRecord("AIXBTUSDC", "0.01", "AIXBT");
+const UNLISTED_PERP = exchangeRecord("STGUSDT", "1", "STG");
+// The two provenance warnings and the market note, written out (the contract's text, not built from the source).
+const EXCHANGE_WARNING = (label: string) =>
+  `lot size for ${label} is the exchange's lot step, not a TradingView reading: order quantities may differ from TradingView's`;
+const DEFAULT_WARNING = (label: string, value: string) =>
+  `lot size for ${label} is TradingView's usual default (${value}), not a reading for this symbol (a listing newer than the readings): ` +
+  "order quantities may differ from TradingView's";
+const NO_MARKET_WARNING = (symbol: string) =>
+  `market not given: spot assumed for ${symbol} (pass market "usdt_perp" for a USD-M perpetual)`;
+
+/** Run with the lot-size table at `file` instead of the shipped one (the real table is back afterwards). */
+async function withTable(file: string, run: () => Promise<void>): Promise<void> {
+  const saved = process.env.PINEFORGE_TV_GRID;
+  process.env.PINEFORGE_TV_GRID = file;
+  resetTvGrid();
+  try {
+    await run();
+  } finally {
+    if (saved === undefined) delete process.env.PINEFORGE_TV_GRID; else process.env.PINEFORGE_TV_GRID = saved;
+    resetTvGrid();
+  }
+}
+/** A copy of the shipped table, edited, written to a file. */
+function tableVariant(name: string, edit: (g: any) => void): string {
+  const g = JSON.parse(readFileSync(fileURLToPath(new URL("../src/tv-grid.generated.json", import.meta.url)), "utf8"));
+  edit(g);
+  const path = join(tmp, `${name}.json`);
+  writeFileSync(path, JSON.stringify(g));
+  return path;
+}
 
 test("symbol: TradingView's lot size from the embedded table, tick size and currencies from exchangeInfo (upper-cased)", async () => {
   const seen: string[] = [];
-  const got = await resolveInstrument({ symbol: " btcusdt " }, csv(), lookupIn(SPOT, seen));
+  const got = await resolveInstrument({ symbol: " btcusdt ", market: "spot" }, csv(), lookupIn(SPOT, seen));
   assert.deepEqual(seen, ["spot:BTCUSDT"]);
   assert.deepEqual(got.warnings, []);
   assert.deepEqual(got.instrument, {
@@ -451,12 +489,179 @@ test("the embedded table decides: DOGEUSDT spot is 0.001 (Binance 1), XRPUSDT sp
   );
 });
 
-test("a symbol the table lacks gets Binance's lot size, says so in the instrument and in a note", async () => {
-  const got = await resolveInstrument({ symbol: "NEWCOINUSDT" }, csv(), lookupIn([NEWCOIN]));
-  assert.deepEqual([got.instrument.resolved, got.instrument.qty_step, got.instrument.mintick, got.instrument.source!.kind], [true, 0.1, 0.0001, "exchange"]);
-  assert.equal(lotOrigin(got.instrument), "exchange");
-  assert.equal(got.warnings.length, 1);
-  assert.match(got.warnings[0]!, /^the lot size 0\.1 is Binance's LOT_SIZE\.stepSize: NEWCOINUSDT is not in the embedded TradingView lot-size table \(measured \d{4}-\d\d-\d\d\), so TradingView's own lot size for it may differ \(it is 0\.001 for most Binance symbols\); pass `syminfo\.qty_step` to set another$/);
+// The lot size of a symbol, by what the table knows of it (market by market, the same four branches):
+//   1. a reading in the table           -> TradingView's own, no provenance warning
+//   2. listed in the table's not_on_tv  -> Binance's lot step, kind exchange, the exchange warning
+//   3. in neither, a default for the market -> TradingView's usual 0.001, kind default, the default warning
+//   4. Binance gives no record and no reading -> unresolved, never an invented grid
+const MARKET_CASES = [
+  { market: "spot" as const, records: SPOT, listed: "BTCUSDT", listedStep: 0.00001, unlisted: UNLISTED_SPOT, unlistedStep: 0.01 },
+  { market: "usdt_perp" as const, records: FAPI, listed: "BTCUSDT", listedStep: 0.000001, unlisted: UNLISTED_PERP, unlistedStep: 1 },
+];
+for (const c of MARKET_CASES) {
+  const label = (symbol: string) => `Binance ${c.market} ${symbol}`;
+
+  test(`${c.market}, branch 1: a symbol with a reading gets TradingView's lot size and no provenance warning`, async () => {
+    const got = await resolveInstrument({ symbol: c.listed, market: c.market }, csv(), lookupIn(c.records));
+    assert.deepEqual([got.instrument.qty_step, got.instrument.source!.kind], [c.listedStep, "tradingview"]);
+    assert.deepEqual(got.warnings, []);
+  });
+
+  test(`${c.market}, branch 2: a symbol TradingView does not list gets Binance's lot step, kind exchange, and the exchange warning`, async () => {
+    const got = await resolveInstrument({ symbol: c.unlisted.symbol, market: c.market }, csv(), lookupIn([...c.records, c.unlisted]));
+    assert.deepEqual(got.instrument, {
+      schema: INSTRUMENT_SCHEMA, resolved: true,
+      qty_step: c.unlistedStep, mincontract: c.unlistedStep, mintick: 0.0001, pointvalue: 1,
+      type: "crypto", currency: c.unlisted.quoteAsset, basecurrency: c.unlisted.baseAsset,
+      source: { kind: "exchange", market: c.market, symbol: c.unlisted.symbol, via: "symbol" },
+    });
+    assert.equal(lotOrigin(got.instrument), "exchange");
+    assert.deepEqual(got.warnings, [EXCHANGE_WARNING(label(c.unlisted.symbol))]);
+  });
+
+  test(`${c.market}, branch 3: a listing newer than the table gets TradingView's usual 0.001 (not Binance's step), kind default, and the default warning`, async () => {
+    const got = await resolveInstrument({ symbol: "NEWCOINUSDT", market: c.market }, csv(), lookupIn([...c.records, NEWCOIN]));
+    assert.deepEqual(got.instrument, {
+      schema: INSTRUMENT_SCHEMA, resolved: true,
+      qty_step: 0.001, mincontract: 0.001, mintick: 0.0001, pointvalue: 1,
+      type: "crypto", currency: "USDT", basecurrency: "NEWCOIN",
+      source: { kind: "default", market: c.market, symbol: "NEWCOINUSDT", via: "symbol" },
+    });
+    assert.equal(lotOrigin(got.instrument), "default");
+    assert.deepEqual(got.warnings, [DEFAULT_WARNING(label("NEWCOINUSDT"), "0.001")]);
+  });
+
+  test(`${c.market}, branch 4: Binance gives no record: a symbol outside the table is unresolved, listed by TradingView or not`, async () => {
+    for (const symbol of ["NEWCOINUSDT", c.unlisted.symbol]) {
+      const absent = await resolveInstrument({ symbol, market: c.market }, csv(), lookupIn(c.records));
+      assert.equal(absent.instrument.resolved, false, symbol);
+      assert.equal(absent.instrument.qty_step, undefined, `${symbol}: no grid is invented`);
+      assert.equal(absent.instrument.reason, `${symbol} is not in Binance ${c.market} exchangeInfo`);
+      assert.equal(absent.warnings.length, 1, symbol);
+      assert.ok(absent.warnings[0]!.startsWith(`instrument grid unavailable for ${label(symbol)} (${symbol} is not in Binance ${c.market} exchangeInfo): order quantity is not floored`), absent.warnings[0]);
+      const down = await resolveInstrument({ symbol, market: c.market }, csv(), async () => { throw new Error("fetch failed"); });
+      assert.equal(down.instrument.resolved, false, symbol);
+      assert.equal(down.instrument.reason, `Binance ${c.market} exchangeInfo unavailable`);
+      assert.ok(down.warnings.every((w) => !w.startsWith("lot size for ")), "no provenance warning for a lot size that is not there");
+    }
+  });
+}
+
+test("an older-shaped table (no not_on_tv, no defaults): a symbol absent from it takes Binance's lot step, kind exchange, with the exchange warning", async () => {
+  const old = tableVariant("older-shape", (g) => { delete g.not_on_tv; delete g.defaults; });
+  await withTable(old, async () => {
+    const spotNew = await resolveInstrument({ symbol: "NEWCOINUSDT", market: "spot" }, csv(), lookupIn([NEWCOIN]));
+    assert.deepEqual([spotNew.instrument.qty_step, spotNew.instrument.source!.kind], [0.1, "exchange"]);
+    assert.deepEqual(spotNew.warnings, [EXCHANGE_WARNING("Binance spot NEWCOINUSDT")]);
+    // the symbol TradingView does not list is no different here: the table cannot tell it from a new listing
+    const unlisted = await resolveInstrument({ symbol: "AIXBTUSDC", market: "spot" }, csv(), lookupIn([UNLISTED_SPOT]));
+    assert.deepEqual([unlisted.instrument.qty_step, unlisted.instrument.source!.kind], [0.01, "exchange"]);
+    assert.deepEqual(unlisted.warnings, [EXCHANGE_WARNING("Binance spot AIXBTUSDC")]);
+    const perpNew = await resolveInstrument({ symbol: "NEWCOINUSDT", market: "usdt_perp" }, csv(), lookupIn([NEWCOIN]));
+    assert.deepEqual([perpNew.instrument.qty_step, perpNew.instrument.source!.kind], [0.1, "exchange"]);
+    assert.deepEqual(perpNew.warnings, [EXCHANGE_WARNING("Binance usdt_perp NEWCOINUSDT")]);
+    // the readings it does have are still TradingView's
+    const known = await resolveInstrument({ symbol: "BTCUSDT", market: "spot" }, csv(), lookupIn(SPOT));
+    assert.deepEqual([known.instrument.qty_step, known.instrument.source!.kind, known.warnings], [0.00001, "tradingview", []]);
+    // and with no Binance record there is nothing to resolve
+    const none = await resolveInstrument({ symbol: "NEWCOINUSDT", market: "spot" }, csv(), lookupIn([]));
+    assert.equal(none.instrument.resolved, false);
+  });
+});
+
+test("a market without a default in the table: a listing newer than it takes Binance's lot step with the exchange warning; the market with one still gets 0.001", async () => {
+  const spotOnly = tableVariant("spot-default-only", (g) => { delete g.defaults.usdt_perp; });
+  await withTable(spotOnly, async () => {
+    const perp = await resolveInstrument({ symbol: "NEWCOINUSDT", market: "usdt_perp" }, csv(), lookupIn([NEWCOIN]));
+    assert.deepEqual([perp.instrument.qty_step, perp.instrument.source!.kind], [0.1, "exchange"]);
+    assert.deepEqual(perp.warnings, [EXCHANGE_WARNING("Binance usdt_perp NEWCOINUSDT")]);
+    const spotNew = await resolveInstrument({ symbol: "NEWCOINUSDT", market: "spot" }, csv(), lookupIn([NEWCOIN]));
+    assert.deepEqual([spotNew.instrument.qty_step, spotNew.instrument.source!.kind], [0.001, "default"]);
+    assert.deepEqual(spotNew.warnings, [DEFAULT_WARNING("Binance spot NEWCOINUSDT", "0.001")]);
+  });
+  const noDefaults = tableVariant("no-defaults", (g) => { g.defaults = {}; });
+  await withTable(noDefaults, async () => {
+    const spotNew = await resolveInstrument({ symbol: "NEWCOINUSDT", market: "spot" }, csv(), lookupIn([NEWCOIN]));
+    assert.deepEqual([spotNew.instrument.qty_step, spotNew.instrument.source!.kind], [0.1, "exchange"]);
+  });
+});
+
+test("the provenance warnings are the contract's sentences, with the applied value printed as JavaScript prints it", () => {
+  assert.equal(
+    exchangeLotWarning("Binance spot AIXBTUSDC"),
+    "lot size for Binance spot AIXBTUSDC is the exchange's lot step, not a TradingView reading: order quantities may differ from TradingView's",
+  );
+  assert.equal(
+    defaultLotWarning("Binance usdt_perp NEWUSDT", 0.001),
+    "lot size for Binance usdt_perp NEWUSDT is TradingView's usual default (0.001), not a reading for this symbol (a listing newer than the readings): order quantities may differ from TradingView's",
+  );
+  assert.match(defaultLotWarning("x", 1e-7), /usual default \(1e-7\)/);
+  assert.match(defaultLotWarning("x", 0.5), /usual default \(0\.5\)/);
+});
+
+test("instrumentFromBinance: a reading, else the market's usual lot size, else the exchange's, each says which it is", () => {
+  const kind = (i: Instrument) => [i.qty_step, i.source!.kind];
+  assert.deepEqual(kind(instrumentFromBinance(NEWCOIN, "spot", 0.5, 0.001)), [0.5, "tradingview"], "a reading wins over the usual");
+  assert.deepEqual(kind(instrumentFromBinance(NEWCOIN, "spot", undefined, 0.001)), [0.001, "default"]);
+  assert.deepEqual(kind(instrumentFromBinance(NEWCOIN, "spot")), [0.1, "exchange"]);
+  assert.deepEqual(kind(instrumentFromBinance(NEWCOIN, "spot", undefined, NaN)), [0.1, "exchange"], "an invalid usual value is not used");
+  assert.deepEqual(kind(instrumentFromBinance(NEWCOIN, "spot", undefined, 0)), [0.1, "exchange"]);
+});
+
+// ─── `symbol` without `market` ────────────────────────────────────────────
+
+test("symbol without market and no sidecar that names it: spot is assumed, and the result says so", async () => {
+  const seen: string[] = [];
+  const got = await resolveInstrument({ symbol: "btcusdt" }, csv(), lookupIn(SPOT, seen));
+  assert.deepEqual(seen, ["spot:BTCUSDT"]);
+  assert.deepEqual(got.warnings, [NO_MARKET_WARNING("BTCUSDT")]);
+  assert.equal(got.instrument.source!.market, "spot");
+  // with no CSV at all (no sidecar can exist), the same
+  const noCsv = await resolveInstrument({ symbol: "ETHUSDT" }, undefined, lookupIn(SPOT));
+  assert.deepEqual(noCsv.warnings, [NO_MARKET_WARNING("ETHUSDT")]);
+  // it goes with the other notes of the run, first
+  const newCoin = await resolveInstrument({ symbol: "NEWCOINUSDT" }, csv(), lookupIn([NEWCOIN]));
+  assert.deepEqual(newCoin.warnings, [NO_MARKET_WARNING("NEWCOINUSDT"), DEFAULT_WARNING("Binance spot NEWCOINUSDT", "0.001")]);
+  // and when nothing resolves
+  const none = await resolveInstrument({ symbol: "NOPEUSDT" }, csv(), lookupIn(SPOT));
+  assert.equal(none.warnings.length, 2);
+  assert.ok(none.warnings[0]!.startsWith("instrument grid unavailable for Binance spot NOPEUSDT"));
+  assert.equal(none.warnings[1], NO_MARKET_WARNING("NOPEUSDT"), "the unresolved warning stays first");
+});
+
+test("a market that is given, either one, is not warned about; neither is a syminfo-only or sidecar-only run", async () => {
+  for (const market of ["spot", "usdt_perp"] as const) {
+    const got = await resolveInstrument({ symbol: "BTCUSDT", market }, csv(), lookupIn(market === "spot" ? SPOT : FAPI));
+    assert.deepEqual(got.warnings, [], market);
+  }
+  assert.deepEqual((await resolveInstrument({ syminfo: { qty_step: 0.5, mintick: 0.5 } }, csv(), neverLookup)).warnings, []);
+  const path = csv();
+  await writeSidecar(path, instrumentFromBinance(spot("ETHUSDT"), "spot", 0.0001), FEED);
+  assert.deepEqual((await resolveInstrument({}, path, neverLookup)).warnings, []);
+});
+
+test("a sidecar that names the symbol and its market settles it (no warning); one for another symbol, or without a market, does not", async () => {
+  const perp = csv();
+  await writeSidecar(perp, { ...instrumentFromBinance(fapi("BTCUSDT"), "usdt_perp", 0.000001) }, FEED);
+  const seen: string[] = [];
+  const got = await resolveInstrument({ symbol: "BTCUSDT" }, perp, lookupIn(FAPI, seen));
+  assert.deepEqual(seen, ["usdt_perp:BTCUSDT"], "the sidecar's market is the market");
+  assert.deepEqual(got.warnings, []);
+  // the sidecar is for another symbol: nothing names this one
+  const other = csv();
+  await writeSidecar(other, instrumentFromBinance(fapi("ETHUSDT"), "usdt_perp", 0.0001), FEED);
+  assert.deepEqual((await resolveInstrument({ symbol: "BTCUSDT" }, other, lookupIn(SPOT))).warnings, [NO_MARKET_WARNING("BTCUSDT")]);
+  // a sidecar that has the symbol but no market (hand-written) settles nothing either
+  const noMarket = csv();
+  await writeSidecar(noMarket, instrumentFromBinance(spot("BTCUSDT"), "spot", 0.00001), FEED);
+  const raw = JSON.parse(readFileSync(sidecarPath(noMarket), "utf8"));
+  delete raw.source.market;
+  writeFileSync(sidecarPath(noMarket), JSON.stringify(raw));
+  assert.deepEqual((await resolveInstrument({ symbol: "BTCUSDT" }, noMarket, lookupIn(SPOT))).warnings, [NO_MARKET_WARNING("BTCUSDT")]);
+  // an explicit market that disagrees with the sidecar is the existing note, not this one
+  const disagree = await resolveInstrument({ symbol: "BTCUSDT", market: "spot" }, perp, lookupIn(SPOT));
+  assert.equal(disagree.warnings.length, 1);
+  assert.match(disagree.warnings[0]!, /^the CSV was fetched for usdt_perp/);
 });
 
 test("the lookup for the table is by market and exact symbol: a spot symbol is not looked up in the USD-M table", async () => {
@@ -465,11 +670,13 @@ test("the lookup for the table is by market and exact symbol: a spot symbol is n
   const spotGot = await resolveInstrument({ symbol: "BTCUSDT" }, csv(), lookupIn(SPOT), tv);
   const perpGot = await resolveInstrument({ symbol: "BTCUSDT", market: "usdt_perp" }, csv(), lookupIn(FAPI), tv);
   assert.deepEqual(seen, ["spot:BTCUSDT", "usdt_perp:BTCUSDT"]);
-  assert.deepEqual([spotGot.instrument.qty_step, perpGot.instrument.qty_step], [0.00001, 0.5]);
+  // no reading for spot BTCUSDT here: it is not unlisted either, so the market's usual lot size (not Binance's 0.00001)
+  assert.deepEqual([spotGot.instrument.qty_step, spotGot.instrument.source!.kind], [0.001, "default"]);
+  assert.deepEqual([perpGot.instrument.qty_step, perpGot.instrument.source!.kind], [0.5, "tradingview"]);
 });
 
 test("a table symbol Binance does not give (unreachable): TradingView's lot size, no tick, and both facts are said", async () => {
-  const got = await resolveInstrument({ symbol: "BTCUSDT" }, csv(), async () => { throw new Error("Binance 451 for https://api.binance.com/x: blocked"); });
+  const got = await resolveInstrument({ symbol: "BTCUSDT", market: "spot" }, csv(), async () => { throw new Error("Binance 451 for https://api.binance.com/x: blocked"); });
   assert.deepEqual(got.instrument, {
     schema: INSTRUMENT_SCHEMA, resolved: true, qty_step: 0.00001, mincontract: 0.00001, pointvalue: 1, type: "crypto",
     source: { kind: "tradingview", market: "spot", symbol: "BTCUSDT", via: "symbol" },
@@ -480,13 +687,13 @@ test("a table symbol Binance does not give (unreachable): TradingView's lot size
 });
 
 test("a table symbol Binance no longer lists: TradingView's lot size, no tick", async () => {
-  const got = await resolveInstrument({ symbol: "BTCUSDT" }, csv(), lookupIn([]));
+  const got = await resolveInstrument({ symbol: "BTCUSDT", market: "spot" }, csv(), lookupIn([]));
   assert.deepEqual([got.instrument.resolved, got.instrument.qty_step, got.instrument.mintick], [true, 0.00001, undefined]);
   assert.match(got.warnings[0]!, /^BTCUSDT is not in Binance spot exchangeInfo: the lot size is TradingView's/);
 });
 
 test("a symbol neither the table nor Binance has: unresolved, warned, never refused", async () => {
-  const got = await resolveInstrument({ symbol: "NOPEUSDT" }, csv(), lookupIn(SPOT));
+  const got = await resolveInstrument({ symbol: "NOPEUSDT", market: "spot" }, csv(), lookupIn(SPOT));
   assert.equal(got.instrument.resolved, false);
   assert.equal(got.instrument.reason, "NOPEUSDT is not in Binance spot exchangeInfo");
   assert.equal(got.warnings.length, 1);
@@ -496,7 +703,7 @@ test("a symbol neither the table nor Binance has: unresolved, warned, never refu
 });
 
 test("Binance unreachable for a symbol the table lacks: unresolved with fixed reason, error text in the warning only", async () => {
-  const got = await resolveInstrument({ symbol: "NEWCOINUSDT" }, csv(), async () => { throw new Error("Binance 451 for https://api.binance.com/x: blocked"); });
+  const got = await resolveInstrument({ symbol: "NEWCOINUSDT", market: "spot" }, csv(), async () => { throw new Error("Binance 451 for https://api.binance.com/x: blocked"); });
   assert.equal(got.instrument.resolved, false);
   // fixed text in the instrument (it is part of the fingerprint); the error text is in the warning only
   assert.equal(got.instrument.reason, "Binance spot exchangeInfo unavailable");
@@ -517,15 +724,17 @@ test("the error text of an unreachable Binance never reaches the instrument, and
   assert.equal(redactCredentials("no urls here"), "no urls here");
 });
 
-test("an unreadable embedded table: Binance's lot size, and the warning says the table could not be read", async () => {
+test("an unreadable embedded table: Binance's lot step with the exchange warning, and a warning that the table could not be read", async () => {
   const saved = process.env.PINEFORGE_TV_GRID;
   process.env.PINEFORGE_TV_GRID = join(tmp, "no-such-table.json");
   resetTvGrid();
   try {
-    const got = await resolveInstrument({ symbol: "BTCUSDT" }, csv(), lookupIn(SPOT));
+    const got = await resolveInstrument({ symbol: "BTCUSDT", market: "spot" }, csv(), lookupIn(SPOT));
     assert.equal(got.instrument.source!.kind, "exchange");
     assert.equal(got.instrument.qty_step, 0.00001);
-    assert.match(got.warnings[0]!, /^the embedded TradingView lot-size table cannot be read \(.*no-such-table\.json.*\): the lot size is Binance's$/);
+    assert.equal(got.warnings.length, 2);
+    assert.match(got.warnings[0]!, /^the embedded TradingView lot-size table cannot be read \(.*no-such-table\.json.*\)$/);
+    assert.equal(got.warnings[1], EXCHANGE_WARNING("Binance spot BTCUSDT"), "one provenance warning, the contract's");
   } finally {
     if (saved === undefined) delete process.env.PINEFORGE_TV_GRID; else process.env.PINEFORGE_TV_GRID = saved;
     resetTvGrid();
@@ -534,7 +743,7 @@ test("an unreadable embedded table: Binance's lot size, and the warning says the
 });
 
 test("syminfo wins over symbol, which wins over the table; both are named; the lookup still supplies the rest", async () => {
-  const got = await resolveInstrument({ symbol: "BTCUSDT", syminfo: { qty_step: 0.001 } }, csv(), lookupIn(SPOT));
+  const got = await resolveInstrument({ symbol: "BTCUSDT", market: "spot", syminfo: { qty_step: 0.001 } }, csv(), lookupIn(SPOT));
   assert.deepEqual([got.instrument.qty_step, got.instrument.mincontract, got.instrument.mintick, got.instrument.currency], [0.001, 0.001, 0.01, "USDT"]);
   assert.equal(got.instrument.source!.kind, "user");
   assert.deepEqual(got.instrument.source!.base, { kind: "tradingview", market: "spot", symbol: "BTCUSDT", via: "symbol" });
@@ -543,13 +752,18 @@ test("syminfo wins over symbol, which wins over the table; both are named; the l
   assert.deepEqual(got.warnings, []);
 });
 
-test("a user lot size silences the note about Binance's lot size; a user tick does not", async () => {
-  const lot = await resolveInstrument({ symbol: "NEWCOINUSDT", syminfo: { qty_step: 0.5 } }, csv(), lookupIn([NEWCOIN]));
+test("a user lot size silences the provenance warning of the table's lot size; a user tick does not", async () => {
+  const lot = await resolveInstrument({ symbol: "NEWCOINUSDT", market: "spot", syminfo: { qty_step: 0.5 } }, csv(), lookupIn([NEWCOIN]));
   assert.deepEqual(lot.warnings, []);
-  const tick = await resolveInstrument({ symbol: "NEWCOINUSDT", syminfo: { mintick: 0.5 } }, csv(), lookupIn([NEWCOIN]));
-  assert.equal(lotOrigin(tick.instrument), "exchange");
-  assert.equal(tick.warnings.length, 1);
-  assert.match(tick.warnings[0]!, /^the lot size 0\.1 is Binance's LOT_SIZE\.stepSize: NEWCOINUSDT is not in the embedded/);
+  const tick = await resolveInstrument({ symbol: "NEWCOINUSDT", market: "spot", syminfo: { mintick: 0.5 } }, csv(), lookupIn([NEWCOIN]));
+  assert.equal(lotOrigin(tick.instrument), "default");
+  assert.deepEqual(tick.warnings, [DEFAULT_WARNING("Binance spot NEWCOINUSDT", "0.001")]);
+  // the same for a symbol TradingView does not list: the exchange's lot step, warned, unless the user gives one
+  const unlistedTick = await resolveInstrument({ symbol: "AIXBTUSDC", market: "spot", syminfo: { mintick: 0.5 } }, csv(), lookupIn([UNLISTED_SPOT]));
+  assert.equal(lotOrigin(unlistedTick.instrument), "exchange");
+  assert.deepEqual(unlistedTick.warnings, [EXCHANGE_WARNING("Binance spot AIXBTUSDC")]);
+  const unlistedLot = await resolveInstrument({ symbol: "AIXBTUSDC", market: "spot", syminfo: { qty_step: 0.5 } }, csv(), lookupIn([UNLISTED_SPOT]));
+  assert.deepEqual(unlistedLot.warnings, []);
 });
 
 test("syminfo alone never looks anything up", async () => {
@@ -607,13 +821,20 @@ test("neither symbol nor syminfo: the sidecar next to the CSV (TradingView's lot
   assert.deepEqual(got.warnings, []);
 });
 
-test("a sidecar whose lot size is Binance's carries the note too", async () => {
-  const path = csv();
-  await writeSidecar(path, instrumentFromBinance(NEWCOIN, "spot"), FEED);
-  const got = await resolveInstrument({}, path, neverLookup);
-  assert.equal(lotOrigin(got.instrument), "exchange");
-  assert.equal(got.warnings.length, 1);
-  assert.match(got.warnings[0]!, /^the lot size 0\.1 is Binance's LOT_SIZE\.stepSize: NEWCOINUSDT is not in the embedded/);
+test("a sidecar whose lot size is Binance's, or TradingView's usual default, carries the provenance warning too", async () => {
+  const exchangePath = csv();
+  await writeSidecar(exchangePath, instrumentFromBinance(UNLISTED_SPOT, "spot"), FEED);
+  const exchange = await resolveInstrument({}, exchangePath, neverLookup);
+  assert.equal(lotOrigin(exchange.instrument), "exchange");
+  assert.deepEqual(exchange.warnings, [EXCHANGE_WARNING("Binance spot AIXBTUSDC")]);
+  // a default round-trips through the file: kind default, the same warning as when it was resolved
+  const defaultPath = csv();
+  await writeSidecar(defaultPath, instrumentFromBinance(NEWCOIN, "usdt_perp", undefined, 0.001), FEED);
+  assert.equal(JSON.parse(readFileSync(sidecarPath(defaultPath), "utf8")).source.kind, "default");
+  const usual = await resolveInstrument({}, defaultPath, neverLookup);
+  assert.equal(lotOrigin(usual.instrument), "default");
+  assert.deepEqual(usual.instrument.source, { kind: "default", market: "usdt_perp", symbol: "NEWCOINUSDT", via: "sidecar" });
+  assert.deepEqual(usual.warnings, [DEFAULT_WARNING("Binance usdt_perp NEWCOINUSDT", "0.001")]);
 });
 
 test("neither and no sidecar: unresolved, warned, says what to pass", async () => {
@@ -642,7 +863,7 @@ test("a stale sidecar is not used and the warning says why (the instrument's rea
 
 test("dropped values are warned about even when the lot size resolved", async () => {
   const lookup = async () => ({ ...spot("BTCUSDT"), filters: [{ filterType: "LOT_SIZE", stepSize: "0.001" }] });
-  const got = await resolveInstrument({ symbol: "BTCUSDT" }, csv(), lookup);
+  const got = await resolveInstrument({ symbol: "BTCUSDT", market: "spot" }, csv(), lookup);
   assert.equal(got.instrument.resolved, true);
   assert.deepEqual(got.instrument.source!.dropped, ["mintick"]);
   assert.equal(got.warnings.length, 2);
@@ -668,12 +889,18 @@ test("describeInstrument: one line with where the lot size is from", () => {
   assert.equal(describeInstrument(layerUserSyminfo(tvInst, { qty_step: 0.5 })), "BTCUSDT spot: lot size 0.5 (your syminfo), tick 0.01, point value 1.");
   assert.equal(describeInstrument(layerUserSyminfo(undefined, { qty_step: 0.5 })), "lot size 0.5 (your syminfo), tick 0.01 (the engine's default), point value 1.");
   assert.equal(describeInstrument(unresolvedInstrument("why")), "no lot size (why), so order quantity is not floored");
+  const usual = instrumentFromBinance(NEWCOIN, "spot", undefined, 0.001);
+  usual.source = { ...usual.source!, via: "symbol" };
+  assert.equal(describeInstrument(usual), "NEWCOINUSDT spot: lot size 0.001 (TradingView's usual default), tick 0.0001, point value 1.");
 });
 
 test("lotOrigin: the user's, else the base's", () => {
   const tvInst = instrumentFromBinance(spot("BTCUSDT"), "spot", 0.00001);
   assert.equal(lotOrigin(tvInst), "tradingview");
   assert.equal(lotOrigin(instrumentFromBinance(spot("BTCUSDT"), "spot")), "exchange");
+  assert.equal(lotOrigin(instrumentFromBinance(spot("BTCUSDT"), "spot", undefined, 0.001)), "default");
+  assert.equal(lotOrigin(layerUserSyminfo(instrumentFromBinance(NEWCOIN, "spot", undefined, 0.001), { mintick: 0.5 })), "default");
+  assert.equal(lotOrigin(layerUserSyminfo(instrumentFromBinance(NEWCOIN, "spot", undefined, 0.001), { qty_step: 0.5 })), "user");
   assert.equal(lotOrigin(layerUserSyminfo(tvInst, { mintick: 0.5 })), "tradingview");
   assert.equal(lotOrigin(layerUserSyminfo(tvInst, { qty_step: 0.00001 })), "tradingview", "the same value: the base's");
   assert.equal(lotOrigin(layerUserSyminfo(tvInst, { qty_step: 1 })), "user");
@@ -681,10 +908,14 @@ test("lotOrigin: the user's, else the base's", () => {
   assert.equal(lotOrigin(unresolvedInstrument("x")), undefined);
 });
 
-test("exchangeLotNote names the symbol of a user-layered base too", () => {
-  const base = instrumentFromBinance(NEWCOIN, "spot");
-  assert.match(exchangeLotNote(base), /: NEWCOINUSDT is not in the embedded/);
-  assert.match(exchangeLotNote(layerUserSyminfo(base, { mintick: 0.5 })), /: NEWCOINUSDT is not in the embedded/);
+test("settleInstrument: the provenance warning follows the lot size of a user-layered base, and names the label it was given", () => {
+  const exchangeBase = instrumentFromBinance(UNLISTED_SPOT, "spot");
+  const usualBase = instrumentFromBinance(NEWCOIN, "spot", undefined, 0.001);
+  assert.deepEqual(settleInstrument({ base: exchangeBase, user: { mintick: 0.5 }, label: "L" }).warnings, [EXCHANGE_WARNING("L")]);
+  assert.deepEqual(settleInstrument({ base: usualBase, user: { mintick: 0.5 }, label: "L" }).warnings, [DEFAULT_WARNING("L", "0.001")]);
+  assert.deepEqual(settleInstrument({ base: usualBase, user: { qty_step: 0.5 }, label: "L" }).warnings, []);
+  assert.deepEqual(settleInstrument({ base: usualBase, user: { qty_step: 0.001 }, label: "L" }).warnings, [DEFAULT_WARNING("L", "0.001")], "the same value as the base's: still the base's");
+  assert.deepEqual(settleInstrument({ base: instrumentFromBinance(spot("BTCUSDT"), "spot", 0.00001), label: "L" }).warnings, []);
 });
 
 test("the warning text is the contract's", () => {
@@ -848,7 +1079,7 @@ test("a sidecar for another symbol, a stale one, or none leaves the market alone
   const seenOther: string[] = [];
   const a = await resolveInstrument({ symbol: "ETHUSDT" }, other, lookupIn(SPOT, seenOther));
   assert.deepEqual(seenOther, ["spot:ETHUSDT"]);
-  assert.deepEqual(a.warnings, []);
+  assert.deepEqual(a.warnings, [NO_MARKET_WARNING("ETHUSDT")], "nothing names ETHUSDT's market, so spot is an assumption");
   const stale = csv(["1000,1,1,1,1,1", "9000,1,1,1,1,1"]);
   await writeSidecar(stale, instrumentFromBinance(fapi("ETHUSDT"), "usdt_perp", 0.0001), FEED);
   const seenStale: string[] = [];

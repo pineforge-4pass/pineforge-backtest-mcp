@@ -256,11 +256,25 @@ engine before the run, through its C ABI: `qty_step` and `mincontract` (the lot 
 timezone and session are not applied (the engine keeps its defaults). Where it comes from:
 
 1. `symbol` (+ `market`: `spot` or `usdt_perp`; default: the market recorded in the CSV's sidecar when
-   it names the same symbol, so a fetched perpetual stays a perpetual, else `spot`; a `market` that
-   disagrees with the sidecar is used, and the result says which one the CSV was fetched for). The **lot size is TradingView's
-   own** for that symbol, from a table measured on TradingView and shipped with this server
-   (see below). For a symbol the table lacks (a listing newer than it, or one TradingView does
-   not list) it is Binance's `LOT_SIZE.stepSize`, and the result carries a note saying so.
+   it names the same symbol, so a fetched perpetual stays a perpetual, else `spot`, and then the
+   result says so: `market not given: spot assumed for <SYMBOL> (pass market "usdt_perp" for a USD-M
+   perpetual)`; a `market` that disagrees with the sidecar is used, and the result says which one the
+   CSV was fetched for). In one sentence: The lot size is TradingView's own reading for the symbol, from a
+   measured table shipped with this server (Binance's LOT_SIZE.stepSize only for a symbol TradingView does
+   not list; TradingView's usual 0.001 for a listing newer than the table); the tick size and currencies
+   come from Binance's public exchangeInfo (or from the sidecar next to a CSV fetched by fetch_binance_ohlcv).
+   The **lot size** has three tiers, by what the table (see below) knows of the symbol:
+   1. a reading in the table (the usual case): TradingView's own, with no provenance warning;
+   2. a symbol the table lists as not on TradingView (`not_on_tv`): Binance's `LOT_SIZE.stepSize`, the only
+      one there is, and the warning `lot size for <label> is the exchange's lot step, not a TradingView
+      reading: order quantities may differ from TradingView's`;
+   3. any other symbol Binance lists (a listing newer than the table): TradingView's usual 0.001, and the
+      warning `lot size for <label> is TradingView's usual default (0.001), not a reading for this symbol (a
+      listing newer than the readings): order quantities may differ from TradingView's` (`<label>` is
+      e.g. `Binance spot BTCUSDT`). A market the table has no usual lot size for takes Binance's step, as in 2.
+
+   Without Binance's record for the symbol (it does not list it, or Binance cannot be reached) and no
+   reading in the table there is no lot size: the instrument is unresolved (below), never an invented grid.
    The **tick size** is the symbol's `PRICE_FILTER.tickSize` and the currencies are its
    `quoteAsset` and `baseAsset`, read from Binance's public exchangeInfo (one request, cached
    for 5 minutes); the point value is 1 and the type `crypto`.
@@ -276,10 +290,12 @@ timezone and session are not applied (the engine keeps its defaults). Where it c
 
 What was applied is in the report's `applied_runtime.syminfo` and so in
 `fingerprint.provenance.runtime`: a gridless and a gridded run never share a
-fingerprint. Its `source.kind` says where the lot size is from: `tradingview` (the table),
-`exchange` (Binance's, for a symbol the table lacks) or `user` (`syminfo`, with `source.base`
-naming what it went over). **Unresolved** means no lot size was found (no `symbol`, `syminfo` or
-sidecar, Binance unreachable for a symbol the table lacks, or a symbol neither has): the run
+fingerprint. Its `source.kind` says where the lot size is from: `tradingview` (a reading in the table),
+`exchange` (Binance's, for a symbol TradingView does not list), `default` (TradingView's usual 0.001, for a
+listing newer than the table) or `user` (`syminfo`, with `source.base` naming what it went over);
+`exchange` and `default` come with the provenance warning above. **Unresolved**
+means no lot size was found (no `symbol`, `syminfo` or sidecar, no Binance record for a symbol the table
+has no reading for, or a symbol neither has): the run
 still goes ahead with the engine's defaults (no lot grid, tick 0.01 unless `syminfo` gives one) and the
 result starts with a `warnings` entry (`instrument grid unavailable for ... : order quantity is not
 floored to a lot size, so the run can contain sub-lot margin-call rows that TradingView does not book`).
@@ -307,13 +323,22 @@ not checked here.
 **TradingView's lot size, not the exchange's.** TradingView's `syminfo.mincontract` is
 TradingView's own data, not a Binance field, and it is what TradingView floors an order to.
 Measured on TradingView for every Binance symbol it lists (2026-10-03: 1,366 spot and 523
-USD-M), it differs from `LOT_SIZE.stepSize` for 1,188 spot and 510 USD-M symbols. TradingView's
-own default is 0.001 (90.6% of spot symbols, 97.5% of USD-M), while Binance's step is often 1 or
+USD-M), it differs from `LOT_SIZE.stepSize` for 1,188 spot and 510 USD-M symbols (Binance's step
+equals TradingView's for only 13% of spot symbols and 2.5% of USD-M ones). TradingView's usual 0.001 is what it reads for
+90.6% of spot symbols (1,237 of 1,366) and 97.5% of USD-M ones (510 of 523), while Binance's step is often 1 or
 0.1: USD-M BTCUSDT is 0.000001 on TradingView and 0.001 on Binance, so flooring to Binance's
 step would shrink a 10,000 USDT position by up to about 1.2%. The tick size matched
-TradingView's `syminfo.mintick` for every symbol measured. A symbol outside the table gets
-Binance's step and may therefore differ from TradingView's until the table is regenerated; pass
-`syminfo.qty_step` (read `syminfo.mincontract` off its chart) to set it.
+TradingView's `syminfo.mintick` for every symbol measured.
+
+A symbol outside the table is one of two things, and the table says which. It also lists, per
+market, the symbols Binance has and TradingView does not (18 spot, 1 USD-M: `not_on_tv`), and
+TradingView's usual lot size where at least 80% of that market's readings are it (both markets
+today: `defaults`). A symbol on the `not_on_tv` list takes Binance's step (tier 2); any other
+symbol outside the table is a listing newer than the readings and takes 0.001 (tier 3), the
+likelier value there than Binance's step; both say so in `warnings`. A table without the two
+lists (an older one, or `PINEFORGE_TV_GRID` pointing at one) has neither, so a symbol outside it
+takes Binance's step with the `exchange` warning. Either way, pass `syminfo.qty_step` (read
+`syminfo.mincontract` off its chart) to set the lot size yourself.
 
 Returns the standalone `pineforge-release` image's report JSON (`engine`, `input`,
 `summary`, `trades`, `metrics`, `equity_curve`, `fingerprint`, `applied_inputs`,
@@ -658,9 +683,11 @@ with TradingView's own `mincontract` per symbol), regenerate it with one command
 node scripts/sync-tv-grid.mjs <path to tv-grid-table.json>
 ```
 
-It keeps only the two Binance venues' `mincontract`, writes sorted symbols one per line, records the
-table's `generated_utc` and sha256 and its own content hash, and refuses a table that is not
-complete or has a value outside 1e-12..1e12. The same table gives the same bytes;
+It keeps only the two Binance venues: each symbol's `mincontract`, the venue's `not_on_tv` list, and per
+market TradingView's usual lot size (0.001, with the share of readings that are it and their count, only
+when that share is at least 0.80). It writes sorted symbols one per line, records the table's `generated_utc`
+and sha256 and its own content hash (which covers the readings, the lists and the defaults), and refuses a
+table that is not complete, has no `not_on_tv`, or has a value outside 1e-12..1e12. The same table gives the same bytes;
 `PF_TV_GRID_SOURCE=<path to the table> npm test` also checks that the committed file was made from it.
 
 To build the image, pass the `pineforge-release` version to build on (a tag from

@@ -5,10 +5,12 @@
  * (`qty_step`) a 100%-of-equity order can overshoot margin by a hair and the engine
  * books a sub-lot margin-call row that TradingView does not. This module builds the
  * `pineforge-instrument/v1` object that docker/pf_run_json.py applies through the
- * engine's C ABI. The lot size is the user's own, else TradingView's own for that
- * Binance symbol (the embedded table, src/tv-grid.ts), else Binance's LOT_SIZE.stepSize
- * for a symbol the table lacks; the tick size and currencies come from Binance's public
- * exchangeInfo, or from the sidecar file fetch_binance_ohlcv writes next to the CSV.
+ * engine's C ABI. The lot size is the user's own, else TradingView's own reading for that
+ * Binance symbol (the embedded table, src/tv-grid.ts), else for a symbol TradingView does not
+ * list Binance's LOT_SIZE.stepSize, else for a listing newer than the table TradingView's usual
+ * 0.001 (a market the table has no usual lot size for takes Binance's step); the tick size and
+ * currencies come from Binance's public exchangeInfo, or from the sidecar file
+ * fetch_binance_ohlcv writes next to the CSV.
  *
  * Every number is finite and within 1e-12..1e12 and every string is at most 64
  * printable ASCII characters, or it is dropped (and named in `source.dropped`).
@@ -21,7 +23,7 @@ import { constants, createReadStream } from "node:fs";
 import { open, rm, writeFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { z } from "zod";
-import { tvGrid, tvGridDate, tvLotStep } from "./tv-grid.js";
+import { tvDefaultLot, tvGrid, tvLotStep, tvNotListed } from "./tv-grid.js";
 
 export type BinanceMarket = "spot" | "usdt_perp";
 
@@ -35,8 +37,11 @@ const SIDECAR_MAX_BYTES = 64 * 1024;
 export const NUMBER_KEYS = ["qty_step", "mincontract", "mintick", "pointvalue"] as const;
 export const STRING_KEYS = ["type", "currency", "basecurrency"] as const;
 
-/** Where the lot size came from: TradingView's table, Binance's exchangeInfo, or the user. */
-export type LotOrigin = "tradingview" | "exchange" | "user";
+/**
+ * Where the lot size came from: a TradingView reading in the table, Binance's exchangeInfo, TradingView's
+ * usual lot size for a listing newer than the table, or the user.
+ */
+export type LotOrigin = "tradingview" | "exchange" | "default" | "user";
 
 export interface InstrumentSource {
   kind: LotOrigin;
@@ -159,14 +164,39 @@ function filterOf(info: BinanceSymbolInfo, type: string): Record<string, unknown
 }
 
 /**
- * The instrument of one Binance symbol. Lot size (also mincontract): `tvStep`, TradingView's
- * own for the symbol, when given, else the exchange's LOT_SIZE.stepSize. Tick = PRICE_FILTER.tickSize,
- * point value 1, type crypto, currencies from the exchange record.
+ * What the embedded table says of a symbol's lot size: TradingView's own reading, else the market's usual lot
+ * size (a listing newer than the readings), unless the table says TradingView does not list the symbol. Neither
+ * means the exchange's lot step is the only one there is (so also for a table that has no such sections).
+ * `reading` is where the readings come from (the tests pass their own).
  */
-export function instrumentFromBinance(info: BinanceSymbolInfo, market: BinanceMarket, tvStep?: number): Instrument {
+export function tvLotFor(
+  market: BinanceMarket,
+  symbol: string,
+  reading: (market: BinanceMarket, symbol: string) => number | undefined = tvLotStep,
+): { reading?: number; usual?: number } {
+  const own = reading(market, symbol);
+  if (own !== undefined) return { reading: own };
+  if (tvNotListed(market, symbol)) return {};
+  const usual = tvDefaultLot(market)?.mincontract;
+  return usual === undefined ? {} : { usual };
+}
+
+/**
+ * The instrument of one Binance symbol. Lot size (also mincontract): `tvStep`, TradingView's own reading
+ * for the symbol, when given, else `usualStep`, TradingView's usual lot size for a listing newer than its
+ * readings, when given, else the exchange's LOT_SIZE.stepSize. Tick = PRICE_FILTER.tickSize, point value 1,
+ * type crypto, currencies from the exchange record.
+ */
+export function instrumentFromBinance(
+  info: BinanceSymbolInfo,
+  market: BinanceMarket,
+  tvStep?: number,
+  usualStep?: number,
+): Instrument {
   const symbol = info.symbol.toUpperCase();
   const tv = cleanNumber(tvStep);
-  const step = tv ?? binanceNumber(filterOf(info, "LOT_SIZE")?.stepSize);
+  const usual = tv === undefined ? cleanNumber(usualStep) : undefined;
+  const step = tv ?? usual ?? binanceNumber(filterOf(info, "LOT_SIZE")?.stepSize);
   const tick = binanceNumber(filterOf(info, "PRICE_FILTER")?.tickSize);
   const out: Instrument = {
     schema: INSTRUMENT_SCHEMA,
@@ -181,7 +211,8 @@ export function instrumentFromBinance(info: BinanceSymbolInfo, market: BinanceMa
     const v = cleanToken(text[k]);
     if (v !== undefined) out[k] = v;
   }
-  out.source = { kind: tv !== undefined ? "tradingview" : "exchange", market, symbol, ...(dropped.length ? { dropped } : {}) };
+  const kind: LotOrigin = tv !== undefined ? "tradingview" : usual !== undefined ? "default" : "exchange";
+  out.source = { kind, market, symbol, ...(dropped.length ? { dropped } : {}) };
   return out;
 }
 
@@ -209,7 +240,12 @@ export function lotOrigin(i: Instrument): LotOrigin | undefined {
   return !s.base || s.overridden?.includes("qty_step") ? "user" : s.base.kind;
 }
 
-const ORIGIN_TEXT: Record<LotOrigin, string> = { tradingview: "TradingView's", exchange: "Binance's", user: "your syminfo" };
+const ORIGIN_TEXT: Record<LotOrigin, string> = {
+  tradingview: "TradingView's",
+  exchange: "Binance's",
+  default: "TradingView's usual default",
+  user: "your syminfo",
+};
 
 /** One line for the result text: what instrument the run has and where its lot size is from. */
 export function describeInstrument(i: Instrument): string {
@@ -275,13 +311,16 @@ export function unresolvedWarning(label: string, reason: string, detail?: string
   );
 }
 
-/** The note for a lot size that is Binance's, not TradingView's: the symbol is not in the embedded table. */
-export function exchangeLotNote(i: Instrument): string {
-  const symbol = i.source?.kind === "user" ? i.source.base?.symbol : i.source?.symbol;
+/** The provenance warning for a lot size that is the exchange's lot step, not a TradingView reading. */
+export function exchangeLotWarning(label: string): string {
+  return `lot size for ${label} is the exchange's lot step, not a TradingView reading: order quantities may differ from TradingView's`;
+}
+
+/** The provenance warning for TradingView's usual lot size, applied to a listing newer than the readings. */
+export function defaultLotWarning(label: string, step: number): string {
   return (
-    `the lot size ${i.qty_step} is Binance's LOT_SIZE.stepSize: ${symbol ?? "the symbol"} is not in the embedded TradingView ` +
-    `lot-size table (measured ${tvGridDate()}), so TradingView's own lot size for it may differ (it is 0.001 for most ` +
-    "Binance symbols); pass `syminfo.qty_step` to set another"
+    `lot size for ${label} is TradingView's usual default (${String(step)}), not a reading for this symbol ` +
+    "(a listing newer than the readings): order quantities may differ from TradingView's"
   );
 }
 
@@ -428,7 +467,10 @@ function sanitize(raw: Record<string, unknown>): Instrument {
   const market = src.market === "spot" || src.market === "usdt_perp" ? src.market : undefined;
   const symbol = typeof src.symbol === "string" && /^[A-Z0-9_]{2,40}$/.test(src.symbol) ? src.symbol : undefined;
   out.source = {
-    kind: src.kind === "tradingview" ? "tradingview" : src.kind === "exchange" || src.kind === "binance_exchange_info" ? "exchange" : "user",
+    kind: src.kind === "tradingview" ? "tradingview"
+      : src.kind === "default" ? "default"
+      : src.kind === "exchange" || src.kind === "binance_exchange_info" ? "exchange"
+      : "user",
     ...(market ? { market } : {}),
     ...(symbol ? { symbol } : {}),
     via: "sidecar",
@@ -544,7 +586,9 @@ export function settleInstrument(input: {
   const warnings: string[] = [];
   if (!instrument.resolved) warnings.push(unresolvedWarning(input.label, instrument.reason ?? "unknown", input.detail, input.hint));
   warnings.push(...(input.notes ?? []));
-  if (lotOrigin(instrument) === "exchange") warnings.push(exchangeLotNote(instrument));
+  const origin = lotOrigin(instrument);
+  if (origin === "exchange") warnings.push(exchangeLotWarning(input.label));
+  else if (origin === "default") warnings.push(defaultLotWarning(input.label, instrument.qty_step!));
   const dropped = instrument.source?.dropped;
   if (dropped?.length) {
     warnings.push(
@@ -564,9 +608,11 @@ export function settleInstrument(input: {
 /**
  * Settle the instrument of one run. The base is the Binance `symbol`, or without one the sidecar
  * next to the CSV; `syminfo` is the user's own values and goes over it. For a symbol the lot size
- * is TradingView's from the embedded table (`tv`), else Binance's exchangeInfo (`lookup`), which
- * also gives the tick size and currencies. Nothing resolvable is not an error: the result is an
- * unresolved instrument and a warning.
+ * is TradingView's reading from the embedded table (`tv`); for a symbol the table says TradingView
+ * does not list, Binance's exchangeInfo (`lookup`), which also gives the tick size and currencies;
+ * for one in neither, TradingView's usual lot size of the market (the table's `defaults`), or
+ * Binance's where the table has none. Without Binance's record (and no reading) there is no lot
+ * size: nothing resolvable is not an error, the result is an unresolved instrument and a warning.
  */
 export async function resolveInstrument(
   req: InstrumentRequest,
@@ -579,17 +625,23 @@ export async function resolveInstrument(
   const notes: string[] = [];
   // Without `market`, a CSV fetched for a symbol keeps its market: the sidecar that names this symbol says which.
   let market: BinanceMarket = req.market ?? "spot";
+  let marketKnown = req.market !== undefined;
   if (symbol && csvPath) {
     const recorded = (await readSidecar(csvPath)).instrument?.source;
     if (recorded?.symbol === symbol && recorded.market) {
-      if (req.market === undefined) market = recorded.market;
-      else if (req.market !== recorded.market) {
+      if (req.market === undefined) {
+        market = recorded.market;
+        marketKnown = true;
+      } else if (req.market !== recorded.market) {
         notes.push(
           `the CSV was fetched for ${recorded.market} (its sidecar says so), but market ${req.market} was given: ` +
           `the instrument is ${symbol} on ${req.market}`,
         );
       }
     }
+  }
+  if (symbol && !marketKnown) {
+    notes.push(`market not given: spot assumed for ${symbol} (pass market "usdt_perp" for a USD-M perpetual)`);
   }
   let base: Instrument | undefined;
   let label = csvPath ? basename(csvPath) : "the instrument";
@@ -598,9 +650,10 @@ export async function resolveInstrument(
   if (symbol) {
     label = `Binance ${market} ${symbol}`;
     const table = tvGrid();
-    if (table.error) notes.push(`${table.error}: the lot size is Binance's`);
-    const step = table.grid ? tv(market, symbol) : undefined;
-    const source: InstrumentSource = { kind: step !== undefined ? "tradingview" : "exchange", market, symbol, via: "symbol" };
+    if (table.error) notes.push(table.error);
+    const lot: { reading?: number; usual?: number } = table.grid ? tvLotFor(market, symbol, tv) : {};
+    const { reading, usual } = lot;
+    const source: InstrumentSource = { kind: reading !== undefined ? "tradingview" : "exchange", market, symbol, via: "symbol" };
     let info: BinanceSymbolInfo | undefined;
     let unavailable: string | undefined;
     try {
@@ -610,10 +663,10 @@ export async function resolveInstrument(
     }
     const why = unavailable !== undefined ? `Binance ${market} exchangeInfo unavailable` : `${symbol} is not in Binance ${market} exchangeInfo`;
     if (info) {
-      const found = instrumentFromBinance(info, market, step);
+      const found = instrumentFromBinance(info, market, reading, usual);
       base = { ...found, source: { ...found.source!, via: "symbol" } };
-    } else if (step !== undefined) {
-      const found = instrumentFromTable(market, symbol, step);
+    } else if (reading !== undefined) {
+      const found = instrumentFromTable(market, symbol, reading);
       base = { ...found, source: { ...found.source!, via: "symbol" } };
       notes.push(
         `${why}${unavailable ? ` (${unavailable})` : ""}: the lot size is TradingView's, from the embedded table, ` +

@@ -19,6 +19,27 @@ SPOT_INFO.symbols.push({
   symbol: "NEWCOINUSDT", status: "TRADING", baseAsset: "NEWCOIN", quoteAsset: "USDT",
   filters: [{ filterType: "PRICE_FILTER", tickSize: "0.0001" }, { filterType: "LOT_SIZE", stepSize: "0.1" }],
 });
+// A symbol Binance lists and TradingView does not (the table's not_on_tv): only Binance's lot step exists for it.
+SPOT_INFO.symbols.push({
+  symbol: "AIXBTUSDC", status: "TRADING", baseAsset: "AIXBT", quoteAsset: "USDC",
+  filters: [{ filterType: "PRICE_FILTER", tickSize: "0.0001" }, { filterType: "LOT_SIZE", stepSize: "0.01" }],
+});
+// ... and the same on USD-M (the table's usdt_perp not_on_tv has this one symbol).
+FAPI_INFO.symbols.push({
+  symbol: "STGUSDT", status: "TRADING", contractType: "PERPETUAL", baseAsset: "STG", quoteAsset: "USDT",
+  filters: [{ filterType: "PRICE_FILTER", tickSize: "0.0001" }, { filterType: "LOT_SIZE", stepSize: "1" }],
+});
+FAPI_INFO.symbols.push({
+  symbol: "NEWCOINUSDT", status: "TRADING", contractType: "PERPETUAL", baseAsset: "NEWCOIN", quoteAsset: "USDT",
+  filters: [{ filterType: "PRICE_FILTER", tickSize: "0.001" }, { filterType: "LOT_SIZE", stepSize: "10" }],
+});
+const EXCHANGE_WARNING = (label: string) =>
+  `lot size for ${label} is the exchange's lot step, not a TradingView reading: order quantities may differ from TradingView's`;
+const DEFAULT_WARNING = (label: string) =>
+  `lot size for ${label} is TradingView's usual default (0.001), not a reading for this symbol (a listing newer than the readings): ` +
+  "order quantities may differ from TradingView's";
+const NO_MARKET_WARNING = (symbol: string) =>
+  `market not given: spot assumed for ${symbol} (pass market "usdt_perp" for a USD-M perpetual)`;
 const KLINES = [1000, 2000, 3000].map((t) => [t, "1", "2", "0.5", "1.5", "10", t + 999, "1", 1, "1", "1", "0"]);
 const PINE = '//@version=6\nstrategy("x")\n';
 const HEADER = "timestamp,open,high,low,close,volume";
@@ -30,6 +51,7 @@ let bigReport = false;
 let reportSyminfo: "echo" | "missing" | "unapplied" = "echo";
 let tradeQuantities: Array<{ qty: number; open_at_end?: boolean }> | undefined; // the engine's trades, when a case sets them
 let runnerNotices: string[] = []; // what the fake runner reports as having done differently (an overlay it went without)
+let engineOwnWarnings: unknown; // a top-level `warnings` in the engine's own report, when a case sets one
 const realFetch = globalThis.fetch;
 const realNow = Date.now;
 let hits: string[] = [];
@@ -52,6 +74,7 @@ const runner = {
         ...(reportSyminfo === "echo" ? { syminfo: call.instrument }
           : reportSyminfo === "unapplied" ? { syminfo: { schema: INSTRUMENT_SCHEMA, resolved: false, reason: "run_json.py was not given the instrument file (--syminfo)" } } : {}),
       },
+      ...(engineOwnWarnings !== undefined ? { warnings: engineOwnWarnings } : {}),
       elapsed_seconds: 0.1,
       summary: { total_trades: 1, net_pnl: 1 },
       trades: tradeQuantities ?? (bigReport ? Array.from({ length: 4000 }, (_, i) => ({ n: i, side: "long", entry_price: 1, exit_price: 2 })) : [{ n: 1 }]),
@@ -98,6 +121,7 @@ beforeEach(() => {
   reportSyminfo = "echo";
   tradeQuantities = undefined;
   runnerNotices = [];
+  engineOwnWarnings = undefined;
   // exchangeInfo is cached for 5 minutes in process: step past it so each case starts cold
   shift += 6 * 60_000;
   Date.now = () => realNow() + shift;
@@ -131,7 +155,7 @@ test("backtest_pine and backtest_pine_grid take symbol, market and a strict symi
     assert.deepEqual(Object.keys(props.syminfo.properties).sort(),
       ["basecurrency", "currency", "mincontract", "mintick", "pointvalue", "qty_step", "type"], name);
     assert.equal(props.syminfo.additionalProperties, false, name);
-    assert.match(props.symbol.description, /TradingView's own for that symbol/);
+    assert.match(props.symbol.description, /TradingView's own reading for the symbol/);
     assert.match(props.symbol.description, /exchangeInfo/);
     assert.match(props.syminfo.description, /ticker, tickerid, timezone and session are not applied/);
   }
@@ -151,7 +175,7 @@ test("bad syminfo values are refused with the reason, not silently dropped", asy
 // ─── backtest_pine ────────────────────────────────────────────────────────
 
 test("symbol: TradingView's lot size from the embedded table reaches the runner; tick and currencies from exchangeInfo", async () => {
-  const r = await backtest({ symbol: "btcusdt" });
+  const r = await backtest({ symbol: "btcusdt", market: "spot" });
   assert.equal(r.isError, false, r.text);
   assert.equal(calls.length, 1);
   const inst = calls[0]!.instrument!;
@@ -174,17 +198,89 @@ test("symbol with market usdt_perp: the USD-M exchangeInfo for the tick, Trading
   assert.equal(r.data.warnings, undefined);
 });
 
-test("a symbol the table lacks (a newer listing) gets Binance's lot size, and the result says so", async () => {
-  const r = await backtest({ symbol: "NEWCOINUSDT" });
+test("a listing newer than the table gets TradingView's usual 0.001 (not Binance's 0.1), and the result says so", async () => {
+  const r = await backtest({ symbol: "NEWCOINUSDT", market: "spot" });
   assert.equal(r.isError, false, r.text);
   const inst = calls[0]!.instrument!;
-  assert.deepEqual([inst.resolved, inst.qty_step, inst.mintick, inst.source!.kind], [true, 0.1, 0.0001, "exchange"]);
-  assert.equal(r.data.warnings.length, 1);
-  assert.match(r.data.warnings[0], /^the lot size 0\.1 is Binance's LOT_SIZE\.stepSize: NEWCOINUSDT is not in the embedded TradingView lot-size table/);
+  assert.deepEqual([inst.resolved, inst.qty_step, inst.mintick, inst.source!.kind], [true, 0.001, 0.0001, "default"]);
+  assert.deepEqual(r.data.warnings, [DEFAULT_WARNING("Binance spot NEWCOINUSDT")]);
+  assert.equal(r.data.applied_runtime.syminfo.source.kind, "default", "the report says where the lot size is from");
+});
+
+test("a symbol TradingView does not list gets Binance's lot step, kind exchange, and the exchange warning", async () => {
+  const r = await backtest({ symbol: "AIXBTUSDC", market: "spot" });
+  assert.equal(r.isError, false, r.text);
+  const inst = calls[0]!.instrument!;
+  assert.deepEqual([inst.resolved, inst.qty_step, inst.mintick, inst.source!.kind], [true, 0.01, 0.0001, "exchange"]);
+  assert.deepEqual(r.data.warnings, [EXCHANGE_WARNING("Binance spot AIXBTUSDC")]);
+  assert.equal(r.data.applied_runtime.syminfo.source.kind, "exchange");
+});
+
+test("USD-M: a listing newer than the table gets 0.001 too; the one symbol TradingView does not list there gets Binance's step", async () => {
+  const fresh = await backtest({ symbol: "NEWCOINUSDT", market: "usdt_perp" });
+  assert.equal(fresh.isError, false, fresh.text);
+  assert.deepEqual([calls[0]!.instrument!.qty_step, calls[0]!.instrument!.mintick, calls[0]!.instrument!.source!.kind], [0.001, 0.001, "default"]);
+  assert.deepEqual(fresh.data.warnings, [DEFAULT_WARNING("Binance usdt_perp NEWCOINUSDT")]);
+  const unlisted = await backtest({ symbol: "STGUSDT", market: "usdt_perp" });
+  assert.equal(unlisted.isError, false, unlisted.text);
+  assert.deepEqual([calls[1]!.instrument!.qty_step, calls[1]!.instrument!.source!.kind], [1, "exchange"]);
+  assert.deepEqual(unlisted.data.warnings, [EXCHANGE_WARNING("Binance usdt_perp STGUSDT")]);
+});
+
+// ─── `symbol` without `market` ────────────────────────────────────────────
+
+test("symbol without market and no sidecar: spot is assumed and the result says so, for backtest_pine and backtest_pine_grid", async () => {
+  const r = await backtest({ symbol: "BTCUSDT" });
+  assert.equal(r.isError, false, r.text);
+  assert.equal(calls[0]!.instrument!.source!.market, "spot");
+  assert.deepEqual(r.data.warnings, [NO_MARKET_WARNING("BTCUSDT")]);
+  const grid = await call("backtest_pine_grid", { source: PINE, ohlcv_csv_path: bars(), symbol: "BTCUSDT", overrides: { commission_value: [0.04, 0.1] } });
+  assert.equal(grid.isError, false, grid.text);
+  assert.deepEqual(grid.data.warnings, [NO_MARKET_WARNING("BTCUSDT")]);
+  // given, it is not an assumption
+  assert.equal((await backtest({ symbol: "BTCUSDT", market: "spot" })).data.warnings, undefined);
+  assert.equal((await backtest({ symbol: "BTCUSDT", market: "usdt_perp" })).data.warnings, undefined);
+});
+
+// ─── the engine's own warnings never replace ours ─────────────────────────
+
+test("a report that has its own top-level warnings: ours first, then the engine's strings (bounded), never instead of ours", async () => {
+  engineOwnWarnings = ["engine says one", 7, null, "", { text: "not a string" }, "engine says two"];
+  const r = await backtest({ symbol: "NEWCOINUSDT", market: "spot" });
+  assert.equal(r.isError, false, r.text);
+  assert.deepEqual(r.data.warnings, [DEFAULT_WARNING("Binance spot NEWCOINUSDT"), "engine says one", "engine says two"]);
+  assert.equal(Object.keys(r.data)[0], "warnings");
+  assert.equal(r.data.engine, "pineforge", "the rest of the report is as it was");
+  // a repeat of one of ours is not said twice; a very long one is cut; at most 20 of the engine's are kept
+  engineOwnWarnings = [DEFAULT_WARNING("Binance spot NEWCOINUSDT"), "x".repeat(5000), ...Array.from({ length: 40 }, (_, i) => `engine ${i}`)];
+  const many = await backtest({ symbol: "NEWCOINUSDT", market: "spot" });
+  assert.equal(many.data.warnings[0], DEFAULT_WARNING("Binance spot NEWCOINUSDT"));
+  assert.equal(many.data.warnings.filter((w: string) => w === DEFAULT_WARNING("Binance spot NEWCOINUSDT")).length, 1);
+  assert.equal(many.data.warnings[1].length, 1000);
+  assert.equal(many.data.warnings.length, 1 + 19, "ours, then the first 20 of the engine's (one of which was ours again)");
+  assert.equal(many.data.warnings.at(-1), "engine 17");
+  // not a list: ignored, ours stand
+  engineOwnWarnings = "just a string";
+  const text = await backtest({ symbol: "NEWCOINUSDT", market: "spot" });
+  assert.deepEqual(text.data.warnings, [DEFAULT_WARNING("Binance spot NEWCOINUSDT")]);
+  // with nothing of ours to say, theirs are still reported
+  engineOwnWarnings = ["only the engine's"];
+  const alone = await backtest({ symbol: "BTCUSDT", market: "spot" });
+  assert.deepEqual(alone.data.warnings, ["only the engine's"]);
+});
+
+test("a report too large to return inline keeps ours and the engine's warnings in its summary", async () => {
+  bigReport = true;
+  engineOwnWarnings = ["engine says one"];
+  const r = await backtest({ symbol: "NEWCOINUSDT", market: "spot", report_path: join(dir, "big-report-warnings.json") });
+  assert.equal(r.isError, false, r.text);
+  assert.equal(r.data.truncated, true);
+  assert.deepEqual(r.data.warnings, [DEFAULT_WARNING("Binance spot NEWCOINUSDT"), "engine says one"]);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, "big-report-warnings.json"), "utf8")).warnings, r.data.warnings);
 });
 
 test("every request to Binance has a timeout, so a stalled mirror cannot stall a backtest", async () => {
-  const r = await backtest({ symbol: "BTCUSDT" });
+  const r = await backtest({ symbol: "BTCUSDT", market: "spot" });
   assert.equal(r.isError, false, r.text);
   assert.equal(signals.length, 1);
   assert.ok(signals[0] instanceof AbortSignal, "fetch got no abort signal");
@@ -202,7 +298,7 @@ test("syminfo alone: the user's values, no Binance call, resolved", async () => 
 });
 
 test("syminfo wins over symbol", async () => {
-  const r = await backtest({ symbol: "BTCUSDT", syminfo: { mintick: 0.5 } });
+  const r = await backtest({ symbol: "BTCUSDT", market: "spot", syminfo: { mintick: 0.5 } });
   assert.equal(r.isError, false, r.text);
   const inst = calls[0]!.instrument!;
   assert.deepEqual([inst.qty_step, inst.mintick, inst.source!.kind, inst.source!.overridden], [0.00001, 0.5, "user", ["mintick"]]);
@@ -222,7 +318,7 @@ test("nothing given and no sidecar: nothing is passed to the runner (the run is 
 
 test("Binance unreachable, symbol not in the table: still runs, unresolved, the reason and a warning", async () => {
   binanceDown = true;
-  const r = await backtest({ symbol: "NEWCOINUSDT" });
+  const r = await backtest({ symbol: "NEWCOINUSDT", market: "spot" });
   assert.equal(r.isError, false, r.text);
   assert.equal(calls[0]!.instrument, undefined);
   assert.match(r.data.warnings[0], /^instrument grid unavailable for Binance spot NEWCOINUSDT \(Binance spot exchangeInfo unavailable: Binance 451/);
@@ -231,7 +327,7 @@ test("Binance unreachable, symbol not in the table: still runs, unresolved, the 
 
 test("Binance unreachable, symbol in the table: TradingView's lot size is applied, the missing tick is said", async () => {
   binanceDown = true;
-  const r = await backtest({ symbol: "BTCUSDT" });
+  const r = await backtest({ symbol: "BTCUSDT", market: "spot" });
   assert.equal(r.isError, false, r.text);
   const inst = calls[0]!.instrument!;
   assert.deepEqual([inst.resolved, inst.qty_step, inst.mintick, inst.source!.kind], [true, 0.00001, undefined, "tradingview"]);
@@ -241,7 +337,7 @@ test("Binance unreachable, symbol in the table: TradingView's lot size is applie
 });
 
 test("a symbol Binance does not list: still runs, unresolved", async () => {
-  const r = await backtest({ symbol: "NOPEUSDT" });
+  const r = await backtest({ symbol: "NOPEUSDT", market: "spot" });
   assert.equal(r.isError, false, r.text);
   assert.equal(calls[0]!.instrument, undefined);
   assert.match(r.data.warnings[0], /\(NOPEUSDT is not in Binance spot exchangeInfo\)/);
@@ -250,7 +346,7 @@ test("a symbol Binance does not list: still runs, unresolved", async () => {
 
 test("a report too large to return inline still states the instrument and the warnings", async () => {
   bigReport = true;
-  const r = await backtest({ symbol: "BTCUSDT", report_path: join(dir, "big-report.json") });
+  const r = await backtest({ symbol: "BTCUSDT", market: "spot", report_path: join(dir, "big-report.json") });
   assert.equal(r.isError, false, r.text);
   assert.equal(r.data.truncated, true);
   assert.equal(r.data.applied_runtime.syminfo.resolved, true);
@@ -265,12 +361,12 @@ test("a report too large to return inline still states the instrument and the wa
 
 test("an engine image that does not report or apply the instrument is named in the result", async () => {
   reportSyminfo = "missing";
-  const missing = await backtest({ symbol: "BTCUSDT" });
+  const missing = await backtest({ symbol: "BTCUSDT", market: "spot" });
   assert.equal(missing.isError, false, missing.text);
   assert.equal(missing.data.warnings.length, 1);
   assert.match(missing.data.warnings[0], /did not report the instrument it applied/);
   reportSyminfo = "unapplied";
-  const unapplied = await backtest({ symbol: "BTCUSDT" });
+  const unapplied = await backtest({ symbol: "BTCUSDT", market: "spot" });
   assert.equal(unapplied.data.warnings.length, 1);
   assert.match(unapplied.data.warnings[0], /did not apply the instrument's lot grid \(run_json\.py was not given the instrument file \(--syminfo\)\)/);
 });
@@ -278,10 +374,10 @@ test("an engine image that does not report or apply the instrument is named in t
 test("a runner that went without the overlay: its notice is the warning, and the engine is not asked what it applied", async () => {
   runnerNotices = ["the instrument could not be applied (the overlay of the engine prefix could not be built); the engine ran with its defaults"];
   reportSyminfo = "missing"; // an image's own report: no applied_runtime.syminfo
-  const r = await backtest({ symbol: "BTCUSDT" });
+  const r = await backtest({ symbol: "BTCUSDT", market: "spot" });
   assert.equal(r.isError, false, r.text);
   assert.deepEqual(r.data.warnings, runnerNotices);
-  const grid = await call("backtest_pine_grid", { source: PINE, ohlcv_csv_path: bars(), symbol: "BTCUSDT", overrides: { commission_value: [0.04, 0.1] } });
+  const grid = await call("backtest_pine_grid", { source: PINE, ohlcv_csv_path: bars(), symbol: "BTCUSDT", market: "spot", overrides: { commission_value: [0.04, 0.1] } });
   assert.deepEqual(grid.data.warnings, runnerNotices, "once, not once per combination");
 });
 
@@ -289,13 +385,13 @@ const FLOORED = [0.08166, 0.08031, 0.5, 0.00001].map((qty) => ({ qty }));
 
 test("the engine says the lot size is applied and its trades are multiples of it: nothing to add", async () => {
   tradeQuantities = FLOORED;
-  const r = await backtest({ symbol: "BTCUSDT" });
+  const r = await backtest({ symbol: "BTCUSDT", market: "spot" });
   assert.equal(r.data.warnings, undefined);
 });
 
 test("quantities that are not multiples of the reported lot size: the older-engine warning, counts exact", async () => {
   tradeQuantities = [...FLOORED, { qty: 2.5981822415754863e-8 }, { qty: 0.0816684 }];
-  const r = await backtest({ symbol: "BTCUSDT" });
+  const r = await backtest({ symbol: "BTCUSDT", market: "spot" });
   assert.deepEqual(r.data.warnings, [
     "the engine reported the lot size applied, but 2 of 6 trade quantities are not multiples of it (an older engine ignores it)",
   ]);
@@ -306,19 +402,19 @@ test("quantities that are not multiples of the reported lot size: the older-engi
 
 test("a lone range-end mark that is not a multiple is not counted; with others it is", async () => {
   tradeQuantities = [...FLOORED, { qty: 0.123456789, open_at_end: true }];
-  const lone = await backtest({ symbol: "BTCUSDT" });
+  const lone = await backtest({ symbol: "BTCUSDT", market: "spot" });
   assert.equal(lone.data.warnings, undefined);
   tradeQuantities = [...FLOORED, { qty: 0.123456789, open_at_end: true }, { qty: 1e-8 }];
-  const both = await backtest({ symbol: "BTCUSDT" });
+  const both = await backtest({ symbol: "BTCUSDT", market: "spot" });
   assert.match(both.data.warnings[0], /but 2 of 6 trade quantities are not multiples of it/);
 });
 
 test("the quantity check tolerates float rounding (1e-6 of a step) and the grid reports it once", async () => {
   tradeQuantities = [{ qty: 0.08166000000000001 }, { qty: 0.0816600000001 }, { qty: 0.3 }];
-  const r = await backtest({ symbol: "BTCUSDT" });
+  const r = await backtest({ symbol: "BTCUSDT", market: "spot" });
   assert.equal(r.data.warnings, undefined, "0.08166 + 1e-13 is within 1e-6 of one 0.00001 step");
   tradeQuantities = [{ qty: 1e-8 }, { qty: 0.5 }];
-  const grid = await call("backtest_pine_grid", { source: PINE, ohlcv_csv_path: bars(), symbol: "BTCUSDT", overrides: { commission_value: [0.04, 0.1, 0.2] } });
+  const grid = await call("backtest_pine_grid", { source: PINE, ohlcv_csv_path: bars(), symbol: "BTCUSDT", market: "spot", overrides: { commission_value: [0.04, 0.1, 0.2] } });
   assert.equal(grid.data.warnings.length, 1);
   assert.match(grid.data.warnings[0], /1 of 2 trade quantities/);
 });
@@ -332,7 +428,7 @@ test("without a lot step in what the engine reports, quantities are not judged",
 test("the grid names an engine that did not apply the instrument once, not once per combination", async () => {
   reportSyminfo = "unapplied";
   const r = await call("backtest_pine_grid", {
-    source: PINE, ohlcv_csv_path: bars(), symbol: "BTCUSDT", overrides: { commission_value: [0.04, 0.1, 0.2] },
+    source: PINE, ohlcv_csv_path: bars(), symbol: "BTCUSDT", market: "spot", overrides: { commission_value: [0.04, 0.1, 0.2] },
   });
   assert.equal(r.isError, false, r.text);
   assert.equal(calls.length, 3);
@@ -429,7 +525,7 @@ test("exchangeInfo down: the CSV is still written, no instrument, a warning, and
 
 test("backtest_pine_grid applies one instrument to every combination and shows it", async () => {
   const r = await call("backtest_pine_grid", {
-    source: PINE, ohlcv_csv_path: bars(), symbol: "BTCUSDT",
+    source: PINE, ohlcv_csv_path: bars(), symbol: "BTCUSDT", market: "spot",
     overrides: { commission_value: [0.04, 0.1] },
   });
   assert.equal(r.isError, false, r.text);
