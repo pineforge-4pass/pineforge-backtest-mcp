@@ -275,19 +275,19 @@ test("a declaring script on a chart the harness does not magnify (1 minute, week
   }
 });
 
-test("a run on an engine or codegen other than 1.0.1 carries a warning; 1.0.1 does not", async () => {
+test("a run on an engine or codegen other than 1.1.0 carries a warning; 1.1.0 does not", async () => {
   const path = await barsFile("timestamp,open,high,low,close,volume\n1743379200000,1,1,1,1,1\n");
   const run = async (versions: Record<string, string>) => {
     const r = fakeRunner();
     const runner = { ...r, parity: async (call: ParityCall) => ({ ...(await r.parity(call)), versions }) } as EngineRunner;
     return parityToolResult(runner, { ...base, ohlcv_csv_path: path }, deps);
   };
-  const same = await run({ engine: "1.0.1", codegen: "1.0.1" });
-  assert.doesNotMatch(same.content[0]!.text, /not 1\.0\.1/);
-  const newer = await run({ engine: "1.0.2", codegen: "v1.0.1" });
-  assert.match(String((newer.structuredContent.warnings as string[])[0]), /^This check ran on engine 1\.0\.2 and codegen 1\.0\.1, not 1\.0\.1/);
-  assert.match(newer.content[0]!.text, /Warnings:\n- This check ran on engine 1\.0\.2/);
-  assert.match(newer.content[0]!.text, /pineforge-release:1\.0\.1/);
-  const codegen = await run({ engine: "1.0.1", codegen: "1.1.0" });
-  assert.match(codegen.content[0]!.text, /codegen 1\.1\.0, not 1\.0\.1/);
+  const same = await run({ engine: "1.1.0", codegen: "1.1.0" });
+  assert.doesNotMatch(same.content[0]!.text, /not 1\.1\.0/);
+  const newer = await run({ engine: "1.1.1", codegen: "v1.1.0" });
+  assert.match(String((newer.structuredContent.warnings as string[])[0]), /^This check ran on engine 1\.1\.1 and codegen 1\.1\.0, not 1\.1\.0/);
+  assert.match(newer.content[0]!.text, /Warnings:\n- This check ran on engine 1\.1\.1/);
+  assert.match(newer.content[0]!.text, /pineforge-release:1\.1\.0/);
+  const codegen = await run({ engine: "1.1.0", codegen: "1.0.1" });
+  assert.match(codegen.content[0]!.text, /codegen 1\.0\.1, not 1\.1\.0/);
 });

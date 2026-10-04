@@ -38,8 +38,8 @@ sys.path.insert(0, str(VENDOR))
 import verify_corpus as vc  # noqa: E402
 from run_strategy import _VALIDATION_META_KEYS  # noqa: E402
 
-GRADER_SHA256 = "de84d5150ac0a29b67906f1f8b6fe1f1f13ac66ed36be88ea2bc63d7280ed298"
-GRADER_SOURCE = "pineforge-engine v1.0.1 scripts/verify_corpus.py"
+GRADER_SHA256 = "431452ecddc8184937951ddf9a4c5f29029731237301967b5b480800be6fd1a6"
+GRADER_SOURCE = "pineforge-engine v1.1.0 scripts/verify_corpus.py"
 
 PREFIX = Path(os.environ.get("PINEFORGE_PREFIX", "/opt/pineforge"))
 DEFAULT_TIMEOUT_MS = 600_000
@@ -72,7 +72,8 @@ TIMEFRAME = re.compile(r"^(?:[1-9][0-9]{0,4}|[1-9][0-9]{0,3}[SDWM]|[SDWM])$")
 # Environment the harness reads; the caller's values never reach the run.
 HARNESS_ENV = ("PINEFORGE_RUN_MAGNIFIER_FEED", "PINEFORGE_RUN_MAGNIFIER_FEED_SHA256",
                "PINEFORGE_VERIFY_QTY_STEP", "PINEFORGE_RUN_SESSION_CALENDAR",
-               "PINEFORGE_RUN_SESSION_CALENDAR_SHA256", "PINEFORGE_REQUESTS_ROOT")
+               "PINEFORGE_RUN_SESSION_CALENDAR_SHA256", "PINEFORGE_REQUESTS_ROOT",
+               "PINEFORGE_RUN_REPORT_CHART_QUOTE", "PINEFORGE_RUN_REPORT_CHART_QUOTE_SHA256")
 
 TIER_MEANING = {
     "excellent": "PineForge reproduces TradingView's trades: every gate passes.",
