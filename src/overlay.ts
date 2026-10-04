@@ -3,7 +3,8 @@
  *
  * The release image's entrypoint.sh compiles the strategy against
  * ${PINEFORGE_PREFIX}/include and /lib and runs ${PINEFORGE_PREFIX}/bin/run_json.py,
- * whose own `apply_syminfo` sets only mintick and pointvalue. For one run we build a
+ * whose own `apply_syminfo` sets mintick, pointvalue, timezone and session, and from
+ * release 1.1.0 also `mincontract` as the lot grid. For one run we build a
  * temporary directory that mirrors the real prefix (a symlink to every entry) except
  * bin/run_json.py, which is docker/pf_run_json.py: it loads the image's run_json.py
  * from the real prefix, applies the whole instrument through the C ABI and reports
@@ -32,7 +33,7 @@ export interface PrefixLayout {
   bin: string[];
 }
 
-/** The release image's layout (pineforge-release 1.0.x), which the host cannot list. */
+/** The release image's layout (pineforge-release 1.0.x and 1.1.0), which the host cannot list. */
 export const IMAGE_LAYOUT: PrefixLayout = { top: ["include", "lib", "pycodegen"], bin: ["entrypoint.sh"] };
 
 /** docker/pf_run_json.py at the package root (npm `files` and the Docker image ship it). */

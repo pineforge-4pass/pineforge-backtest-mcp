@@ -4,12 +4,12 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-// The grading core under parity/ calls pineforge-engine v1.0.1's own harness
+// The grading core under parity/ calls pineforge-engine v1.1.0's own harness
 // and grader. These tests pin those vendored files to the bytes of that tag.
 
 const VENDOR = fileURLToPath(new URL("../parity/vendor/", import.meta.url));
 const DRIVER = fileURLToPath(new URL("../parity/pf_parity.py", import.meta.url));
-const GRADER_SHA256 = "de84d5150ac0a29b67906f1f8b6fe1f1f13ac66ed36be88ea2bc63d7280ed298";
+const GRADER_SHA256 = "431452ecddc8184937951ddf9a4c5f29029731237301967b5b480800be6fd1a6";
 
 function sha256(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
@@ -40,11 +40,11 @@ test("vendor/ holds nothing SHA256SUMS does not list", () => {
   assert.deepEqual(present.sort(), [...listed.keys()].sort());
 });
 
-test("the grader is pineforge-engine v1.0.1 verify_corpus.py", () => {
+test("the grader is pineforge-engine v1.1.0 verify_corpus.py", () => {
   assert.equal(sums().get("verify_corpus.py"), GRADER_SHA256);
   assert.equal(sha256(VENDOR + "verify_corpus.py"), GRADER_SHA256);
   assert.match(readFileSync(VENDOR + "SHA256SUMS", "utf8"),
-    /pineforge-engine v1\.0\.1 \(commit d1d188673c526a5a1751e51f4f1aa0c0cdcd7471\)/);
+    /pineforge-engine v1\.1\.0 \(commit 54b3996bb24d840b90d1a4e958ee9d98a7131908\)/);
 });
 
 test("the driver reports the grader hash it was vendored with", () => {

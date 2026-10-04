@@ -294,11 +294,11 @@ export function coreInstrument(i: Instrument): Record<string, unknown> {
   return out;
 }
 
-// The vendored harness and grader are pineforge-engine v1.0.1's, and the
-// published parity figures were made with engine and codegen 1.0.1. With npm the
+// The vendored harness and grader are pineforge-engine v1.1.0's, and the
+// published parity figures were made with engine and codegen 1.1.0. With npm the
 // engine is whatever image PINEFORGE_IMAGE names (default :latest), so say so
 // when it is another release.
-const GRADED_RELEASE = "1.0.1";
+const GRADED_RELEASE = "1.1.0";
 
 export function releaseWarning(versions: unknown): string | null {
   if (typeof versions !== "object" || versions === null) return null;

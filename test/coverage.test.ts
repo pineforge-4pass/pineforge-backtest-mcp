@@ -16,7 +16,7 @@ test("coverageIndex lists all 21 topics with version + legend", () => {
   const idx = coverageIndex();
   assert.equal(idx.topics.length, 21);
   assert.equal(idx.topics.length, COVERAGE.topics.length);
-  assert.equal(idx.coverage_version, "engine v1.0.1 + codegen 1.0.1 (2026-10-02)");
+  assert.equal(idx.coverage_version, "engine v1.1.0 + codegen 1.1.0 (2026-10-04)");
   // legend has the four canonical status keys.
   assert.deepEqual(
     Object.keys(idx.legend).sort(),
@@ -149,7 +149,7 @@ test("checkPineFeature: trailing () in the query is normalized (input.float())",
   assert.equal(r.status, "supported");
 });
 
-// ─── Answers corrected against engine v1.0.1 / codegen 1.0.1 ─────────────────
+// ─── Answers checked against engine v1.1.0 / codegen 1.1.0 ───────────────────
 
 function expectFeature(feature: string, status: CoverageStatus, topic: string, noteIncludes?: string) {
   const r = checkPineFeature(feature);
@@ -229,7 +229,7 @@ test("check_pine_feature: transpiler-emitted functions report via_transpiler, no
   expectFeature("color.rgb", "via_transpiler", "color");
 });
 
-test("check_pine_feature: state, time and timeframe answers match engine v1.0.1", () => {
+test("check_pine_feature: state, time and timeframe answers match engine v1.1.0", () => {
   expectFeature("strategy.margin_liquidation_price", "supported", "strategy_state");
   expectFeature("barstate.islast", "supported", "strategy_state");
   expectFeature("barstate.islastconfirmedhistory", "partial", "strategy_state");

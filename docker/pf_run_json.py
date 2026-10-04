@@ -3,11 +3,12 @@
 
 The MCP runs this file in place of ${PINEFORGE_PREFIX}/bin/run_json.py (a prefix
 overlay, see src/overlay.ts; the image's entrypoint.sh still does the compile and
-passes `--syminfo <instrument.json>`). The image's own `apply_syminfo` sets only
-mintick, pointvalue, timezone and session; the lot grid (`qty_step`), `mincontract`,
-`type` and the string members of `syminfo` need the engine's C ABI directly. Without
-a lot grid a 100%-of-equity order can overshoot margin by a hair and the engine books
-a sub-lot margin-call row that TradingView does not.
+passes `--syminfo <instrument.json>`). The image's own `apply_syminfo` sets mintick,
+pointvalue, timezone and session, and from release 1.1.0 also `mincontract` as the lot
+grid; a `qty_step` that differs from `mincontract`, `type` and the string members of
+`syminfo` need the engine's C ABI directly. Without a lot grid a 100%-of-equity order
+can overshoot margin by a hair and the engine books a sub-lot margin-call row that
+TradingView does not.
 
 What this file does, nothing more:
   1. loads the image's run_json.py from ${REAL_PREFIX:-/opt/pineforge}/bin and checks

@@ -9,7 +9,7 @@ This MCP server is distributed under the **MIT License** — see [LICENSE](LICEN
 It is a thin local bridge. The components it drives have **their own** licenses:
 
 - The **PineForge engine** Docker image it runs is **Apache-2.0** ([`pineforge-engine`](https://github.com/pineforge-4pass/pineforge-engine)).
-- `parity/vendor/` holds three unmodified `scripts/` files of pineforge-engine v1.0.1 (`verify_corpus.py`, `run_strategy.py`, `derive_corpus_feeds.py`), **Apache-2.0**, used by `check_tradingview_parity`.
+- `parity/vendor/` holds three unmodified `scripts/` files of pineforge-engine v1.1.0 (`verify_corpus.py`, `run_strategy.py`, `derive_corpus_feeds.py`), **Apache-2.0**, used by `check_tradingview_parity`.
 - The **transpiler** bundled inside that image, [`pineforge-codegen`](https://github.com/pineforge-4pass/pineforge-codegen-oss), is **source-available** under the **PolyForm Noncommercial License 1.0.0** (free for personal trading; commercial license for funds/products/hosted use). Running the local loop for your own trading is covered by that license's Personal Trading exception; commercial or hosted use requires a commercial license — email **luis@4pass.com.tw**.
 
 ## How it runs (data handling)
