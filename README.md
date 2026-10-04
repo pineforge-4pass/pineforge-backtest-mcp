@@ -633,9 +633,9 @@ on another symbol, for example, is supported by the engine, but here a request w
 value can reach a trade stops the run.
 
 The data is embedded in this package and stamped by the `coverage_version` field
-that `list_coverage_topics` returns (`engine v1.0.1 + codegen 1.0.1 (2026-10-02)` in
+that `list_coverage_topics` returns (`engine v1.1.0 + codegen 1.1.0 (2026-10-04)` in
 this version); the engine's
-[`docs/coverage.md`](https://github.com/pineforge-4pass/pineforge-engine/blob/v1.0.1/docs/coverage.md)
+[`docs/coverage.md`](https://github.com/pineforge-4pass/pineforge-engine/blob/v1.1.0/docs/coverage.md)
 at that tag is the reference it was checked against.
 
 ## Filesystem scope
