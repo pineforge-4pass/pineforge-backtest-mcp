@@ -33,7 +33,7 @@ export interface PrefixLayout {
   bin: string[];
 }
 
-/** The release image's layout (pineforge-release 1.0.x and 1.1.0), which the host cannot list. */
+/** The release image's layout (pineforge-release 1.0.x, 1.1.0 and 1.2.0), which the host cannot list. */
 export const IMAGE_LAYOUT: PrefixLayout = { top: ["include", "lib", "pycodegen"], bin: ["entrypoint.sh"] };
 
 /** docker/pf_run_json.py at the package root (npm `files` and the Docker image ship it). */

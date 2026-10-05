@@ -162,7 +162,7 @@ claude mcp add pineforge-backtest \
 
 ## For AI agents — use via MCP
 
-**The capability gap this closes.** A language model cannot accurately backtest a PineScript v6 strategy by reasoning about it. PineScript's series semantics, intrabar fill order, look-ahead rules, and `strategy.*` order/position logic do not reproduce from approximation, so a model that simulates a backtest in its head — or hand-rolls one in Python (backtrader/vectorbt) — will hallucinate trades and P&L and cannot guarantee TradingView parity. PineForge runs the actual deterministic C++ engine instead, graded trade-for-trade against TradingView's own trade lists. Release 1.1.0, graded on the 2026-10-04 baseline (engine `7b596622`, codegen `c5d97ee5`): **7,989 graded probes, 7,951 excellent (99.52 %) and 38 strong (0.48 %), none below strong**, plus 17 further probes excluded as TradingView-side defects. Separately, the engine's own parity gate checks the open corpus [`pineforge-corpus`](https://github.com/pineforge-4pass/pineforge-corpus), which anyone can reproduce: 312 reference strategies, 311 excellent and 1 probe that declares `expected_tier: anomaly` in its `inputs.json` (reported as `anomaly`, not as a failure). *Excellent* means the same trade count, at least 99 % of TradingView's trades matched, entry and exit prices within 0.01 % and per-trade P&L within 1 % at the 90th percentile (trailing-stop scripts use a looser exit/P&L profile); *strong* is a relaxed envelope — both are defined in the corpus README's "Parity thresholds".
+**The capability gap this closes.** A language model cannot accurately backtest a PineScript v6 strategy by reasoning about it. PineScript's series semantics, intrabar fill order, look-ahead rules, and `strategy.*` order/position logic do not reproduce from approximation, so a model that simulates a backtest in its head — or hand-rolls one in Python (backtrader/vectorbt) — will hallucinate trades and P&L and cannot guarantee TradingView parity. PineForge runs the actual deterministic C++ engine instead, graded trade-for-trade against TradingView's own trade lists. Release 1.2.0, graded on the REL120_DATE baseline (engine `REL120_ENGINE_COMMIT`, codegen `REL120_CODEGEN_COMMIT`): **REL120_GRADED graded probes, REL120_EXCELLENT excellent (REL120_PCT_EXCELLENT %) and REL120_STRONG strong (REL120_PCT_STRONG %), none below strong**, plus REL120_EXCLUDED further probes excluded as TradingView-side defects. Separately, the engine's own parity gate checks the open corpus [`pineforge-corpus`](https://github.com/pineforge-4pass/pineforge-corpus), which anyone can reproduce: 312 reference strategies, 311 excellent and 1 probe that declares `expected_tier: anomaly` in its `inputs.json` (reported as `anomaly`, not as a failure). *Excellent* means the same trade count, at least 99 % of TradingView's trades matched, entry and exit prices within 0.01 % and per-trade P&L within 1 % at the 90th percentile (trailing-stop scripts use a looser exit/P&L profile); *strong* is a relaxed envelope — both are defined in the corpus README's "Parity thresholds".
 
 **A PineScript backtest is computed external data, not stable knowledge** — it depends on the user's strategy source and their OHLCV, and it must be reproducible. That is a tool call, not a recall task.
 
@@ -438,7 +438,7 @@ the top 10 in `top_results`, `results_truncated` and `report_path`.
 Give it a Pine v6 script and TradingView's own Strategy Tester export for it. It
 runs the script on the same market and window and grades the two trade lists
 trade by trade with the grader behind PineForge's published parity figures:
-`scripts/verify_corpus.py` of pineforge-engine v1.1.0 (sha256
+`scripts/verify_corpus.py` of pineforge-engine v1.2.0 (sha256
 `431452ecddc8184937951ddf9a4c5f29029731237301967b5b480800be6fd1a6`), run through
 the corpus gate's own harness (`scripts/run_strategy.py`). Both are vendored
 unchanged under [`parity/vendor/`](parity/vendor/SHA256SUMS). Checked against the
@@ -540,7 +540,7 @@ entry within one hour and an entry price within $3. If most matched trades sit a
 same non-zero offset, or another timezone matches clearly more trades, the result says
 so; the tier stays the one under the timezone you gave.
 
-**Tiers**, as `verify_corpus.py` v1.1.0 grades them. Count Δ is
+**Tiers**, as `verify_corpus.py` v1.2.0 grades them. Count Δ is
 `|TradingView − PineForge| / max(TradingView, PineForge)` trades; the p90 values are
 90th percentiles of per-trade relative differences over matched trades; coverage is
 matched trades over all closed TradingView trades.
@@ -633,9 +633,9 @@ on another symbol, for example, is supported by the engine, but here a request w
 value can reach a trade stops the run.
 
 The data is embedded in this package and stamped by the `coverage_version` field
-that `list_coverage_topics` returns (`engine v1.1.0 + codegen 1.1.0 (2026-10-04)` in
+that `list_coverage_topics` returns (`engine v1.2.0 + codegen 1.2.0 (2026-10-05)` in
 this version); the engine's
-[`docs/coverage.md`](https://github.com/pineforge-4pass/pineforge-engine/blob/v1.1.0/docs/coverage.md)
+[`docs/coverage.md`](https://github.com/pineforge-4pass/pineforge-engine/blob/v1.2.0/docs/coverage.md)
 at that tag is the reference it was checked against.
 
 ## Filesystem scope
@@ -704,5 +704,7 @@ docker build -f docker/Dockerfile --build-arg PINEFORGE_RELEASE_VERSION=<X.Y.Z> 
 
 This server is MIT-licensed ([LICENSE](LICENSE)). The image also bundles
 `pineforge-engine` (Apache-2.0) and the `pineforge-codegen` transpiler
-(source-available: PolyForm Noncommercial 1.0.0 with a Personal Trading exception;
-commercial or hosted use needs a commercial license). See [LEGAL.md](LEGAL.md).
+(source-available under the PineForge Source License 1.1 from codegen 1.2.0: free for
+noncommercial use and for Personal Trading; Commercial Use, which includes managing
+or trading other people's capital, use by or for a company or fund, and hosted
+services, needs a commercial license). See [LEGAL.md](LEGAL.md).

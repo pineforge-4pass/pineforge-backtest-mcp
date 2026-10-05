@@ -39,7 +39,7 @@ import verify_corpus as vc  # noqa: E402
 from run_strategy import _VALIDATION_META_KEYS  # noqa: E402
 
 GRADER_SHA256 = "431452ecddc8184937951ddf9a4c5f29029731237301967b5b480800be6fd1a6"
-GRADER_SOURCE = "pineforge-engine v1.1.0 scripts/verify_corpus.py"
+GRADER_SOURCE = "pineforge-engine v1.2.0 scripts/verify_corpus.py"
 
 PREFIX = Path(os.environ.get("PINEFORGE_PREFIX", "/opt/pineforge"))
 DEFAULT_TIMEOUT_MS = 600_000

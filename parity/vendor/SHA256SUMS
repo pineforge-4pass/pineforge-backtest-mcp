@@ -1,4 +1,4 @@
-# pineforge-engine v1.1.0 (commit 54b3996bb24d840b90d1a4e958ee9d98a7131908), scripts/<file>, byte-identical
+# pineforge-engine v1.2.0 (commit TAGCOMMIT), scripts/<file>, byte-identical
 431452ecddc8184937951ddf9a4c5f29029731237301967b5b480800be6fd1a6  verify_corpus.py
 6f3b13b35cace11f91fbe096bb13fb79801e6c5da72ac409a3b12641e7e25faa  run_strategy.py
 d2d848d4e8c11f5fa6cc387dc150ab5a2e67ea800a702db4e6a7c1666539d99a  derive_corpus_feeds.py

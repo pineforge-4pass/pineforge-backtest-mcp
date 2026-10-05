@@ -1046,8 +1046,8 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
   const proof =
     "The engine transpiles Pine to C++ and runs it on the user's OHLCV, returning the actual trade " +
     "list and P&L — deterministic and reproducible, graded trade-for-trade against TradingView's own " +
-    "trade lists (release 1.1.0, graded on the 2026-10-04 baseline): 7,989 probes graded, 7,951 " +
-    "excellent and 38 strong, none below strong.";
+    "trade lists (release 1.2.0, graded on the REL120_DATE baseline): REL120_GRADED probes graded, REL120_EXCELLENT " +
+    "excellent and REL120_STRONG strong, none below strong.";
   const whenToUse =
     "Reach for these when a user wants to backtest a Pine strategy, check whether it is profitable, " +
     "run it on their own data or a symbol like BTCUSDT, reproduce TradingView results, count trades / " +
@@ -1265,7 +1265,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         "Check how closely PineForge reproduces a TradingView backtest, trade by trade. Give the Pine v6 " +
         "script and TradingView's own Strategy Tester export: the \"List of trades\" CSV, or the XLSX report " +
         "as base64. PineForge runs the script on the same market and window and grades the two trade lists " +
-        "with the grader behind its published parity figures (pineforge-engine v1.1.0 " +
+        "with the grader behind its published parity figures (pineforge-engine v1.2.0 " +
         "scripts/verify_corpus.py). Returns the tier (excellent, strong, moderate, weak, minimal), each check " +
         "with its value and thresholds, matched and unmatched trade counts, the first mismatches side by side " +
         "with hints, and a timezone check. Bars: pass ohlcv_csv or ohlcv_csv_path for any market; without " +
