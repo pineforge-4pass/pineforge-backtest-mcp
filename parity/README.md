@@ -81,8 +81,8 @@ timeout).
 
 ## Vendored files
 
-`vendor/` holds pineforge-engine v1.1.0 (commit
-54b3996bb24d840b90d1a4e958ee9d98a7131908) `scripts/` files, byte-identical.
+`vendor/` holds pineforge-engine v1.2.0 (commit
+792a6b5b09be0608e616acdc3bb5f64f551e8163) `scripts/` files, byte-identical.
 They are never edited. `vendor/SHA256SUMS` lists their hashes:
 
 | file | sha256 |
