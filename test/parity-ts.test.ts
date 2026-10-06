@@ -267,7 +267,7 @@ test("result text: tier, checks, counts, mismatches, timezone, versions, methodo
       note: "Every matched trade sits 8 h later on TradingView than on PineForge: the chart timezone is probably off by 8 h.",
     },
     window: { range_start: "2020-01-01 00:00", range_end: "2025-04-01 00:00", range_end_source: "tape", timezone_of_times: "UTC" },
-    versions: { engine: "1.2.0", codegen: "1.2.0", grader: "pineforge-engine v1.2.0 scripts/verify_corpus.py", grader_sha256: "431452ec" },
+    versions: { engine: "1.3.0", codegen: "1.3.0", grader: "pineforge-engine v1.2.0 scripts/verify_corpus.py", grader_sha256: "431452ec" },
     warnings: [
       "Every matched trade sits 8 h later on TradingView than on PineForge: the chart timezone is probably off by 8 h.",
       "Read in Asia/Taipei, 5 trades match instead of 0: TradingView may have printed the times in Asia/Taipei. The tier above uses UTC.",
@@ -288,7 +288,7 @@ test("result text: tier, checks, counts, mismatches, timezone, versions, methodo
   assert.match(text, /Window: first bar 2020-01-01 00:00 UTC, range end 2025-04-01 00:00 UTC, set by tape\./);
   assert.match(text, /Warnings:\n- Something else\.\nBars: your file\./);
   assert.equal(text.match(/sits 8 h later/g)?.length, 1);
-  assert.match(text, /Engine 1\.2\.0, codegen 1\.2\.0, grader pineforge-engine v1\.2\.0 scripts\/verify_corpus\.py \(sha256 431452ec\)/);
+  assert.match(text, /Engine 1\.3\.0, codegen 1\.3\.0, grader pineforge-engine v1\.2\.0 scripts\/verify_corpus\.py \(sha256 431452ec\)/);
   assert.match(text, /Methodology: https:\/\/pineforge\.dev\/en\/methodology\//);
   assert.ok(text.endsWith(RETENTION_LOCAL));
   const omitted = formatParityResult({ ...response, unmatched_tradingview: null, unmatched_pineforge: null, mismatches: [] }, { retention: RETENTION_LOCAL });
