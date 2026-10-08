@@ -94,7 +94,7 @@ class HarnessReleaseRegressions(unittest.TestCase):
         callbacks = []
         with self.assertRaises(RuntimeError) as raised:
             strategy_for(library).run(self.bars, on_report=callbacks.append)
-        self.assertEqual(str(raised.exception), "pineforge engine rejected run: ")
+        self.assertEqual(str(raised.exception), "pineforge engine rejected run")
         self.assertEqual(raised.exception.run_failure_code, "strategy_runtime_error")
         self.assertEqual(raised.exception.run_failure_args, "{}")
         self.assertEqual(callbacks, [])
