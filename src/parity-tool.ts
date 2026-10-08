@@ -295,8 +295,8 @@ export function coreInstrument(i: Instrument): Record<string, unknown> {
 }
 
 // The 2026-10-07 scoreboard is measured for the frozen engine/codegen 1.4.0 pair.
-// The v1.2.0 grader is unchanged, but the vendored v1.2.0 harness only matches
-// v1.3.0, not the revised 1.4.0 harness. With npm the engine is whatever image
+// The v1.2.0 grader is unchanged; the execution harness is copied byte-for-byte
+// from the frozen 1.4.0 engine candidate. With npm the engine is whatever image
 // PINEFORGE_IMAGE names (default :latest), so say when it is another release.
 const GRADED_RELEASE = "1.4.0";
 
@@ -309,8 +309,8 @@ export function releaseWarning(versions: unknown): string | null {
   if (engine === GRADED_RELEASE && codegen === GRADED_RELEASE) return null;
   return `This check ran on engine ${engine} and codegen ${codegen}, not ${GRADED_RELEASE}: the graded-release ` +
     `scoreboard was measured on the 2026-10-07 baseline for ${GRADED_RELEASE}, so the tier may differ. ` +
-    `The grader is unchanged; this server still uses the legacy v1.2.0 harness, not the revised 1.4.0 ` +
-    `failure-code handling. To select ${GRADED_RELEASE} after publication, use ` +
+    `The grader is unchanged; the execution harness matches the frozen 1.4.0 candidate bytes. ` +
+    `That identity alone does not promise parity for every script. To select ${GRADED_RELEASE} after publication, use ` +
     `ghcr.io/pineforge-4pass/pineforge-release:${GRADED_RELEASE} (PINEFORGE_IMAGE with npm).`;
 }
 

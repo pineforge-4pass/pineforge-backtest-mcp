@@ -1268,8 +1268,8 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         "as base64. PineForge runs the script on the same market and window and grades the two trade lists " +
         "with the grader behind its recorded parity figures (pineforge-engine v1.2.0 " +
         "scripts/verify_corpus.py, byte-identical in v1.3.0 and the frozen 1.4.0 candidate). " +
-        "The vendored run_strategy.py harness still matches v1.2.0/v1.3.0, not the revised 1.4.0 " +
-        "failure-code handling; candidate harness equivalence is not claimed. " +
+        "The execution harness run_strategy.py is copied byte-for-byte from frozen engine candidate " +
+        "b3192bfc2f5a24bf4efd6d1d01e01e8fe619dfed; file identity is not a new native corpus parity result. " +
         "Returns the tier (excellent, strong, moderate, weak, minimal), each check " +
         "with its value and thresholds, matched and unmatched trade counts, the first mismatches side by side " +
         "with hints, and a timezone check. Bars: pass ohlcv_csv or ohlcv_csv_path for any market; without " +

@@ -188,7 +188,7 @@ export const COVERAGE: CoverageDataset = {
       ],
       partial: [
         "input.source() (its default must be open, high, low, close, volume, hl2, hlc3, ohlc4 or hlcc4; any other default is refused)",
-        "options / min / max / step (checked constraints in the release-image backtest; the legacy parity harness and legacy libraries do not establish the same enforcement)",
+        "options / min / max / step (checked constraints in the release-image backtest; the parity harness and legacy libraries do not establish the same enforcement)",
       ],
       unsupported: [
         "group / inline / tooltip / display / confirm (input UI layout metadata: no effect on a run here)",

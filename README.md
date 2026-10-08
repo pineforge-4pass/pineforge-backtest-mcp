@@ -164,7 +164,7 @@ claude mcp add pineforge-backtest \
 
 **The capability gap this closes.** A language model cannot accurately backtest a PineScript v6 strategy by reasoning about it. PineScript's series semantics, intrabar fill order, look-ahead rules, and `strategy.*` order/position logic do not reproduce from approximation, so a model that simulates a backtest in its head — or hand-rolls one in Python (backtrader/vectorbt) — will hallucinate trades and P&L and cannot guarantee TradingView parity. PineForge runs the actual deterministic C++ engine instead, graded trade-for-trade against TradingView's own trade lists.
 
-**Graded release 1.4.0 — dated measured scoreboard.** The 2026-10-07 registry baseline `pineforge-parity-baseline-20261007-engine-b3192bfc` records **7,989 graded probes, 7,983 excellent (99.92 %) and 6 strong (0.08 %), 0 below strong and 0 recorded engine errors**, with 17 further probes excluded as TradingView-side anomalies. Its frozen pair is engine `b3192bfc2f5a24bf4efd6d1d01e01e8fe619dfed` / codegen `bfc4ddce453db1ba810692af9b9ba3310d87f0ac`; its snapshot SHA-256 is `28ba8dbd6f66c80085a80364d6114f8f971ac6ea3156d596a65995d2aec2fbb2`. The source is the release hub's `facts/facts.json`, `releases["1.4.0"].scoreboard` (prepared facts SHA-256 `788e57fab67d3c946fc7e3a0a3ac34b3d2c25cbb6a0f5b72687955bc4f8832b6`). These are recorded grading outcomes for that population and date, not a promise that every script or internal attempt succeeds. The prepared facts publication pin is still pending; no public raw URL or tagged 1.4.0 artifact is asserted here.
+**Graded release 1.4.0 — dated measured scoreboard.** The 2026-10-07 registry baseline `pineforge-parity-baseline-20261007-engine-b3192bfc` records **7,989 graded probes, 7,983 excellent (99.92 %) and 6 strong (0.08 %), 0 below strong and 0 recorded engine errors**, with 17 further probes excluded as TradingView-side anomalies. Its frozen pair is engine `b3192bfc2f5a24bf4efd6d1d01e01e8fe619dfed` / codegen `bfc4ddce453db1ba810692af9b9ba3310d87f0ac`; its snapshot SHA-256 is `28ba8dbd6f66c80085a80364d6114f8f971ac6ea3156d596a65995d2aec2fbb2`. The source is the release hub's `facts/facts.json`, `releases["1.4.0"].scoreboard` (prepared facts SHA-256 `788e57fab67d3c946fc7e3a0a3ac34b3d2c25cbb6a0f5b72687955bc4f8832b6`). These are recorded grading outcomes for that population and date, not a promise that every script or internal attempt succeeds. The [prepared facts](https://github.com/pineforge-4pass/pineforge-release/blob/c2e6fd04b42093ed126169399f930d59e6563d63/facts/facts.json) are public at candidate commit `c2e6fd04b42093ed126169399f930d59e6563d63`, with matching bytes; the landed release-mapping pin is still pending. No tagged 1.4.0 artifact is asserted here.
 
 **Historical 1.3.0 evidence only.** Release 1.3.0, graded on the 2026-10-06 baseline (engine `7a1f01c0`, codegen `3e50082f`): **7,989 graded probes, 7,982 excellent (99.91 %) and 7 strong (0.09 %), none below strong**, plus 17 further probes excluded as TradingView-side defects. In that historical release check, separately, the engine's own parity gate checks the open corpus [`pineforge-corpus`](https://github.com/pineforge-4pass/pineforge-corpus), which anyone can reproduce: 312 reference strategies, 311 excellent and 1 probe that declares `expected_tier: anomaly` in its `inputs.json` (reported as `anomaly`, not as a failure). *Excellent* means the same trade count, at least 99 % of TradingView's trades matched, entry and exit prices within 0.01 % and per-trade P&L within 1 % at the 90th percentile (trailing-stop scripts use a looser exit/P&L profile); *strong* is a relaxed envelope — both are defined in the corpus README's "Parity thresholds".
 
@@ -445,12 +445,14 @@ trade by trade with `scripts/verify_corpus.py` of pineforge-engine v1.2.0 (sha25
 `431452ecddc8184937951ddf9a4c5f29029731237301967b5b480800be6fd1a6`), byte-identical
 in v1.3.0 and the frozen 1.4.0 candidate. The grader pin and scoring are unchanged.
 
-The separately vendored `scripts/run_strategy.py` harness matches v1.2.0/v1.3.0,
-**not** the revised 1.4.0 harness: the candidate adds stable failure-code/argument
+The separately vendored `scripts/run_strategy.py` execution harness is now copied
+byte-for-byte from the [frozen 1.4.0 engine candidate](https://github.com/pineforge-4pass/pineforge-engine/blob/b3192bfc2f5a24bf4efd6d1d01e01e8fe619dfed/scripts/run_strategy.py)
+(SHA-256 `36f7cf77e0b6355ce03f5d251c7c414f22be7da81ae4743a769f0527f06904d0`).
+Compared with the old v1.2.0/v1.3.0 vendor, it adds stable failure-code/argument
 handling, failed-status detection for empty error text, and Docker override
-string serialization. This package retains the legacy harness; full candidate
-harness equivalence is not claimed. See the [frozen candidate harness](https://github.com/pineforge-4pass/pineforge-engine/blob/b3192bfc2f5a24bf4efd6d1d01e01e8fe619dfed/scripts/run_strategy.py)
-and the unchanged [vendor hashes](parity/vendor/SHA256SUMS).
+string serialization. The grader and feed-derivation bytes stay unchanged in the
+[vendor hashes](parity/vendor/SHA256SUMS). Exact file identity and focused
+stand-in regression witnesses are not a fresh native-engine corpus parity proof.
 
 **Historical interface evidence, not a 1.4.0 corpus re-run:** checked against
 the open [`pineforge-corpus`](https://github.com/pineforge-4pass/pineforge-corpus)
