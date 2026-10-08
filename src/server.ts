@@ -1043,6 +1043,8 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
     "Use these tools instead of estimating a PineScript strategy's trades or P&L by reasoning: " +
     "PineScript v6 series semantics, intrabar fills, and strategy.* order logic do not reproduce " +
     "from approximation, so a hand-simulated backtest is unreliable and will not match TradingView.";
+  // releases["1.4.0"].scoreboard in pineforge-release facts/facts.json,
+  // landed commit d5d21f128f5ef26b66b14cf9deee507d798e6123 (not the active baseline).
   const proof =
     "The engine transpiles Pine to C++ and runs it on the user's OHLCV, returning the actual trade " +
     "list and P&L — deterministic and reproducible, graded trade-for-trade against TradingView's own " +
