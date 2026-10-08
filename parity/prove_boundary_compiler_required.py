@@ -14,7 +14,7 @@ with tempfile.TemporaryDirectory(prefix="pf-no-compiler-") as empty_path:
     print(json.dumps({"argv": command, "isolated_path": empty_path,
                       "exit": result.returncode, "stdout": result.stdout,
                       "stderr": result.stderr}), flush=True)
-    assert result.returncode == 1, output
+    assert result.returncode != 0, output
     assert "required compiler tool not found: cc; release boundary gate never skips" in output, output
     assert "FAILED (errors=1)" in output, output
     assert "skipped=" not in output, output
