@@ -196,6 +196,16 @@ test("check_pine_feature: drawings are data the strategy reads back; plots, tabl
   assert.equal(t.status, "partial");
 });
 
+test("check_pine_feature: checked options and bounds are distinct from published UI step", () => {
+  for (const identifier of ["options", "min", "max"]) {
+    expectFeature(identifier, "partial", "inputs", "checked constraints in the release-image backtest");
+  }
+  expectFeature("step", "unsupported", "inputs", "not an enforced numeric lattice");
+  const topic = coverageTopic("inputs") as CoverageTopic;
+  assert.match(topic.detail, /published step is a UI increment in descriptors and receipts, not an enforced numeric lattice/);
+  assert.equal(topic.partial?.some((entry) => entryIdentifiers(entry).includes("step")), false);
+});
+
 test("check_pine_feature: lifecycle answers (calc_on_order_fills, varip, indicator, import)", () => {
   expectFeature("calc_on_order_fills", "supported", "engine_lifecycle");
   expectFeature("calc_on_every_tick", "unsupported", "engine_lifecycle");
