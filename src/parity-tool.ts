@@ -294,11 +294,11 @@ export function coreInstrument(i: Instrument): Record<string, unknown> {
   return out;
 }
 
-// The vendored harness and grader are pineforge-engine v1.2.0's (the same files
-// as in v1.3.0), and the published parity figures were made with engine and
-// codegen 1.3.0. With npm the engine is whatever image PINEFORGE_IMAGE names
-// (default :latest), so say so when it is another release.
-const GRADED_RELEASE = "1.3.0";
+// The 2026-10-07 scoreboard is measured for the frozen engine/codegen 1.4.0 pair.
+// The v1.2.0 grader is unchanged; the execution harness is copied byte-for-byte
+// from the frozen 1.4.0 engine candidate. With npm the engine is whatever image
+// PINEFORGE_IMAGE names (default :latest), so say when it is another release.
+const GRADED_RELEASE = "1.4.0";
 
 export function releaseWarning(versions: unknown): string | null {
   if (typeof versions !== "object" || versions === null) return null;
@@ -307,9 +307,10 @@ export function releaseWarning(versions: unknown): string | null {
   const engine = plain(v.engine);
   const codegen = plain(v.codegen);
   if (engine === GRADED_RELEASE && codegen === GRADED_RELEASE) return null;
-  return `This check ran on engine ${engine} and codegen ${codegen}, not ${GRADED_RELEASE}: the grader and the ` +
-    `harness here are pineforge-engine v${GRADED_RELEASE}'s and the published parity figures were made with ` +
-    `${GRADED_RELEASE}, so the tier may differ from what that release gives. To grade on ${GRADED_RELEASE}, use ` +
+  return `This check ran on engine ${engine} and codegen ${codegen}, not ${GRADED_RELEASE}: the graded-release ` +
+    `scoreboard was measured on the 2026-10-07 baseline for ${GRADED_RELEASE}, so the tier may differ. ` +
+    `The grader is unchanged; the execution harness matches the frozen 1.4.0 candidate bytes. ` +
+    `That identity alone does not promise parity for every script. To select ${GRADED_RELEASE} after publication, use ` +
     `ghcr.io/pineforge-4pass/pineforge-release:${GRADED_RELEASE} (PINEFORGE_IMAGE with npm).`;
 }
 

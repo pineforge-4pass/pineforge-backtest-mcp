@@ -162,7 +162,11 @@ claude mcp add pineforge-backtest \
 
 ## For AI agents — use via MCP
 
-**The capability gap this closes.** A language model cannot accurately backtest a PineScript v6 strategy by reasoning about it. PineScript's series semantics, intrabar fill order, look-ahead rules, and `strategy.*` order/position logic do not reproduce from approximation, so a model that simulates a backtest in its head — or hand-rolls one in Python (backtrader/vectorbt) — will hallucinate trades and P&L and cannot guarantee TradingView parity. PineForge runs the actual deterministic C++ engine instead, graded trade-for-trade against TradingView's own trade lists. Release 1.3.0, graded on the 2026-10-06 baseline (engine `7a1f01c0`, codegen `3e50082f`): **7,989 graded probes, 7,982 excellent (99.91 %) and 7 strong (0.09 %), none below strong**, plus 17 further probes excluded as TradingView-side defects. Separately, the engine's own parity gate checks the open corpus [`pineforge-corpus`](https://github.com/pineforge-4pass/pineforge-corpus), which anyone can reproduce: 312 reference strategies, 311 excellent and 1 probe that declares `expected_tier: anomaly` in its `inputs.json` (reported as `anomaly`, not as a failure). *Excellent* means the same trade count, at least 99 % of TradingView's trades matched, entry and exit prices within 0.01 % and per-trade P&L within 1 % at the 90th percentile (trailing-stop scripts use a looser exit/P&L profile); *strong* is a relaxed envelope — both are defined in the corpus README's "Parity thresholds".
+**The capability gap this closes.** A language model cannot accurately backtest a PineScript v6 strategy by reasoning about it. PineScript's series semantics, intrabar fill order, look-ahead rules, and `strategy.*` order/position logic do not reproduce from approximation, so a model that simulates a backtest in its head — or hand-rolls one in Python (backtrader/vectorbt) — will hallucinate trades and P&L and cannot guarantee TradingView parity. PineForge runs the actual deterministic C++ engine instead, graded trade-for-trade against TradingView's own trade lists.
+
+**Graded release 1.4.0 — dated measured scoreboard.** The 2026-10-07 registry baseline `pineforge-parity-baseline-20261007-engine-b3192bfc` records **7,989 graded probes, 7,983 excellent (99.92 %) and 6 strong (0.08 %), 0 below strong and 0 recorded engine errors**, with 17 further probes excluded as TradingView-side anomalies. Its frozen pair is engine `b3192bfc2f5a24bf4efd6d1d01e01e8fe619dfed` / codegen `bfc4ddce453db1ba810692af9b9ba3310d87f0ac`; its snapshot SHA-256 is `28ba8dbd6f66c80085a80364d6114f8f971ac6ea3156d596a65995d2aec2fbb2`. The source is the release hub's [landed facts](https://github.com/pineforge-4pass/pineforge-release/blob/d5d21f128f5ef26b66b14cf9deee507d798e6123/facts/facts.json), `releases["1.4.0"].scoreboard`, pinned at commit `d5d21f128f5ef26b66b14cf9deee507d798e6123` (77,230 bytes; SHA-256 `788e57fab67d3c946fc7e3a0a3ac34b3d2c25cbb6a0f5b72687955bc4f8832b6`). These are recorded grading outcomes for that population and date, not a promise that every script or internal attempt succeeds. No tagged 1.4.0 artifact is asserted here.
+
+**Historical 1.3.0 evidence only.** Release 1.3.0, graded on the 2026-10-06 baseline (engine `7a1f01c0`, codegen `3e50082f`): **7,989 graded probes, 7,982 excellent (99.91 %) and 7 strong (0.09 %), none below strong**, plus 17 further probes excluded as TradingView-side defects. In that historical release check, separately, the engine's own parity gate checks the open corpus [`pineforge-corpus`](https://github.com/pineforge-4pass/pineforge-corpus), which anyone can reproduce: 312 reference strategies, 311 excellent and 1 probe that declares `expected_tier: anomaly` in its `inputs.json` (reported as `anomaly`, not as a failure). *Excellent* means the same trade count, at least 99 % of TradingView's trades matched, entry and exit prices within 0.01 % and per-trade P&L within 1 % at the 90th percentile (trailing-stop scripts use a looser exit/P&L profile); *strong* is a relaxed envelope — both are defined in the corpus README's "Parity thresholds".
 
 **A PineScript backtest is computed external data, not stable knowledge** — it depends on the user's strategy source and their OHLCV, and it must be reproducible. That is a tool call, not a recall task.
 
@@ -437,16 +441,26 @@ the top 10 in `top_results`, `results_truncated` and `report_path`.
 
 Give it a Pine v6 script and TradingView's own Strategy Tester export for it. It
 runs the script on the same market and window and grades the two trade lists
-trade by trade with the grader behind PineForge's published parity figures:
-`scripts/verify_corpus.py` of pineforge-engine v1.2.0 (sha256
-`431452ecddc8184937951ddf9a4c5f29029731237301967b5b480800be6fd1a6`, the same file in
-v1.3.0), run through the corpus gate's own harness (`scripts/run_strategy.py`, also
-unchanged in v1.3.0). Both are vendored unchanged under
-[`parity/vendor/`](parity/vendor/SHA256SUMS). Checked against the
-open [`pineforge-corpus`](https://github.com/pineforge-4pass/pineforge-corpus) at
-`a35c7c4`, on engine v1.1.0 and codegen `c5d97ee5`: the grading core returns the
-published tier for all 309 probes the corpus gate grades, and the tool itself, called
-over stdio with only the inputs below, returns it for a stratified sample of 30.
+trade by trade with `scripts/verify_corpus.py` of pineforge-engine v1.2.0 (sha256
+`431452ecddc8184937951ddf9a4c5f29029731237301967b5b480800be6fd1a6`), byte-identical
+in v1.3.0 and the frozen 1.4.0 candidate. The grader pin and scoring are unchanged.
+
+The separately vendored `scripts/run_strategy.py` execution harness is now copied
+byte-for-byte from the [frozen 1.4.0 engine candidate](https://github.com/pineforge-4pass/pineforge-engine/blob/b3192bfc2f5a24bf4efd6d1d01e01e8fe619dfed/scripts/run_strategy.py)
+(SHA-256 `36f7cf77e0b6355ce03f5d251c7c414f22be7da81ae4743a769f0527f06904d0`).
+Compared with the old v1.2.0/v1.3.0 vendor, it adds stable failure-code/argument
+handling, failed-status detection for empty error text, and Docker override
+string serialization. The grader and feed-derivation bytes stay unchanged in the
+[vendor hashes](parity/vendor/SHA256SUMS). Exact file identity and focused
+stand-in regression witnesses are not a fresh native-engine corpus parity proof.
+
+The harness CLI prints the engine failure code, but the parity tool does not yet return that code; this is a known limitation in 1.4.0.
+
+**Historical interface evidence, not a 1.4.0 corpus re-run:** checked against
+the open [`pineforge-corpus`](https://github.com/pineforge-4pass/pineforge-corpus)
+at `a35c7c4`, on engine v1.1.0 and codegen `c5d97ee5`: the grading core returns
+the published tier for all 309 probes the corpus gate grades, and the tool itself,
+called over stdio with only the inputs below, returns it for a stratified sample of 30.
 
 ```jsonc
 {
@@ -633,11 +647,28 @@ sources, so where the engine supports more, the entry says so: `request.security
 on another symbol, for example, is supported by the engine, but here a request whose
 value can reach a trade stops the run.
 
-The data is embedded in this package and stamped by the `coverage_version` field
-that `list_coverage_topics` returns (`engine v1.3.0 + codegen 1.3.0 (2026-10-06)` in
-this version); the engine's
-[`docs/coverage.md`](https://github.com/pineforge-4pass/pineforge-engine/blob/v1.3.0/docs/coverage.md)
-at that tag is the reference it was checked against.
+The embedded catalog is stamped `engine v1.4.0 + codegen 1.4.0 (2026-10-08)`
+in `coverage_version`. This is a bounded release-facing audit of the frozen pair,
+not a new test of every catalog entry. Historical inventory and unresolved
+limitations remain; other-symbol bars, recorded requests and library sources
+are still not supplied by this server.
+
+The directly affected assertions cite candidate source witnesses:
+
+- Numeric float `matrix.sum` matrix/matrix and matrix/scalar forms, methods and
+  `id1`/`id2` keywords are covered by [matrix overload witnesses](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/bfc4ddce453db1ba810692af9b9ba3310d87f0ac/tests/test_matrix_arithmetic_overloads.py); this does not claim arithmetic for bool/string/color/UDT matrices.
+- Tested local missing-history array and float/int matrix bindings preserve `na`;
+  [missing-history witnesses](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/bfc4ddce453db1ba810692af9b9ba3310d87f0ac/tests/test_collection_history_missing.py) and [bounded keyword/callable witnesses](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/bfc4ddce453db1ba810692af9b9ba3310d87f0ac/tests/test_arrseg_review_fixes.py) keep the callable empty-copy, function-local/parameter history and map-history limits explicit.
+- [`pineforge.h`](https://github.com/pineforge-4pass/pineforge-engine/blob/b3192bfc2f5a24bf4efd6d1d01e01e8fe619dfed/include/pineforge/pineforge.h) has 81 `PF_API` declarations: 64 [runtime implementations](https://github.com/pineforge-4pass/pineforge-engine/blob/b3192bfc2f5a24bf4efd6d1d01e01e8fe619dfed/src/c_abi.cpp) and 17 generated declarations, plus four generated receipt exports outside that header. The two added runtime getters expose failure code/args; `PF_ABI_VERSION` remains 4.
+- The input manifest publishes `supported` and descriptor-backed defaults,
+  choices and bounds ([manifest witnesses](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/bfc4ddce453db1ba810692af9b9ba3310d87f0ac/tests/test_input_manifest_values.py), [receipt agreement and known limits](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/bfc4ddce453db1ba810692af9b9ba3310d87f0ac/tests/test_input_metadata_receipt.py)).
+  An empty options list is not an unsupported flag, and computed expressions,
+  color encodings and timezone-dependent defaults are not guaranteed to equal
+  native receipt values. The [release-image backtest](https://github.com/pineforge-4pass/pineforge-engine/blob/b3192bfc2f5a24bf4efd6d1d01e01e8fe619dfed/docker/run_json.py) uses checked setters when the library exposes the complete protocol;
+  the legacy parity harness and legacy-library fallback do not establish the
+  same enforcement. UI layout metadata is still inert.
+
+The historical [runtime catalog](https://github.com/pineforge-4pass/pineforge-engine/blob/b3192bfc2f5a24bf4efd6d1d01e01e8fe619dfed/docs/coverage.md) remains the general reference; no historical inventory totals are rewritten.
 
 ## Filesystem scope
 
