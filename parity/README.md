@@ -81,14 +81,16 @@ timeout).
 
 ## Vendored files
 
-`vendor/` holds pineforge-engine v1.2.0 (commit
-792a6b5b09be0608e616acdc3bb5f64f551e8163) `scripts/` files, byte-identical.
-They are never edited. `vendor/SHA256SUMS` lists their hashes:
+`vendor/verify_corpus.py` and `vendor/derive_corpus_feeds.py` are byte-identical
+to pineforge-engine v1.2.0 (commit 792a6b5b09be0608e616acdc3bb5f64f551e8163)
+`scripts/` files. `vendor/run_strategy.py` is byte-identical to the same path
+at engine commit b3192bfc2f5a24bf4efd6d1d01e01e8fe619dfed. These are unchanged
+upstream copies; `vendor/SHA256SUMS` lists their per-file provenance and hashes:
 
 | file | sha256 |
 |---|---|
 | verify_corpus.py | 431452ecddc8184937951ddf9a4c5f29029731237301967b5b480800be6fd1a6 |
-| run_strategy.py | 6f3b13b35cace11f91fbe096bb13fb79801e6c5da72ac409a3b12641e7e25faa |
+| run_strategy.py | 36f7cf77e0b6355ce03f5d251c7c414f22be7da81ae4743a769f0527f06904d0 |
 | derive_corpus_feeds.py | d2d848d4e8c11f5fa6cc387dc150ab5a2e67ea800a702db4e6a7c1666539d99a |
 
 run_strategy.py imports derive_corpus_feeds.py when it loads; its other
