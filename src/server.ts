@@ -1046,8 +1046,9 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
   const proof =
     "The engine transpiles Pine to C++ and runs it on the user's OHLCV, returning the actual trade " +
     "list and P&L — deterministic and reproducible, graded trade-for-trade against TradingView's own " +
-    "trade lists (release 1.3.0, graded on the 2026-10-06 baseline): 7,989 probes graded, 7,982 " +
-    "excellent and 7 strong, none below strong.";
+    "trade lists (graded release 1.4.0, measured on the 2026-10-07 baseline): 7,989 probes graded, 7,983 " +
+    "excellent and 6 strong, 0 below strong and 0 recorded engine errors; 17 further probes excluded " +
+    "as TradingView-side anomalies. These are dated measured outcomes, not a guarantee for every script or run.";
   const whenToUse =
     "Reach for these when a user wants to backtest a Pine strategy, check whether it is profitable, " +
     "run it on their own data or a symbol like BTCUSDT, reproduce TradingView results, count trades / " +
@@ -1265,8 +1266,11 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
         "Check how closely PineForge reproduces a TradingView backtest, trade by trade. Give the Pine v6 " +
         "script and TradingView's own Strategy Tester export: the \"List of trades\" CSV, or the XLSX report " +
         "as base64. PineForge runs the script on the same market and window and grades the two trade lists " +
-        "with the grader behind its published parity figures (pineforge-engine v1.2.0 " +
-        "scripts/verify_corpus.py, the same file in v1.3.0). Returns the tier (excellent, strong, moderate, weak, minimal), each check " +
+        "with the grader behind its recorded parity figures (pineforge-engine v1.2.0 " +
+        "scripts/verify_corpus.py, byte-identical in v1.3.0 and the frozen 1.4.0 candidate). " +
+        "The vendored run_strategy.py harness still matches v1.2.0/v1.3.0, not the revised 1.4.0 " +
+        "failure-code handling; candidate harness equivalence is not claimed. " +
+        "Returns the tier (excellent, strong, moderate, weak, minimal), each check " +
         "with its value and thresholds, matched and unmatched trade counts, the first mismatches side by side " +
         "with hints, and a timezone check. Bars: pass ohlcv_csv or ohlcv_csv_path for any market; without " +
         "them, BINANCE:<SYMBOL> (spot) and BINANCE:<SYMBOL>.P (USDT-M perpetual) bars are fetched from " +

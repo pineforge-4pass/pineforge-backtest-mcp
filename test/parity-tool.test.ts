@@ -275,22 +275,22 @@ test("a declaring script on a chart the harness does not magnify (1 minute, week
   }
 });
 
-test("a run on an engine or codegen other than 1.3.0 carries a warning; 1.3.0 does not", async () => {
+test("a run on an engine or codegen other than 1.4.0 carries a warning; 1.4.0 does not", async () => {
   const path = await barsFile("timestamp,open,high,low,close,volume\n1743379200000,1,1,1,1,1\n");
   const run = async (versions: Record<string, string>) => {
     const r = fakeRunner();
     const runner = { ...r, parity: async (call: ParityCall) => ({ ...(await r.parity(call)), versions }) } as EngineRunner;
     return parityToolResult(runner, { ...base, ohlcv_csv_path: path }, deps);
   };
-  const same = await run({ engine: "1.3.0", codegen: "1.3.0" });
-  assert.doesNotMatch(same.content[0]!.text, /not 1\.3\.0/);
+  const same = await run({ engine: "1.4.0", codegen: "1.4.0" });
+  assert.doesNotMatch(same.content[0]!.text, /not 1\.4\.0/);
   assert.deepEqual(same.structuredContent.warnings, []);
-  const previous = await run({ engine: "1.2.0", codegen: "1.2.0" });
-  assert.match(String((previous.structuredContent.warnings as string[])[0]), /^This check ran on engine 1\.2\.0 and codegen 1\.2\.0, not 1\.3\.0/);
-  const newer = await run({ engine: "1.3.1", codegen: "v1.3.0" });
-  assert.match(String((newer.structuredContent.warnings as string[])[0]), /^This check ran on engine 1\.3\.1 and codegen 1\.3\.0, not 1\.3\.0/);
-  assert.match(newer.content[0]!.text, /Warnings:\n- This check ran on engine 1\.3\.1/);
-  assert.match(newer.content[0]!.text, /pineforge-release:1\.3\.0/);
-  const codegen = await run({ engine: "1.3.0", codegen: "1.2.0" });
-  assert.match(codegen.content[0]!.text, /codegen 1\.2\.0, not 1\.3\.0/);
+  const previous = await run({ engine: "1.3.0", codegen: "1.3.0" });
+  assert.match(String((previous.structuredContent.warnings as string[])[0]), /^This check ran on engine 1\.3\.0 and codegen 1\.3\.0, not 1\.4\.0/);
+  const newer = await run({ engine: "1.4.1", codegen: "v1.4.0" });
+  assert.match(String((newer.structuredContent.warnings as string[])[0]), /^This check ran on engine 1\.4\.1 and codegen 1\.4\.0, not 1\.4\.0/);
+  assert.match(newer.content[0]!.text, /Warnings:\n- This check ran on engine 1\.4\.1/);
+  assert.match(newer.content[0]!.text, /pineforge-release:1\.4\.0/);
+  const codegen = await run({ engine: "1.4.0", codegen: "1.3.0" });
+  assert.match(codegen.content[0]!.text, /codegen 1\.3\.0, not 1\.4\.0/);
 });
