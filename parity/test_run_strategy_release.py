@@ -14,6 +14,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).parent / "vendor"))
+
 HARNESS_PATH = Path(os.environ.get(
     "PF_HARNESS_TEST_PATH", str(Path(__file__).parent / "vendor" / "run_strategy.py")))
 HARNESS_SPEC = importlib.util.spec_from_file_location("harness_regression_target", HARNESS_PATH)
