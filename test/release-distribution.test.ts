@@ -16,8 +16,10 @@ function restore(overrides: Record<string, unknown> = {}) {
   const bin = join(root, "bin"); const ci = join(root, ".release-ci"); mkdirSync(bin); mkdirSync(ci);
   const file = join(root, "mock.json");
   writeFileSync(file, JSON.stringify({ calls: [], npm_version: "0.9.41", image_digest: `sha256:${"c".repeat(64)}`, ...overrides }));
-  writeFileSync(join(ci, "channel-state.json"), JSON.stringify(original));
-  writeFileSync(join(ci, "image-publication.json"), JSON.stringify({ digest: `sha256:${"c".repeat(64)}` }));
+  mkdirSync(join(ci, "offline-channels"));
+  mkdirSync(join(ci, "offline-image-publication"));
+  writeFileSync(join(ci, "offline-channels", "channel-state.json"), JSON.stringify(original));
+  writeFileSync(join(ci, "offline-image-publication", "image-publication.json"), JSON.stringify({ digest: `sha256:${"c".repeat(64)}` }));
   const fake = readFileSync(new URL("./fixtures/release/mock-cli.mjs", import.meta.url));
   for (const tool of ["gh", "npm", "docker"]) writeFileSync(join(bin, tool), fake, { mode: 0o755 });
   const env = { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}`, PF_MOCK_STATE: file,

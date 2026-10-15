@@ -95,7 +95,7 @@ jobs:
           OFFLINE_SYMINFO_FEED_URL: ${{ vars.OFFLINE_SYMINFO_FEED_URL }}
         run: python3 scripts/prepare-runtime-fixtures.py
       - name: Install the packed npm entry point
-        run: npm install --prefix .release-ci/installed --no-package-lock --ignore-scripts --no-audit --no-fund ./.release-ci/*.tgz
+        run: npm install --prefix .release-ci/installed --no-package-lock --ignore-scripts --no-audit --no-fund ./.release-ci/offline-package/*.tgz
       - name: Resolve the committed image
         id: lock
         run: node scripts/release-contract.mjs show >> "$GITHUB_OUTPUT"

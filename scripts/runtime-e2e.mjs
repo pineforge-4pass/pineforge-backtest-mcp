@@ -19,8 +19,8 @@ export function verifyTap(tap, expected) {
 async function run() {
   const lock = readLock();
   const inventory = JSON.parse(readFileSync("test/fixtures/release/runtime-inventory.json"));
-  const packed = JSON.parse(readFileSync(".release-ci/package.json"));
-  assert.equal(integrity(`.release-ci/${packed.tar}`), packed.integrity, "test tarball changed");
+  const packed = JSON.parse(readFileSync(".release-ci/offline-package/package.json"));
+  assert.equal(integrity(`.release-ci/offline-package/${packed.tar}`), packed.integrity, "test tarball changed");
   const mode = process.argv[2];
   assert.ok(["npm", "image"].includes(mode), "expected npm or image");
   const root = process.cwd();

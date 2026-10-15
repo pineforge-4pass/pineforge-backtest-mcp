@@ -69,6 +69,16 @@ original LFS feed is SHA-256 checked, and the vendored resampler derives 15m
 bars. The frozen BTC feed must match the committed 2188-bar syminfo hash.
 Required negative-case probes must exist and contain source/trades.
 
+The repository and its available git history record no frozen HTTPS URL for the
+BTC fixture. The original syminfo E2E expects an operator-supplied local
+`PF_E2E_SYMINFO_CSV`; its expected rows and the runtime inventory require SHA-256
+`a53fc5ab420604ad47b0bae1cceed0ccce45e2ff63804e1d2ab8421efc5cecfb`
+and 2188 bars. To configure `OFFLINE_SYMINFO_FEED_URL`, recover those exact CSV
+bytes and publish them in `pineforge-4pass/pineforge-corpus` under
+`data/frozen/btcusdt-4h-a53fc5ab.csv`, then set the repository variable to the
+HTTPS raw-file URL pinned to that full commit SHA. This is a proposed hosting
+location; the fixture has not been published there by this change.
+
 The network-fetch negative case uses a local Binance HTTP fixture server serving
 the pinned bars. The real transpiler, compiler, engine and grader still execute.
 The self-contained image runs its real local entry point through stdio with
@@ -121,6 +131,11 @@ publication and channel activation. See [npm's trusted-publisher documentation](
 Artifacts include run attempts. Failed-job reruns select the latest evidence for
 each job of the same run and retain earlier history. The channel snapshot records
 which exact packed and gated artifacts to reuse; publication does not rebuild.
+The collector extracts each selected artifact into `.release-ci/<artifact-prefix>/`
+(for example, `offline-package`, `offline-runtime-amd64`, or `offline-image-arm64`).
+All downloaded inputs are read from those directories, so common TAP filenames
+and candidate metadata cannot collide. Locally produced upload files remain
+directly under `.release-ci`.
 Re-run failed jobs after a transient publication failure. Do not rerun successful
 image-build jobs after publishing fixed versions: a newly built image may differ,
 and the fixed-version guard correctly refuses to replace it. A source fix uses a

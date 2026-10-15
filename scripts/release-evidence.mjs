@@ -44,11 +44,15 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       for (const value of Object.values(needs)) assert.equal(value.result, "success", "missing, failed, cancelled or skipped required job");
       const inventoryBytes = readFileSync("test/fixtures/release/runtime-inventory.json");
       const inventory = JSON.parse(inventoryBytes);
-      const evidence = readdirSync(dir).filter((f) => /^runtime-(amd64|arm64)-(npm|image)\.json$/.test(f)).map((f) => JSON.parse(readFileSync(`${dir}/${f}`)));
+      const evidence = ["amd64", "arm64"].flatMap((arch) => {
+        const runtimeDir = `${dir}/offline-runtime-${arch}`;
+        return readdirSync(runtimeDir).filter((f) => /^runtime-(amd64|arm64)-(npm|image)\.json$/.test(f))
+          .map((f) => JSON.parse(readFileSync(`${runtimeDir}/${f}`)));
+      });
       verifyEvidence(lock, inventory, evidence, process.env.GITHUB_SHA, process.env.GITHUB_RUN_ID);
       for (const e of evidence) assert.equal(e.fixture_inventory_sha256, sha256(inventoryBytes));
-      const pkg = JSON.parse(readFileSync(`${dir}/package.json`));
-      assert.equal(pkg.integrity, integrity(`${dir}/${pkg.tar}`), "packed bytes changed");
+      const pkg = JSON.parse(readFileSync(`${dir}/offline-package/package.json`));
+      assert.equal(pkg.integrity, integrity(`${dir}/offline-package/${pkg.tar}`), "packed bytes changed");
       assert.equal(pkg.source_sha, process.env.GITHUB_SHA);
       assert.equal(pkg.event_id, lock.event_id ?? null);
       assert.equal(String(pkg.run_id), process.env.GITHUB_RUN_ID);

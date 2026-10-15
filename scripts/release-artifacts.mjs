@@ -20,34 +20,37 @@ export function collect(kind, run = process.env.GITHUB_RUN_ID) {
   assert.match(String(run), /^[1-9][0-9]*$/);
   const artifacts = JSON.parse(gh("api", "--paginate", "--slurp", `repos/${repo}/actions/runs/${run}/artifacts?per_page=100`)).flatMap((p) => p.artifacts);
   mkdirSync(".release-ci", { recursive: true });
-  const download = (name) => {
+  // Each selected artifact has its own directory: runtime TAP files and image
+  // metadata can share basenames with artifacts from other jobs.
+  const download = (prefix, name) => {
+    assert.ok(name.startsWith(`${prefix}-${run}-`) && /^[1-9][0-9]*$/.test(name.slice(`${prefix}-${run}-`.length)), "wrong recorded artifact identity");
     assert.ok(artifacts.some((a) => a.name === name && !a.expired), `missing recorded artifact ${name}`);
-    gh("run", "download", String(run), "--repo", repo, "--name", name, "--dir", ".release-ci");
+    gh("run", "download", String(run), "--repo", repo, "--name", name, "--dir", `.release-ci/${prefix}`);
   };
-  const latest = (prefix) => download(chooseArtifact(artifacts, prefix, run));
-  const read = (file) => JSON.parse(readFileSync(`.release-ci/${file}`, "utf8"));
+  const latest = (prefix) => download(prefix, chooseArtifact(artifacts, prefix, run));
+  const read = (prefix, file) => JSON.parse(readFileSync(`.release-ci/${prefix}/${file}`, "utf8"));
   if (kind === "package") latest("offline-package");
   else if (kind === "evidence") {
     latest("offline-package");
     for (const arch of ["amd64", "arm64"]) latest(`offline-runtime-${arch}`);
   } else if (kind === "gate") {
     latest("offline-gate");
-    const p = read("gate-receipt.json").package;
-    download(`offline-package-${run}-${p.attempt}`);
+    const p = read("offline-gate", "gate-receipt.json").package;
+    download("offline-package", `offline-package-${run}-${p.attempt}`);
   } else {
     latest("offline-channels");
-    const state = read("channel-state.json");
+    const state = read("offline-channels", "channel-state.json");
     assert.equal(String(state.run_id), String(run));
     if (kind === "image-input") {
-      download(state.gate_artifact);
-      const gate = read("gate-receipt.json");
+      download("offline-gate", state.gate_artifact);
+      const gate = read("offline-gate", "gate-receipt.json");
       for (const arch of ["amd64", "arm64"]) {
         const evidence = gate.runtime.find((e) => e.arch === arch && e.mode === "image");
-        download(`offline-image-${arch}-${run}-${evidence.artifact_attempt}`);
+        download(`offline-image-${arch}`, `offline-image-${arch}-${run}-${evidence.artifact_attempt}`);
       }
-    } else if (kind === "npm-input") download(state.package_artifact);
+    } else if (kind === "npm-input") download("offline-package", state.package_artifact);
     else if (kind === "promotion-input") {
-      download(state.gate_artifact);
+      download("offline-gate", state.gate_artifact);
       latest("offline-image-publication");
     } else if (kind === "restore-input") latest("offline-image-publication");
     else throw Error("unrecognized artifact selection");

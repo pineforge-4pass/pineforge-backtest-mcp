@@ -140,12 +140,12 @@ async function prepare() {
   const pr = prs.find((p) => p.merged_at && p.merge_commit_sha === process.env.GITHUB_SHA && p.base.ref === "main" && p.head.ref.startsWith("bot/pineforge-release/main/"));
   assert.ok(pr && marker(pr.body).event_id === lock.event_id, "tag was not produced by a merged release PR");
   desired(lock);
-  const gate = json(`${dir}/gate-receipt.json`);
+  const gate = json(`${dir}/offline-gate/gate-receipt.json`);
   assert.equal(gate.state, "ready"); assert.equal(gate.source_sha, process.env.GITHUB_SHA);
   assert.equal(String(gate.run_id), process.env.GITHUB_RUN_ID);
   assert.equal(gate.event_id, lock.event_id);
   verifyEvidence(lock, json("test/fixtures/release/runtime-inventory.json"), gate.runtime, process.env.GITHUB_SHA, process.env.GITHUB_RUN_ID);
-  assert.equal(integrity(`${dir}/${gate.package.tar}`), gate.package.integrity);
+  assert.equal(integrity(`${dir}/offline-package/${gate.package.tar}`), gate.package.integrity);
   assert.equal(gate.package.version, version);
   const ch = channel(version);
   assert.equal(ch.prerelease, lock.prerelease, "package channel contradicts hub");
@@ -181,16 +181,16 @@ async function archive() {
 }
 async function publishImage() {
   const lock = readLock("release-lock.json", { ready: true }); desired(lock);
-  const gate = json(`${dir}/gate-receipt.json`);
-  const version = json(`${dir}/channel-state.json`).version;
+  const gate = json(`${dir}/offline-gate/gate-receipt.json`);
+  const version = json(`${dir}/offline-channels/channel-state.json`).version;
   const refs = [];
   for (const arch of ["amd64", "arm64"]) {
-    const candidate = json(`${dir}/candidate-${arch}.json`);
+    const candidate = json(`${dir}/offline-image-${arch}/candidate-${arch}.json`);
     assert.equal(candidate.source_sha, process.env.GITHUB_SHA);
     assert.equal(candidate.event_id, lock.event_id);
-    assert.equal(await fileHash(`${dir}/image-${arch}.tar`), candidate.archive_sha256, "saved tested image changed");
+    assert.equal(await fileHash(`${dir}/offline-image-${arch}/image-${arch}.tar`), candidate.archive_sha256, "saved tested image changed");
     assert.equal(gate.runtime.find((e) => e.mode === "image" && e.arch === arch).image_id, candidate.image_id);
-    docker("load", "-i", `${dir}/image-${arch}.tar`);
+    docker("load", "-i", `${dir}/offline-image-${arch}/image-${arch}.tar`);
     const local = `pineforge-offline-candidate:${arch}`;
     assert.equal(JSON.parse(docker("image", "inspect", local))[0].Id, candidate.image_id);
     const ref = `${OCI}:v${version}-${arch}`;
@@ -211,9 +211,9 @@ async function publishImage() {
 }
 async function publishNpm() {
   const lock = readLock("release-lock.json", { ready: true }); desired(lock);
-  const state = validateChannelState(json(`${dir}/channel-state.json`));
-  const pkg = json(`${dir}/package.json`);
-  assert.equal(integrity(`${dir}/${pkg.tar}`), state.package_integrity);
+  const state = validateChannelState(json(`${dir}/offline-channels/channel-state.json`));
+  const pkg = json(`${dir}/offline-package/package.json`);
+  assert.equal(integrity(`${dir}/offline-package/${pkg.tar}`), state.package_integrity);
   oidc();
   assert.equal((await npmMetadata())["dist-tags"][state.channel], state.previous.npm_version, "channel moved before OIDC proof; refusing to restore a newer publication");
   // A real no-change restoration proves this workflow's exact OIDC dist-tag
@@ -223,7 +223,7 @@ async function publishNpm() {
   save(`${dir}/oidc-proof.json`, { cli: "11.21.0", operation: "npm dist-tag add", authentication: "github-oidc", channel: state.channel, restored_version: state.previous.npm_version, run_id: process.env.GITHUB_RUN_ID });
   const existing = await npmMetadata(state.version);
   if (existing) assert.equal(existing.dist.integrity, state.package_integrity, "published npm version has different bytes");
-  else cmd("npm", "publish", `${dir}/${pkg.tar}`, "--ignore-scripts", "--access=public", "--tag", `candidate-${lock.manifest.sha256.slice(0, 12)}`);
+  else cmd("npm", "publish", `${dir}/offline-package/${pkg.tar}`, "--ignore-scripts", "--access=public", "--tag", `candidate-${lock.manifest.sha256.slice(0, 12)}`);
   assert.equal((await npmMetadata(state.version))?.dist.integrity, state.package_integrity, "npm artifact verification failed");
 }
 async function registry(required) {
@@ -257,8 +257,8 @@ async function githubRelease() {
 }
 async function promote() {
   const lock = readLock("release-lock.json", { ready: true }); desired(lock);
-  const state = validateChannelState(json(`${dir}/channel-state.json`));
-  const image = json(`${dir}/image-publication.json`);
+  const state = validateChannelState(json(`${dir}/offline-channels/channel-state.json`));
+  const image = json(`${dir}/offline-image-publication/image-publication.json`);
   assert.equal(image.event_id, lock.event_id);
   assert.equal(imageDigest(`${OCI}:v${state.version}`), image.digest);
   assert.equal((await npmMetadata(state.version)).dist.integrity, state.package_integrity);
@@ -284,7 +284,7 @@ async function promote() {
   await alert("verified", `Verified npm ${state.channel} and the immutable multi-architecture image. External hosts are not part of this distribution evidence.`);
 }
 async function restore() {
-  const state = validateChannelState(json(`${dir}/channel-state.json`));
+  const state = validateChannelState(json(`${dir}/offline-channels/channel-state.json`));
   // For manual restoration, only artifacts from this repository's real
   // publisher are accepted, never PR workflow artifacts or caller payloads.
   const run = api(`repos/${REPO}/actions/runs/${state.run_id}`);
@@ -292,7 +292,7 @@ async function restore() {
   assert.ok(["push", "workflow_dispatch"].includes(run.event));
   assert.equal(run.head_sha, state.source_sha);
   assert.equal(String(state.run_id), process.env.RESTORE_SOURCE_RUN, "restoration artifact/run mismatch");
-  const image = existsSync(`${dir}/image-publication.json`) ? json(`${dir}/image-publication.json`) : null;
+  const image = existsSync(`${dir}/offline-image-publication/image-publication.json`) ? json(`${dir}/offline-image-publication/image-publication.json`) : null;
   const current = (await npmMetadata())["dist-tags"][state.channel];
   assert.ok([state.version, state.previous.npm_version].includes(current), "newer npm channel must not be rolled back");
   if (state.channel === "latest") {
