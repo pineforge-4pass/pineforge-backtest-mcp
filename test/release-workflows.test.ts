@@ -41,6 +41,9 @@ test("App tokens are scoped to this consumer and privileged transitions use trus
     const job = Object.values(w.jobs)[0] as any;
     const app = job.steps.find((s: any) => s.uses?.startsWith("actions/create-github-app-token@"));
     assert.equal(app.with.repositories, "pineforge-backtest-mcp");
+    assert.equal(app.with.owner, "${{ github.repository_owner }}");
+    assert.equal(app.with["permission-contents"], "write");
+    assert.equal(app.with["permission-pull-requests"], "write");
     assert.equal(job.steps.find((s: any) => s.uses?.startsWith("actions/checkout@")).with.ref, "main");
   }
   assert.doesNotMatch(consumer, /--admin|git push.*--force/);
@@ -115,6 +118,33 @@ test("only ready successful stable distributions can activate latest", () => {
   assert.match(publisher.jobs.promote.if, /needs\.mcp-registry\.result == 'success'/);
   assert.match(publisher.jobs.restore.if, /failure/);
   assert.match(publisher.jobs["report-failure"].if, /always\(\)/);
-  assert.equal(receiver.concurrency.group, publisher.concurrency.group);
-  assert.equal(control.concurrency.group, publisher.concurrency.group);
+  assert.notEqual(receiver.concurrency.group, publisher.concurrency.group);
+  assert.notEqual(control.concurrency.group, publisher.concurrency.group);
+  assert.equal(publisher.concurrency["cancel-in-progress"], false);
+});
+
+test("only the trusted coordinator uploads the one literal contract artifact, then sends a hub-only signal", () => {
+  const steps = control.jobs.reconcile.steps;
+  const uploadIndex = steps.findIndex((s: any) => s.with?.name === "release-receipt-offline");
+  const upload = steps[uploadIndex];
+  assert.ok(uploadIndex > 0);
+  assert.equal(upload.with.path, ".release-ci/release-receipt.json");
+  assert.equal(upload.with.overwrite, true);
+  assert.equal(upload.with["if-no-files-found"], "error");
+  const hub = steps.find((s: any) => s.id === "hub");
+  assert.equal(hub.with.repositories, "pineforge-release");
+  assert.equal(hub.with["permission-contents"], "write");
+  const signalIndex = steps.findIndex((s: any) => s.run === "node scripts/release-receipt.mjs signal");
+  assert.ok(signalIndex > uploadIndex);
+  assert.match(steps[signalIndex].if, /steps\.receipt\.outcome == 'success'/);
+  for (const w of [receiver, publisher]) {
+    assert.doesNotMatch(JSON.stringify(w), /consumer-receipt\.json|offline-receipt-|release-receipt-offline/);
+  }
+  assert.ok(control.on.workflow_run.workflows.includes("Publish to npm"));
+  assert.ok(control.on.workflow_run.workflows.includes("pineforge-release"));
+  assert.match(consumer, /final reporting run must be at the landed source/);
+  assert.match(consumer, /"workflow", "run", "publish\.yml".*"--ref", tag/);
+  assert.match(consumer, /"workflow", "run", "release-pr\.yml".*"--ref", tag/);
+  const finalDispatch = consumer.slice(consumer.indexOf("function ensureFinalReport"), consumer.indexOf("async function reportPublication"));
+  assert.ok(finalDispatch.indexOf("trustedPublisher(publisher)") < finalDispatch.indexOf('gh("workflow", "run"'), "validate the workflow definition's source before dispatch");
 });

@@ -7,10 +7,11 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { api, gh, readLock, sha256, verifyManifest } from "./release-contract.mjs";
+import { HUB, api, gh, readLock, sha256, verifyManifest, validateReady, downloadManifest } from "./release-contract.mjs";
 import { integrity, verifyEvidence } from "./release-evidence.mjs";
 import { compareVersions, channel } from "./release-version.mjs";
 import { marker, alert } from "./release-consumer.mjs";
+import { servedIdentity } from "./release-receipt.mjs";
 
 const REPO = process.env.GITHUB_REPOSITORY ?? "pineforge-4pass/pineforge-backtest-mcp";
 const NPM = "@pineforge/backtest-mcp";
@@ -73,6 +74,58 @@ export function validateChannelState(s) {
   else assert.equal(s.previous.image_digest, null);
   return s;
 }
+async function previousIdentity(version, consumerImage, ch) {
+  // Observe the actual rollback distribution before any channel changes. A
+  // legacy package without source/facts provenance needs a reviewed baseline;
+  // inventing those identities would make a v1 verified receipt dishonest.
+  const pkg = await npmMetadata(version);
+  assert.equal(pkg?.name, NPM);
+  assert.equal(pkg.version, version);
+  assert.match(pkg?.gitHead ?? "", /^[0-9a-f]{40}$/, "previous npm distribution lacks source provenance");
+  const url = new URL(pkg.dist.tarball);
+  assert.equal(url.origin, "https://registry.npmjs.org");
+  const response = await fetch(url);
+  assert.equal(response.status, 200);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  assert.equal(`sha512-${createHash("sha512").update(bytes).digest("base64")}`, pkg.dist.integrity);
+  const file = join(mkdtempSync(join(tmpdir(), "pf-previous-")), "package.tgz");
+  writeFileSync(file, bytes);
+  const lock = validateReady(JSON.parse(cmd("tar", "-xOf", file, "package/release-lock.json")));
+  const packed = JSON.parse(cmd("tar", "-xOf", file, "package/package.json"));
+  assert.equal(packed.version, version);
+  const sourceLock = api(`repos/${REPO}/contents/release-lock.json?ref=${pkg.gitHead}`);
+  assert.deepEqual(JSON.parse(Buffer.from(sourceLock.content, "base64")), lock, "previous package/source lock differs");
+  verifyManifest(lock, downloadManifest(lock));
+  const facts = await fetch(`https://raw.githubusercontent.com/${HUB}/${lock.facts.commit}/${lock.facts.path}`);
+  assert.equal(facts.status, 200);
+  assert.equal(sha256(Buffer.from(await facts.arrayBuffer())), lock.facts.sha256);
+  const fixedImage = imageDigest(`${OCI}:v${version}`);
+  if (consumerImage) assert.equal(fixedImage, consumerImage);
+  const repository = OCI.slice("ghcr.io/".length);
+  const auth = await fetch(`https://ghcr.io/token?scope=repository:${repository}:pull`);
+  assert.equal(auth.status, 200);
+  const token = (await auth.json()).token;
+  const get = async (kind, digest) => {
+    const response = await fetch(`https://ghcr.io/v2/${repository}/${kind}/${digest}`, { headers: {
+      Authorization: `Bearer ${token}`, Accept: "application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json",
+    } });
+    assert.equal(response.status, 200);
+    const raw = Buffer.from(await response.arrayBuffer());
+    assert.equal(`sha256:${sha256(raw)}`, digest, "previous image content hash differs");
+    return JSON.parse(raw);
+  };
+  const index = await get("manifests", fixedImage);
+  for (const arch of ["amd64", "arm64"]) {
+    const children = index.manifests.filter((m) => m.platform?.os === "linux" && m.platform.architecture === arch);
+    assert.equal(children.length, 1);
+    const manifest = await get("manifests", children[0].digest);
+    const config = await get("blobs", manifest.config.digest);
+    assert.equal(config.architecture, arch);
+    assert.equal(config.config.Labels["org.opencontainers.image.revision"], pkg.gitHead);
+    assert.equal(config.config.Labels["io.pineforge.release.image"], `${lock.image.repository}@${lock.image.digest}`);
+  }
+  return servedIdentity(lock, pkg.gitHead, { version, integrity: pkg.dist.integrity, image: fixedImage, channel: ch });
+}
 async function prepare() {
   const lock = readLock("release-lock.json", { ready: true });
   verifyManifest(lock, readFileSync("release-manifest.json"));
@@ -104,11 +157,12 @@ async function prepare() {
   assert.ok(compareVersions(version, previousVersion) > 0, "already applied or older channel: no republish; use restoration if needed");
   const previousImage = ch.prerelease ? null : imageDigest(`${OCI}:latest`);
   if (previousImage) assert.equal(imageDigest(`${OCI}:v${previousVersion}`), previousImage, "previous npm/image channels disagree");
+  const previous = await previousIdentity(previousVersion, previousImage, ch.npmDistTag);
   const state = validateChannelState({ role: "offline", event_id: lock.event_id, source_sha: process.env.GITHUB_SHA,
     run_id: Number(process.env.GITHUB_RUN_ID), version, channel: ch.npmDistTag,
     gate_artifact: `offline-gate-${gate.run_id}-${gate.attempt}`,
     package_artifact: `offline-package-${gate.package.run_id}-${gate.package.attempt}`,
-    package_integrity: gate.package.integrity, previous: { npm_version: previousVersion, image_digest: previousImage },
+    package_integrity: gate.package.integrity, previous: { npm_version: previousVersion, image_digest: previousImage, identity: previous },
     pr: pr.number, base_sha: pr.base.sha, head_sha: pr.head.sha, merge_sha: pr.merge_commit_sha });
   save(`${dir}/channel-state.json`, state);
 }
@@ -221,22 +275,13 @@ async function promote() {
   }
   assert.equal((await npmMetadata())["dist-tags"][state.channel], state.version, "npm channel not activated");
   if (state.channel === "latest") gh("release", "edit", `v${state.version}`, "--repo", REPO, "--latest");
-  const gate = json(`${dir}/gate-receipt.json`);
-  const receipt = { role: "offline", state: "verified", delivery: "package-and-image-distribution", external_hosts: "unverified",
-    event_id: lock.event_id, manifest_sha256: lock.manifest.sha256, ...state,
-    ci_e2e_run_id: gate.run_id, expected_jobs: gate.expected_jobs, runtime: gate.runtime, approved_skips: [],
-    deployed: { source_sha: state.source_sha, npm_version: state.version, npm_integrity: state.package_integrity, image: `${OCI}@${image.digest}`, facts: lock.facts },
-    preview: { kind: "local-runtime", architectures: ["amd64", "arm64"] },
-    attempt: process.env.GITHUB_RUN_ATTEMPT, completed_at: new Date().toISOString() };
-  const file = `${dir}/offline-receipt-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}.json`;
-  save(file, receipt);
-  try {
-    gh("release", "upload", `v${state.version}`, file, "--repo", REPO);
-    await alert("verified", `Verified npm ${state.channel} and the immutable multi-architecture image. External hosts are not part of this distribution receipt.`);
-  } catch (e) {
-    save(file, { ...receipt, state: "failed", stage: "completion-reporting", completed_at: new Date().toISOString() });
-    throw e;
-  }
+  // Internal observations, not a consumer receipt. The trusted coordinator
+  // waits for this entire publisher run to finish before producing contract v1.
+  save(`${dir}/distribution-evidence.json`, { event_id: lock.event_id, run_id: Number(process.env.GITHUB_RUN_ID),
+    run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT), source: state.source_sha,
+    deployed: servedIdentity(lock, state.source_sha, { version: state.version, integrity: state.package_integrity, image: image.digest, channel: state.channel }),
+    previous: state.previous.identity });
+  await alert("verified", `Verified npm ${state.channel} and the immutable multi-architecture image. External hosts are not part of this distribution evidence.`);
 }
 async function restore() {
   const state = validateChannelState(json(`${dir}/channel-state.json`));

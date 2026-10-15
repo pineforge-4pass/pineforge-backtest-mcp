@@ -1,4 +1,5 @@
 name: Publish to npm
+run-name: Offline ${{ inputs.action == 'restore' && 'restore' || 'publish' }} ${{ github.ref_name }}
 
 on:
   push:
@@ -14,9 +15,10 @@ on:
         type: string
         description: Original publisher run ID (required for restoration)
 
-# Serializes channel changes with PR reconciliation and supersession.
+# Serialize distribution/channel writes independently of receiver/reconciler
+# wakeups. Reconciliation repairs a missing/cancelled tag run on the same tag.
 concurrency:
-  group: offline-release-control
+  group: offline-release-publish
   cancel-in-progress: false
 env:
   NPM_CONFIG_REGISTRY: https://registry.npmjs.org
@@ -205,15 +207,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_CHAIN_OWNER: ${{ vars.RELEASE_CHAIN_OWNER }}
         run: node scripts/distribution.mjs promote
-      - name: Retain distribution receipt
+      - name: Retain internal distribution identity observations
         if: always()
         uses: actions/upload-artifact@v4
         with:
           include-hidden-files: true
           name: offline-distribution-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            .release-ci/offline-receipt-*.json
-            .release-ci/consumer-receipt.json
+          path: .release-ci/distribution-evidence.json
           if-no-files-found: error
           retention-days: 90
 
@@ -294,10 +294,5 @@ jobs:
           RELEASE_FAILURE_SOURCE_SHA: ${{ github.sha }}
           RELEASE_FAILURE_RUN: ${{ inputs.action == 'restore' && inputs.receipt_run_id || '' }}
         run: node scripts/release-consumer.mjs alert distribution
-      - uses: actions/upload-artifact@v4
-        with:
-          include-hidden-files: true
-          name: offline-failure-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .release-ci/consumer-receipt.json
-          if-no-files-found: error
-          retention-days: 90
+      # The trusted release-pr coordinator observes this completed run and
+      # emits the sole hub-facing receipt; incident details remain in Issues.

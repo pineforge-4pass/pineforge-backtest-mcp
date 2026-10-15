@@ -18,12 +18,15 @@ jobs:
     steps:
       - name: Mint target-scoped App token
         id: app
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ secrets.PINEFORGE_APP_ID }}
           private-key: ${{ secrets.PINEFORGE_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: pineforge-backtest-mcp
+          permission-contents: write
+          permission-pull-requests: write
+          permission-actions: read
       - uses: actions/checkout@v4
         with:
           ref: main
@@ -39,16 +42,17 @@ jobs:
           RELEASE_BOT_LOGIN: ${{ steps.app.outputs.app-slug }}[bot]
           RELEASE_CHAIN_OWNER: ${{ vars.RELEASE_CHAIN_OWNER }}
         run: node scripts/release-consumer.mjs receive
-      - name: Persist receipt
+      - name: Preserve the validated target for trusted coordinator reporting
         if: always()
         uses: actions/upload-artifact@v4
         with:
           include-hidden-files: true
-          name: offline-consumer-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .release-ci/consumer-receipt.json
-          if-no-files-found: error
+          name: offline-release-target-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .release-ci/release-target.json
+          if-no-files-found: warn
           retention-days: 90
-      - name: Alert on setup or receipt failure
+      # Only release-pr.yml's trusted coordinator publishes hub receipts.
+      - name: Alert on setup or receiver failure
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}

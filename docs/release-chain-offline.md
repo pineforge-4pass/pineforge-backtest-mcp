@@ -91,6 +91,9 @@ successful Test evidence, exact head, current base and newest desired event.
 An outdated branch is updated with the App and requires fresh ordinary CI.
 It uses the protected merge API with the expected head SHA, never an admin merge.
 After merge, it tags the landed release PR commit without rewriting any tag.
+Receiver completion also wakes this coordinator; the receiver retains only the
+unchanged validated ready event as internal handoff data. The coordinator reports
+failed or superseded deliveries using the shared contract.
 
 ## Publishing, receipts and repair
 
@@ -130,33 +133,79 @@ validates source/run identity, and preflights both current channels before any
 write. A newer npm/image publication blocks restoration. The same pinned npm CLI
 restores the npm pointer through OIDC, restores GHCR/GitHub Latest when stable,
 and verifies the results. No package, tag, release, branch or asset is deleted.
-A restoration receipt reports `failed` with recovery `channels_restored`; it does
-not claim that the rejected update is deployed.
+The internal restoration evidence records `channels_restored`. The coordinator
+reports the rejected publication as `failed`, without claiming it is deployed.
 
-Consumer transition, gate, OIDC proof, publication, failure and restoration
-receipts are Actions artifacts; successful distribution receipts are also
-GitHub release assets. Receipts carry neutral role `offline`, event/manifest,
-PR/base/head/merge identities, run/attempt, expected inventories, actual source,
-package integrity, image digest/configs, consumed facts and previous channel
-identities. The terminal `verified` receipt means verified package/image
-**distribution**. Users' installations and external hosts such as Glama remain
-unverified. A receiver's duplicate/applied acknowledgement only says `merged`;
-it does not manufacture deployment evidence.
+The only hub-facing receipt implements **Consumer receipt contract v1** from the
+hub's `docs/release-chain.md`, with `scripts/release_receipts.py` as authority.
+Its schema is `pineforge/consumer-receipt/v1`, consumer is `offline`, and all
+fifteen required fields are present. Unknown evidence is JSON `null`; attempts
+use the reporting run ID and sequences use its positive integer run attempt.
+Timestamps are UTC seconds. `scripts/release-receipt.mjs` projects public fields,
+hashes raw distribution identities, and writes canonical JSON plus final LF.
+Before merge it emits `pending` with null evidence so a later branch update does
+not invalidate an old snapshot during polling. A terminal-state Actions rerun
+dispatches a fresh coordinator run to supply the larger attempt required by the
+hub; a previously verified snapshot is preserved if a rerun's reporting fails.
 
-A collector must require a successful publisher run and a matching terminal
-receipt, and give later failure/restoration evidence precedence. A release asset
-or an accepted dispatch by itself is not completion evidence. Failed stages
-reuse an incident issue per event, mention `RELEASE_CHAIN_OWNER`, and link the
-run/PR. Verified completion updates/closes that issue, creating a closed success
-issue when no incident existed.
+Only `.github/workflows/release-pr.yml`, job `reconcile`, checks out trusted
+`main` and writes `.release-ci/release-receipt.json`. It uploads the exact literal
+artifact **`release-receipt-offline`**, containing exactly one root file,
+**`release-receipt.json`**, retained for 90 days. Reruns replace that run's live
+artifact so the hub never sees ambiguous duplicate names. No PR-head workflow
+writes this receipt, and receiver/publisher custom consumer receipts and release
+asset receipts have been replaced. Existing gate/runtime/package/OIDC/channel/
+restoration artifacts remain internal verification inputs, not alternate hub
+completion reports.
+
+A final receipt is dispatched through `release-pr.yml` with `publisher_run_id`
+on the exact immutable consumer tag. The workflow definition at that landed
+source is trusted because release PR changes are allowlisted; the reporting
+script checkout remains `main`. Its Actions `head_sha` must equal `pr.merge`.
+The dispatcher verifies that annotated tag, main ancestry, actual merged PR and
+allowlist before launching the reporting workflow on its ref.
+This satisfies the hub even after `main` advances. The coordinator rechecks the
+actual same-repository PR, original successful CI/E2E workflow attempt, every
+required job, tested merge parents, and check completion before merge. It then
+requires the completed successful publisher's full inventory, distribution
+identity observations, and recorded previous identity. Stable MCP Registry jobs
+must succeed; only prereleases may skip that job. CI/E2E cannot be substituted
+with tag-source checks.
+
+Before publication, the previous npm channel's actual tarball integrity,
+release lock, source commit, hub manifest and facts bytes are checked and its
+served identity is recorded for rollback. A legacy baseline without that
+provenance fails before publication; it needs a reviewed baseline migration.
+No previous source/facts identity is invented from the new release. The terminal
+`verified` receipt means verified npm/image **distribution**, and does not claim
+to update user installations or external hosts such as Glama.
+
+After a successful receipt upload, a **separate hub-only** App token with
+Contents write posts `pineforge-release-status` to the fixed hub. Its
+`client_payload` has exactly `schema: pineforge/consumer-signal/v1`,
+`consumer: offline`, the bare product `release_version`, and numeric `run_id`
+of the reporting run containing the artifact. The full receipt is never sent
+as the callback. Hub polling recovers a lost callback. Failure/success details
+continue to reuse a human-facing incident issue per event and mention
+`RELEASE_CHAIN_OWNER`; issues are not receipt transport.
+
+Publication uses `offline-release-publish`, independently of coalesced receiver/
+normal coordinator work in `offline-release-control`. Final receipt runs use
+`offline-receipt-<publisher run ID>`. `tagLanded` checks existing tags too: it
+dispatches a missing/cancelled/skipped publisher on the same immutable tag,
+waits for active runs, reports real failures, and requests the final receipt
+after success. It neither rewrites tags nor republishes a successful run. The
+15-minute cadence repairs a dropped tag run or reporting wakeup.
 
 ## Supervisor configuration and lane dependencies
 
 | Name / setting | Scope | Purpose |
 |---|---|---|
-| `PINEFORGE_APP_ID` | Existing repository/organization Actions secret | Existing GitHub App identity; install on this consumer. |
-| `PINEFORGE_APP_PRIVATE_KEY` | Existing repository/organization Actions secret | Mint short-lived tokens scoped to this consumer only. |
-| App permissions | This repository | Contents write, Pull requests write, Actions read. No required-check/ruleset bypass for consumer merges. |
+| `PINEFORGE_APP_ID` | Existing repository/organization Actions secret | Existing GitHub App identity; install on this consumer and the hub. |
+| `PINEFORGE_APP_PRIVATE_KEY` | Existing repository/organization Actions secret | Mint separate target-only consumer and hub-only callback tokens. |
+| App permissions | This repository | Contents write, Pull requests write, Actions write for same-tag publisher/final-reporter dispatch (receiver requests Actions read only). No required-check/ruleset bypass. |
+| App callback permissions | Hub repository only | Separate `repositories: pineforge-release` token with Contents write, minted only after artifact upload. |
+| `RELEASE_RECEIPT_POLICY.offline` | Hub `release-automation` environment secret | Set the exact workflow, literal artifact name and complete job inventories from the current executor report. |
 | `OFFLINE_SYMINFO_FEED_URL` | **New repository Actions variable** | HTTPS location of the frozen BTC 4h feed already described by the committed expected rows. The content must match the committed SHA-256 and 2188 bars; an arbitrary new feed is rejected. |
 | `RELEASE_CHAIN_OWNER` | **New repository/organization Actions variable** | GitHub user or team to mention for failure, recovery and success issues. |
 | `release/ready` | Main branch protection/ruleset | Required status from Test; require up-to-date branch and squash merging. Remove App bypass. Any retained required review must be satisfied before automation can merge. |
@@ -165,17 +214,11 @@ issue when no incident existed.
 | GHCR package permissions | Existing consumer image package | Allow this repository's GITHUB_TOKEN to publish; public read access for distributed images. |
 | MCP Registry GitHub OIDC | Existing namespace/repository | Preserve existing registry publishing authorization. |
 
-No new secret is required. No Cloudflare/GCP/payment/database configuration is
-added. Built-in GITHUB_TOKEN handles issue reporting separately from PR App
-credentials. Receivers must land on default `main` before hub dispatch reaches
-them. GitHub concurrency can replace a pending run even with cancellation off;
-the hub's delivery reconciliation must replay dropped events with the same ID.
-
-Brief 2 must publish the immutable manifest, matching facts/package artifacts and
-exact ready event, then collect these neutral receipt artifacts/release assets
-with Actions read permission and apply completion/freshness monitoring. Section
-3.7 does not define a callback dispatch event name/envelope, so this lane does
-not invent one or send the product event back to the hub. Producer readiness
-and hub pairing/fan-out remain the producer/hub lanes' responsibility. Live CI
-and the exact OIDC proof still need to run after the supervisor configures the
-feed variable and pushes this branch.
+No new consumer secret is required. Built-in GITHUB_TOKEN handles incidents
+separately from the App credentials. Receivers/reporting workflows must land on
+default `main` before enabling `offline` in hub `RELEASE_READY_CONSUMERS` and
+configuring its receipt policy. The hub collects the literal artifact with
+Actions read and validates its full GitHub evidence; a callback alone is never
+completion. See [the current executor report](release-chain-offline-report.md)
+for the exact policy, sample receipt, callback and static checks. Live CI and
+the OIDC proof run after supervisor review/configuration; suites are CI-only.

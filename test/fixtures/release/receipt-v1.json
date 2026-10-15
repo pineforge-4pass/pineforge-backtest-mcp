@@ -1,0 +1,112 @@
+{
+  "attempt": 90,
+  "ci": {
+    "approved_skips": [],
+    "expected": [
+      "test",
+      "runtime (amd64)",
+      "runtime (arm64)",
+      "release/ready"
+    ],
+    "results": {
+      "release/ready": "success",
+      "runtime (amd64)": "success",
+      "runtime (arm64)": "success",
+      "test": "success"
+    },
+    "run_attempt": 1,
+    "run_id": 11,
+    "sha": "1111111111111111111111111111111111111111"
+  },
+  "consumer": "offline",
+  "deploy": {
+    "approved_skips": [
+      "mcp-registry",
+      "restore",
+      "report-failure"
+    ],
+    "expected": [
+      "gates / test",
+      "gates / runtime (amd64)",
+      "gates / runtime (arm64)",
+      "gates / release/ready",
+      "prepare",
+      "image",
+      "publish",
+      "mcp-registry",
+      "release",
+      "promote",
+      "restore",
+      "report-failure"
+    ],
+    "results": {
+      "gates / release/ready": "success",
+      "gates / runtime (amd64)": "success",
+      "gates / runtime (arm64)": "success",
+      "gates / test": "success",
+      "image": "success",
+      "mcp-registry": "success",
+      "prepare": "success",
+      "promote": "success",
+      "publish": "success",
+      "release": "success",
+      "report-failure": "skipped",
+      "restore": "skipped"
+    },
+    "run_attempt": 1,
+    "run_id": 12,
+    "sha": "2222222222222222222222222222222222222222"
+  },
+  "deployed": {
+    "deployment_id_sha256": "43a3a01a3440c75ebccf9cd631bae377349607b9ac99031fd8ae35ad8be2bcc0",
+    "facts_commit": "5555555555555555555555555555555555555555",
+    "facts_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+    "image_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "source": "2222222222222222222222222222222222222222"
+  },
+  "e2e": {
+    "approved_skips": [],
+    "expected": [
+      "test",
+      "runtime (amd64)",
+      "runtime (arm64)",
+      "release/ready"
+    ],
+    "results": {
+      "release/ready": "success",
+      "runtime (amd64)": "success",
+      "runtime (arm64)": "success",
+      "test": "success"
+    },
+    "run_attempt": 1,
+    "run_id": 11,
+    "sha": "1111111111111111111111111111111111111111"
+  },
+  "event_id": "sha256:04fe43bf37933ae1061fe8a5235bb147a7b5b7eca15c0dde1ea55d62bd009a38",
+  "pr": {
+    "base": "main",
+    "base_sha": "3333333333333333333333333333333333333333",
+    "head": "1111111111111111111111111111111111111111",
+    "merge": "2222222222222222222222222222222222222222",
+    "number": 9
+  },
+  "preview": {
+    "deployment_id_sha256": "98d388885eb0c9cfcbad5ef5f3f834f2c339547bdac29efe68032737c1945342",
+    "facts_commit": "5555555555555555555555555555555555555555",
+    "facts_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+    "image_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "source": "1111111111111111111111111111111111111111"
+  },
+  "previous": {
+    "deployment_id_sha256": "41a9726c57d8902e7e7bb300c4cff8462b839c33e2535ebaa08fa61176183ea4",
+    "facts_commit": "5555555555555555555555555555555555555555",
+    "facts_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+    "image_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "source": "4444444444444444444444444444444444444444"
+  },
+  "release_version": "1.6.0",
+  "schema": "pineforge/consumer-receipt/v1",
+  "sequence": 1,
+  "state": "verified",
+  "timestamp": "2020-01-01T00:07:00Z"
+}
