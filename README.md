@@ -69,9 +69,10 @@ The image's `:latest` and npm's `latest` always carry a stable release. A
 `pineforge-release` prerelease (such as `1.0.0-rc.1`) produces a prerelease of this
 server (`X.Y.Z-alpha.N`, `-beta.N` or `-rc.N`): the image `:vX.Y.Z-rc.N`, built FROM
 that `pineforge-release` prerelease, and npm `@pineforge/backtest-mcp@next`, which,
-like any npm install, runs the engine image named by `PINEFORGE_IMAGE` (default
-`ghcr.io/pineforge-4pass/pineforge-release:latest`, the stable engine). Prereleases
-are not listed in the MCP Registry. The first, 0.9.32-rc.1 on `pineforge-release`
+like any npm install, runs the engine image named by `PINEFORGE_IMAGE`. Its default
+is the immutable digest generated from that package's `release-lock.json`, including
+the matching prerelease engine. Prereleases are not listed in the MCP Registry.
+The first, 0.9.32-rc.1 on `pineforge-release`
 1.0.0-rc.1, was published on 2026-09-30 (image `:v0.9.32-rc.1`, npm `next`).
 
 ### npm / npx
@@ -81,8 +82,8 @@ npx -y @pineforge/backtest-mcp
 ```
 
 Needs Node ≥ 20 and a running Docker daemon: each transpile and backtest is a
-`docker run --rm --network=none` of the engine image (`PINEFORGE_IMAGE`, default
-`ghcr.io/pineforge-4pass/pineforge-release:latest`). `docker pull` it first: the
+`docker run --rm --network=none` of the engine image (`PINEFORGE_IMAGE`, defaulting
+to the digest in the installed package's `release-lock.json`). `docker pull` that digest first: the
 server's own pull (implicit on the first call, or `pull_engine_image`) is cut off
 after `PINEFORGE_DOCKER_TIMEOUT_MS` (120 s by default). Paths are relative to the
 server's working directory and, by default, confined to it (see
@@ -690,7 +691,7 @@ sandbox), so any path is accepted there — use absolute `/work/...` paths.
 
 | var | default | purpose |
 |---|---|---|
-| `PINEFORGE_IMAGE`               | `ghcr.io/pineforge-4pass/pineforge-release:latest` | npm/npx only: engine image (runtime + bundled codegen) used for transpile + backtest |
+| `PINEFORGE_IMAGE`               | Immutable digest from the installed `release-lock.json` | npm/npx only: engine image (runtime + bundled codegen) used for transpile + backtest |
 | `PINEFORGE_ALLOW_ANYWHERE`      | `0` (`1` in the Docker image) | Allow OHLCV / output / report paths outside cwd |
 | `PINEFORGE_DOCKER_TIMEOUT_MS`   | `120000` | Hard kill for each engine run and for `docker pull` |
 | `PINEFORGE_MAX_INLINE_BYTES`    | `200000` | Largest report returned inline; bigger ones are written to `report_path` |
@@ -725,12 +726,19 @@ and sha256 and its own content hash (which covers the readings, the lists and th
 table that is not complete, has no `not_on_tv` list for either Binance venue (an empty one is fine), or has a value outside 1e-12..1e12. The same table gives the same bytes;
 `PF_TV_GRID_SOURCE=<path to the table> npm test` also checks that the committed file was made from it.
 
-To build the image, pass the `pineforge-release` version to build on (a tag from
-its Releases page, without the `v`):
+To build the image, use the committed image digest and version together:
 
 ```bash
-docker build -f docker/Dockerfile --build-arg PINEFORGE_RELEASE_VERSION=<X.Y.Z> -t pineforge-backtest-mcp .
+docker build -f docker/Dockerfile \
+  --build-arg "PINEFORGE_RELEASE_IMAGE=$(node -p "const l=require('./release-lock.json'); l.image.repository+'@'+l.image.digest")" \
+  --build-arg "PINEFORGE_RELEASE_VERSION=$(node -p "require('./release-lock.json').release_version")" \
+  --build-arg "PINEFORGE_SOURCE_SHA=$(git rev-parse HEAD)" \
+  -t pineforge-backtest-mcp .
 ```
+
+Automatic distribution uses manifest-backed update PRs and the required
+`release/ready` check. See [the offline release-chain runbook](docs/release-chain-offline.md)
+for CI fixtures, repository settings, receipts and channel restoration.
 
 ## License
 

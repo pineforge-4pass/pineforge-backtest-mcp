@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Instrument } from "./instrument.js";
+import { HUB_IMAGE } from "./release.generated.js";
 import {
   IMAGE_LAYOUT, IMAGE_PREFIX, OVERLAY_MOUNT, SKIP_REASONS,
   layoutOf, mentionsOverlay, overlayEnv, skippedWarning, tryOverlay, type Overlay,
@@ -20,7 +21,7 @@ import {
 
 // ─── Config ───────────────────────────────────────────────────────────────
 
-export const DEFAULT_IMAGE = process.env.PINEFORGE_IMAGE ?? "ghcr.io/pineforge-4pass/pineforge-release:latest";
+export const DEFAULT_IMAGE = process.env.PINEFORGE_IMAGE ?? HUB_IMAGE;
 export const DOCKER_TIMEOUT_MS = Number(process.env.PINEFORGE_DOCKER_TIMEOUT_MS ?? 120_000);
 // One parity check (transpile + compile + run + grade) inside the grading core.
 // The core's own deadline is PARITY_TIMEOUT_MS; the runner stops the driver only

@@ -13,7 +13,8 @@
     "docker/pf_run_json.py",
     "src/tv-grid.generated.json",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "release-lock.json"
   ],
   "engines": {
     "node": ">=20"
@@ -37,7 +38,8 @@
   "devDependencies": {
     "@types/node": "^20.0.0",
     "tsx": "^4.7.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "yaml": "2.8.1"
   },
   "keywords": [
     "pinescript",

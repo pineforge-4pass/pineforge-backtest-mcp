@@ -1,31 +1,175 @@
 name: Test
 
-# Gate every pull request on the unit tests (test/*.test.ts, including the
-# release rules and the fan-out workflow checks) and on a type-check: tsx
-# runs the tests without checking types, and publish.yml's build is the next
-# place a type error would show, after the tag.
-
 on:
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
+  actions: read
 
-concurrency:
-  group: test-${{ github.ref }}
-  cancel-in-progress: true
-
+# A publisher calls this same complete graph on the landed tag source.
+# No workflow-level concurrency: a caller must not cancel its own reusable run.
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       - run: npm ci --no-audit --no-fund
-      # prebuild runs sync-version, which writes the gitignored src/version.ts the tests import.
       - name: Type-check (tsc)
         run: npm run build
       - run: npm test
+      - name: Prove the missing-feature regression turns red
+        run: node scripts/check-release-red-case.mjs
+      - name: Verify source artifacts or bootstrap image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(node -p "require('./release-lock.json').schema")" = pineforge/offline-bootstrap/v1 ]; then
+            node scripts/release-contract.mjs image
+          else
+            node scripts/release-contract.mjs verify
+          fi
+      - name: Pack the distribution once
+        run: |
+          mkdir -p .release-ci
+          npm pack --ignore-scripts --pack-destination .release-ci
+          node scripts/release-evidence.mjs package
+          git diff --exit-code -- VERSION package.json package-lock.json server.json release-lock.json
+      - uses: actions/upload-artifact@v4
+        with:
+          include-hidden-files: true
+          name: offline-package-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .release-ci/*.tgz
+            .release-ci/package.json
+            .release-ci/default-pin-red-proof.json
+            .release-ci/default-pin-red.tap
+          if-no-files-found: error
+          retention-days: 90
+
+  runtime:
+    name: runtime (${{ matrix.arch }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      PF_ARCH: ${{ matrix.arch }}
+      PF_E2E_CANDIDATE_IMAGE: pineforge-offline-candidate:${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: pineforge-4pass/pineforge-corpus
+          ref: a35c7c4adf7ac3cdf9b0b193e8640510d49cfd3c
+          path: .release-ci/corpus
+          lfs: true
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Fetch the immutable packed artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release-artifacts.mjs package
+      - run: npm ci --no-audit --no-fund
+      - name: Verify and prepare frozen fixtures
+        env:
+          OFFLINE_SYMINFO_FEED_URL: ${{ vars.OFFLINE_SYMINFO_FEED_URL }}
+        run: python3 scripts/prepare-runtime-fixtures.py
+      - name: Install the packed npm entry point
+        run: npm install --prefix .release-ci/installed --no-package-lock --ignore-scripts --no-audit --no-fund ./.release-ci/*.tgz
+      - name: Resolve the committed image
+        id: lock
+        run: node scripts/release-contract.mjs show >> "$GITHUB_OUTPUT"
+      - name: Pull the declared hub digest
+        env:
+          IMAGE: ${{ steps.lock.outputs.image }}
+        run: docker pull "$IMAGE"
+      - name: Build self-contained candidate on native architecture
+        env:
+          IMAGE: ${{ steps.lock.outputs.image }}
+          RELEASE: ${{ steps.lock.outputs.release }}
+        run: |
+          docker buildx build --load --platform "linux/$PF_ARCH" -f docker/Dockerfile \
+            --build-arg "PINEFORGE_RELEASE_IMAGE=$IMAGE" --build-arg "PINEFORGE_RELEASE_VERSION=$RELEASE" \
+            --build-arg "PINEFORGE_SOURCE_SHA=$GITHUB_SHA" -t "$PF_E2E_CANDIDATE_IMAGE" .
+      - name: Packed npm runtime E2E
+        run: node scripts/runtime-e2e.mjs npm
+      - name: Self-contained candidate runtime E2E
+        run: node scripts/runtime-e2e.mjs image
+      - name: Preserve tested image bytes
+        run: |
+          docker save "$PF_E2E_CANDIDATE_IMAGE" -o ".release-ci/image-$PF_ARCH.tar"
+          node scripts/distribution.mjs archive
+      - name: Retain runtime evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          include-hidden-files: true
+          name: offline-runtime-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .release-ci/runtime-*.json
+            .release-ci/candidate-*.json
+            .release-ci/*.tap
+          if-no-files-found: error
+          retention-days: 90
+      - name: Retain tested image
+        uses: actions/upload-artifact@v4
+        with:
+          include-hidden-files: true
+          name: offline-image-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .release-ci/image-${{ matrix.arch }}.tar
+            .release-ci/candidate-${{ matrix.arch }}.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  ready:
+    name: release/ready
+    needs: [test, runtime]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Fetch the latest evidence for every required runtime job
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release-artifacts.mjs evidence
+      - name: Require the complete current-source job and suite inventory
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: node scripts/release-evidence.mjs gate
+      - uses: actions/upload-artifact@v4
+        with:
+          include-hidden-files: true
+          name: offline-gate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .release-ci/gate-receipt.json
+          if-no-files-found: error
+          retention-days: 90

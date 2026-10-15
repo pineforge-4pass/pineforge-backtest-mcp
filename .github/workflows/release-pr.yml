@@ -1,0 +1,63 @@
+name: Reconcile release PR
+
+on:
+  workflow_run:
+    workflows: [Test]
+    types: [completed]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '11,26,41,56 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: offline-release-control
+  cancel-in-progress: false
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint target-scoped App token
+        id: app
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.PINEFORGE_APP_ID }}
+          private-key: ${{ secrets.PINEFORGE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: pineforge-backtest-mcp
+      # workflow_run is privileged; never check out or execute the PR's code.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ steps.app.outputs.token }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Report failed bot CI or merge the current tested candidate
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          INCIDENT_TOKEN: ${{ github.token }}
+          RELEASE_BOT_LOGIN: ${{ steps.app.outputs.app-slug }}[bot]
+          RELEASE_CHAIN_OWNER: ${{ vars.RELEASE_CHAIN_OWNER }}
+        run: node scripts/release-consumer.mjs advance
+      - name: Persist transition receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          include-hidden-files: true
+          name: offline-transition-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .release-ci/consumer-receipt.json
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Alert on setup or reconciliation failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_CHAIN_OWNER: ${{ vars.RELEASE_CHAIN_OWNER }}
+        run: node scripts/release-consumer.mjs alert reconciliation

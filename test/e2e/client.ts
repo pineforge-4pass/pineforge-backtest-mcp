@@ -4,6 +4,8 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 export const TOOL = "check_tradingview_parity";
 const CALL_TIMEOUT_MS = Number(process.env.PF_E2E_CALL_TIMEOUT_MS ?? 1_200_000);
@@ -43,6 +45,14 @@ export async function callParity(client: Client, args: Record<string, unknown>):
     timeout: CALL_TIMEOUT_MS,
   });
   const content = (r.content ?? []) as Array<{ type: string; text?: string }>;
+  if (process.env.PF_RELEASE_GATE === "1" && (r.structuredContent as any)?.ok === true) {
+    const lock = JSON.parse(readFileSync("release-lock.json", "utf8"));
+    const versions = (r.structuredContent as any).versions;
+    const normalize = (s: string) => s?.replace(/^v/, "").replace(/(\d)(a|b|rc)(\d+)$/, (_, n, k, i) => `${n}-${({ a: "alpha", b: "beta", rc: "rc" } as Record<string, string>)[k]}.${i}`);
+    for (const name of ["engine", "codegen"]) {
+      assert.equal(normalize(versions?.[name]), lock.versions?.[name]?.version ?? lock.release_version, `actual ${name} provenance differs from lock`);
+    }
+  }
   const text = content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("\n");
   return {
     isError: r.isError === true,

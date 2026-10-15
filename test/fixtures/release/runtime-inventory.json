@@ -1,0 +1,20 @@
+{
+  "corpus_repository": "pineforge-4pass/pineforge-corpus",
+  "corpus_commit": "a35c7c4adf7ac3cdf9b0b193e8640510d49cfd3c",
+  "feed_1m_sha256": "db8c1332da093008cfbd063e05db0b33fe8f7fd35d78cf058a366519eb9f6cc5",
+  "syminfo_feed_sha256": "a53fc5ab420604ad47b0bae1cceed0ccce45e2ff63804e1d2ab8421efc5cecfb",
+  "syminfo_bars": 2188,
+  "parity_sample": 30,
+  "parity_seed": 20261002,
+  "suites": {
+    "release-identity.e2e.ts": 1,
+    "parity-stdio.e2e.ts": 1,
+    "syminfo-stdio.e2e.ts": 11,
+    "parity-negative.e2e.ts": 19
+  },
+  "required_probes": [
+    "risk-max-contracts-held-gate-pyramid-01",
+    "ta-sma-152-close-cross-01",
+    "ta-dmi-adx-di-cross-01"
+  ]
+}
