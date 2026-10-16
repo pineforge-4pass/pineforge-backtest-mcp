@@ -1,145 +1,60 @@
 name: pineforge-release
 
-# Fired by pineforge-release's publish.yml (repository_dispatch
-# event_type=pineforge-release, client_payload {release_version: X.Y.Z,
-# prerelease: true|false, run_id}).
-#
-# Records the base pineforge-release version in the release TAG MESSAGE
-# (`release=`) — no committed pin. Auto patch-bumps THIS repo's own /VERSION
-# (independent lineage), runs sync-version, commits the tracked files to main, and
-# pushes v<VERSION> with the org GitHub App token. The App-token-pushed tag
-# re-fires publish.yml (npm + GHCR + MCP registry, OIDC) — the sole
-# publisher; this workflow never publishes inline. Idempotent: no-op if the base
-# already matches the latest release tag. A prerelease base (1.0.0-rc.1) gives a
-# prerelease of the next patch (0.9.32-rc.1), which publish.yml keeps off npm
-# latest, the latest image, the MCP Registry and GitHub's Latest release; the
-# base's release then gets the same patch (0.9.32). Rules:
-# scripts/release-version.mjs.
-
+# Section 3.2: the legacy three-field dispatch is deliberately rejected.
 on:
   repository_dispatch:
     types: [pineforge-release]
 
 concurrency:
-  group: pineforge-release
+  group: offline-release-control
   cancel-in-progress: false
-
 permissions:
-  contents: read   # GITHUB_TOKEN read-only; the App token performs the push.
+  contents: read
+  issues: write
 
 jobs:
-  bump-and-tag:
+  update-pr:
     runs-on: ubuntu-latest
     steps:
-      - name: Mint org App token
+      - name: Mint target-scoped App token
         id: app
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ secrets.PINEFORGE_APP_ID }}
           private-key: ${{ secrets.PINEFORGE_APP_PRIVATE_KEY }}
-
-      - name: Checkout main (App token bypasses ruleset + re-fires publish.yml)
-        uses: actions/checkout@v4
+          owner: ${{ github.repository_owner }}
+          repositories: pineforge-backtest-mcp
+          permission-contents: write
+          permission-pull-requests: write
+          permission-actions: read
+      - uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
           token: ${{ steps.app.outputs.token }}
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-
-      - name: Validate release_version (untrusted payload)
-        id: rel
+      - name: Validate artifacts and reconcile update PR
         env:
-          RAW: ${{ github.event.client_payload.release_version }}
-          RAW_PRERELEASE: ${{ github.event.client_payload.prerelease }}
-        run: |
-          set -euo pipefail
-          if ! printf '%s' "${RAW:-}" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?$'; then
-            echo "::error::rejected untrusted release_version '${RAW:-}'"; exit 1
-          fi
-          case "${RAW_PRERELEASE:-}" in
-            ''|true|false) ;;
-            *) echo "::error::rejected untrusted prerelease '${RAW_PRERELEASE}'"; exit 1 ;;
-          esac
-          # Emits version (bare) + prerelease; a flag that contradicts the
-          # version, or a version outside X.Y.Z[-{alpha,beta,rc}.N], fails here.
-          node scripts/release-version.mjs check-payload \
-            --release-version="$RAW" --prerelease-flag="${RAW_PRERELEASE:-}" | tee -a "$GITHUB_OUTPUT"
-
-      - name: Idempotency — stop if the base already matches the last release
-        id: gate
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          INCIDENT_TOKEN: ${{ github.token }}
+          RELEASE_BOT_LOGIN: ${{ steps.app.outputs.app-slug }}[bot]
+          RELEASE_CHAIN_OWNER: ${{ vars.RELEASE_CHAIN_OWNER }}
+        run: node scripts/release-consumer.mjs receive
+      - name: Preserve the validated target for trusted coordinator reporting
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          include-hidden-files: true
+          name: offline-release-target-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .release-ci/release-target.json
+          if-no-files-found: warn
+          retention-days: 90
+      # Only release-pr.yml's trusted coordinator publishes hub receipts.
+      - name: Alert on setup or receiver failure
+        if: failure()
         env:
-          REL: ${{ steps.rel.outputs.version }}
-        run: |
-          set -euo pipefail
-          # The base pineforge-release version is recorded in each release tag's
-          # message (`release=`), not in a committed pin. Compare against the
-          # latest tag by semver (v0.9.32 outranks v0.9.32-rc.1). A duplicate is
-          # absorbed; so is a LOWER base (downgrade guard: near-simultaneous
-          # upstream releases fan out in arrival order, observed 2026-07-12).
-          git fetch --tags --quiet
-          LATEST="$(git tag -l 'v*' | node scripts/release-version.mjs latest-tag)"
-          cur=""
-          [ -n "$LATEST" ] && cur="$(git for-each-ref --format='%(contents:body)' "refs/tags/$LATEST" | sed -n 's/^release=//p' | head -1)"
-          echo "latest tag ${LATEST:-∅} records base ${cur:-∅}"
-          node scripts/release-version.mjs gate --current="$cur" --incoming="$REL" | tee -a "$GITHUB_OUTPUT"
-
-      - name: Configure git identity
-        if: steps.gate.outputs.proceed == 'true'
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Compute next backtest-mcp version (independent auto patch bump)
-        if: steps.gate.outputs.proceed == 'true'
-        id: ver
-        env:
-          REL: ${{ steps.rel.outputs.version }}
-        run: |
-          set -euo pipefail
-          cur="$(tr -d '[:space:]' < VERSION)"
-          git fetch --tags --quiet
-          # Patch bump that skips burned tags; a prerelease base gives the same
-          # next patch as a prerelease (next, tag, prerelease).
-          git tag -l 'v*' | node scripts/release-version.mjs next --current="$cur" --release="$REL" | tee -a "$GITHUB_OUTPUT"
-
-      - name: Bump VERSION + sync
-        if: steps.gate.outputs.proceed == 'true'
-        env:
-          NEXT: ${{ steps.ver.outputs.next }}
-        run: |
-          set -euo pipefail
-          # No committed base pin: the pineforge-release version is supplied to the
-          # image build as a build-arg (publish.yml) and recorded in the tag message.
-          printf '%s\n' "$NEXT" > VERSION
-          npm ci --no-audit --no-fund
-          npm run sync-version   # rewrites package.json + server.json (+ gitignored src/version.ts)
-
-      - name: Verify synced versions before tagging
-        if: steps.gate.outputs.proceed == 'true'
-        env:
-          NEXT: ${{ steps.ver.outputs.next }}
-        run: |
-          set -euo pipefail
-          [ "$(tr -d '[:space:]' < VERSION)" = "$NEXT" ] || { echo "::error::VERSION drift"; exit 1; }
-          [ "$(node -p "require('./package.json').version")" = "$NEXT" ] || { echo "::error::package.json drift"; exit 1; }
-
-      - name: Commit + tag (fires publish.yml)
-        if: steps.gate.outputs.proceed == 'true'
-        env:
-          NEXT: ${{ steps.ver.outputs.next }}
-          TAG:  ${{ steps.ver.outputs.tag }}
-          REL:  ${{ steps.rel.outputs.version }}
-        run: |
-          set -euo pipefail
-          git add VERSION package.json server.json
-          git diff --cached --quiet && { echo "::error::nothing staged — refusing empty release"; exit 1; }
-          git commit -m "chore(release): ${TAG} — base pineforge-release ${REL}"
-          git tag -a "${TAG}" -m "$(printf 'Release %s\n\nrelease=%s\n' "${TAG}" "${REL}")"
-          git push origin HEAD:main
-          git push origin "${TAG}"
-          echo "pushed ${TAG} (base ${REL}); publish.yml will run from the tag"
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_CHAIN_OWNER: ${{ vars.RELEASE_CHAIN_OWNER }}
+        run: node scripts/release-consumer.mjs alert receiver

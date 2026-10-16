@@ -6,7 +6,8 @@
  * instrument's lot size it books none (22 rows). Every row is compared with the ones
  * the engine harness produced on the same feed (test/fixtures/syminfo).
  *
- *   PF_E2E_SYMINFO_CSV   the frozen feed (2188 bars; sha256 checked), on this machine
+ *   PF_E2E_SYMINFO_CSV   optional local path to the same frozen feed (2188 bars; sha256 checked),
+ *                        default test/fixtures/syminfo/btcusdt-4h-2188.csv
  *   PF_E2E_SYMINFO_PINE  the Pine file, default test/fixtures/syminfo/btc-ema-crossover.pine
  *   PF_E2E_SERVER        JSON argv of the server, default ["node","dist/index.js"] (the Docker runner,
  *                        on this machine's docker daemon)
@@ -52,6 +53,9 @@ const here = (rel: string) => new URL(rel, import.meta.url);
 const EXPECTED = JSON.parse(readFileSync(here("../fixtures/syminfo/btcusdt-4h-ema-trades.json"), "utf8")) as {
   pine_sha256: string; csv_sha256: string; bars: number; gridless: Row[]; gridded: Row[];
 };
+const INVENTORY = JSON.parse(readFileSync(here("../fixtures/release/runtime-inventory.json"), "utf8")) as {
+  syminfo_feed_sha256: string; syminfo_bars: number;
+};
 // A listing newer than the embedded TradingView lot-size table: Binance has it, the table does not. Binance's own
 // step (0.01) is not TradingView's usual 0.001, so which one the engine was given shows in `qty_step`.
 const NEWCOIN = {
@@ -70,7 +74,7 @@ const SPOT_INFO = (() => {
 })();
 const FAPI_INFO = readFileSync(here("../fixtures/binance/fapi-exchangeinfo.json"), "utf8");
 
-const CSV_PATH = process.env.PF_E2E_SYMINFO_CSV;
+const CSV_PATH = process.env.PF_E2E_SYMINFO_CSV ?? new URL("../fixtures/syminfo/btcusdt-4h-2188.csv", import.meta.url).pathname;
 const PINE_PATH = process.env.PF_E2E_SYMINFO_PINE ?? new URL("../fixtures/syminfo/btc-ema-crossover.pine", import.meta.url).pathname;
 const map = pathMapper();
 const WORKDIR = resolve(process.env.PF_E2E_WORKDIR ?? join(process.cwd(), "test", `.tmp-e2e-syminfo-${Date.now()}`));
@@ -120,10 +124,15 @@ function klinesOf(csv: string, start: number, end: number, limit: number): unkno
 }
 
 before(async () => {
-  assert.ok(CSV_PATH, "PF_E2E_SYMINFO_CSV must name the frozen 2188-bar BTCUSDT 4h feed");
   feed = readFileSync(CSV_PATH, "utf8");
   pine = readFileSync(PINE_PATH, "utf8");
-  assert.equal(createHash("sha256").update(feed).digest("hex"), EXPECTED.csv_sha256, "not the feed the expected rows were recorded on");
+  const csvSha256 = createHash("sha256").update(feed).digest("hex");
+  assert.equal(csvSha256, INVENTORY.syminfo_feed_sha256, "wrong frozen BTCUSDT 4h fixture bytes (including PF_E2E_SYMINFO_CSV overrides)");
+  assert.equal(feed.trimEnd().split("\n").length - 1, INVENTORY.syminfo_bars, "wrong frozen BTCUSDT bar count");
+  assert.equal(EXPECTED.csv_sha256, csvSha256,
+    "Stale expected trades: btcusdt-4h-ema-trades.json csv_sha256 differs from the frozen fixture. " +
+    "Run the Regenerate syminfo expected trades workflow (regenerate-syminfo-trades.yml) on this ref, " +
+    "review its artifact, and commit the regenerated JSON. The E2E cannot pass until those engine-produced rows are reviewed.");
   assert.equal(createHash("sha256").update(pine).digest("hex"), EXPECTED.pine_sha256, "not the Pine the expected rows were recorded on");
   mkdirSync(WORKDIR, { recursive: true });
 

@@ -4,17 +4,9 @@
 # no host Docker daemon — the local entrypoint (dist/index.local.js) execs the
 # base image entrypoint in-process.
 #
-# Build: docker build -f docker/Dockerfile \
-#          --build-arg PINEFORGE_RELEASE_VERSION=<X.Y.Z> -t pineforge-backtest-mcp .
-#   (<X.Y.Z> = a pineforge-release tag without the leading v)
-
-# The baked pineforge-release version is supplied by CI as a build-arg (resolved
-# at release time; recorded in the release tag message `release=`, read back by
-# publish.yml). It tags the base image AND is exported as PINEFORGE_VERSION so
-# engine_info can report it. No default — building without
-# `--build-arg PINEFORGE_RELEASE_VERSION` fails fast at the FROM below.
-# Declared before the first FROM so it's usable in the final stage's FROM line.
-ARG PINEFORGE_RELEASE_VERSION
+# CI supplies repository@sha256 from release-lock.json, never a moving tag.
+# Both arguments are checked against that same lock during the build.
+ARG PINEFORGE_RELEASE_IMAGE
 
 # --- build MCP dist + prod deps (reproducible: committed lockfile + npm ci) ---
 FROM node:22-slim AS mcp
@@ -25,8 +17,10 @@ COPY . .
 RUN npm run build && npm prune --omit=dev
 
 # --- final: pineforge-release image + node runtime + MCP server ---
-FROM ghcr.io/pineforge-4pass/pineforge-release:${PINEFORGE_RELEASE_VERSION}
+FROM ${PINEFORGE_RELEASE_IMAGE}
+ARG PINEFORGE_RELEASE_IMAGE
 ARG PINEFORGE_RELEASE_VERSION
+ARG PINEFORGE_SOURCE_SHA
 # We copy only the `node` binary onto the release base. This is sound ONLY while
 # the base stays Debian/glibc-compatible with node:22-slim (node is
 # dynamically linked against glibc + libstdc++). If the engine base ever moves
@@ -41,6 +35,8 @@ WORKDIR /app
 COPY --from=mcp /app/dist ./dist
 COPY --from=mcp /app/node_modules ./node_modules
 COPY --from=mcp /app/package.json ./
+COPY --from=mcp /app/release-lock.json ./
+RUN node --input-type=module -e 'import fs from "node:fs"; const l=JSON.parse(fs.readFileSync("release-lock.json")); if (process.argv[1] !== `${l.image.repository}@${l.image.digest}` || process.argv[2] !== l.release_version) throw Error("build arguments contradict release lock")' "${PINEFORGE_RELEASE_IMAGE}" "${PINEFORGE_RELEASE_VERSION}"
 # Reports default to cwd (= /app) when no host workdir is mounted; engine temp
 # work already goes to world-writable /tmp. Give the non-root runtime user
 # ownership of /app so report offload works out of the box.
@@ -64,12 +60,14 @@ ENV PINEFORGE_PREFIX=/opt/pineforge \
 LABEL io.modelcontextprotocol.server.name="io.github.pineforge-4pass/pineforge-backtest-mcp"
 # Identify this image as the MCP server, not the pineforge-release base it is
 # built FROM (which would otherwise leave its title, description and source
-# link on this image). version, revision, created and licenses are still the
-# base's; publish.yml passes no labels of its own.
+# link on this image). The revision identifies this consumer's tested source;
+# the release-image label records the exact inherited hub digest.
 LABEL org.opencontainers.image.title="pineforge-backtest-mcp" \
       org.opencontainers.image.description="Offline MCP server: PineScript v6 -> C++ backtests at deterministic TradingView parity (pineforge-release engine + bundled codegen, stdio)" \
       org.opencontainers.image.source="https://github.com/pineforge-4pass/pineforge-backtest-mcp" \
-      org.opencontainers.image.url="https://github.com/pineforge-4pass/pineforge-backtest-mcp"
+      org.opencontainers.image.url="https://github.com/pineforge-4pass/pineforge-backtest-mcp" \
+      org.opencontainers.image.revision="${PINEFORGE_SOURCE_SHA}" \
+      io.pineforge.release.image="${PINEFORGE_RELEASE_IMAGE}"
 # Drop privileges: run the MCP server as the engine base's non-root user (uid
 # 10001). To write into a HOST bind-mount, mount it (-v <hostdir>:/work), give
 # the tools absolute /work/... paths, and pass --user $(id -u):$(id -g) so the

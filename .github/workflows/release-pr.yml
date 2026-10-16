@@ -1,0 +1,91 @@
+name: Reconcile release PR
+run-name: ${{ inputs.publisher_run_id && format('Offline receipt for publisher {0}', inputs.publisher_run_id) || 'Reconcile offline release' }}
+
+on:
+  workflow_run:
+    workflows: [Test, Publish to npm, pineforge-release]
+    types: [completed]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '11,26,41,56 * * * *'
+  workflow_dispatch:
+    inputs:
+      publisher_run_id:
+        type: string
+        description: Completed publisher run; final reporting ref must be its immutable release tag
+        required: false
+
+concurrency:
+  group: ${{ inputs.publisher_run_id && format('offline-receipt-{0}', inputs.publisher_run_id) || 'offline-release-control' }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint target-scoped App token
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.PINEFORGE_APP_ID }}
+          private-key: ${{ secrets.PINEFORGE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: pineforge-backtest-mcp
+          permission-contents: write
+          permission-pull-requests: write
+          permission-actions: write
+      # workflow_run is privileged; never check out or execute the PR's code.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ steps.app.outputs.token }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Report failed bot CI or merge the current tested candidate
+        id: advance
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          INCIDENT_TOKEN: ${{ github.token }}
+          RELEASE_BOT_LOGIN: ${{ steps.app.outputs.app-slug }}[bot]
+          RELEASE_CHAIN_OWNER: ${{ vars.RELEASE_CHAIN_OWNER }}
+          PUBLISHER_RUN_ID: ${{ inputs.publisher_run_id }}
+        run: node scripts/release-consumer.mjs advance
+      - name: Persist the contract receipt snapshot
+        id: receipt
+        if: always() && steps.advance.outputs.receipt == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          include-hidden-files: true
+          name: release-receipt-offline
+          path: .release-ci/release-receipt.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+      - name: Mint a separate hub-only signal token
+        id: hub
+        if: always() && steps.receipt.outcome == 'success'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.PINEFORGE_APP_ID }}
+          private-key: ${{ secrets.PINEFORGE_APP_PRIVATE_KEY }}
+          owner: pineforge-4pass
+          repositories: pineforge-release
+          permission-contents: write
+      - name: Wake the hub after successful artifact upload
+        if: always() && steps.receipt.outcome == 'success' && steps.hub.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.hub.outputs.token }}
+        run: node scripts/release-receipt.mjs signal
+      - name: Alert on setup or reconciliation failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_CHAIN_OWNER: ${{ vars.RELEASE_CHAIN_OWNER }}
+        run: node scripts/release-consumer.mjs alert reconciliation

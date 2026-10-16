@@ -8,7 +8,7 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -223,7 +223,11 @@ test("bars in TradingView's chart-export format grade like the engine CSV", asyn
     const [t, ...rest] = l.split(",");
     return [Number(t) / 1000, ...rest].join(",");
   })].join("\n") + "\n";
-  const dir = mkdtempSync(join(tmpdir(), "e2e-parity-tvbars-"));
+  // The default server is cwd-scoped (bars outside its cwd are refused), so the
+  // converted export lives under the cwd, not in the OS temp directory.
+  const scratch = join(process.cwd(), ".release-ci", "e2e-tmp");
+  mkdirSync(scratch, { recursive: true });
+  const dir = mkdtempSync(join(scratch, "e2e-parity-tvbars-"));
   const path = join(dir, "tv-chart-export.csv");
   writeFileSync(path, tv);
   const fromTv = await callParity(client, { ...a, ohlcv_csv_path: map(path) });

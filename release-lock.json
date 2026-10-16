@@ -1,0 +1,11 @@
+{
+  "schema": "pineforge/offline-bootstrap/v1",
+  "release_version": "1.5.0",
+  "hub_commit": "f05d2565985710f72f56008dd12eaa013ca8a0eb",
+  "image": {
+    "repository": "ghcr.io/pineforge-4pass/pineforge-release",
+    "digest": "sha256:034c9ac6a9fdf0508463cf3c47ecde14ebef3e50a9667a5fa30a2204bd2addf2",
+    "amd64_digest": "sha256:a12c673d9d91b62e8a27ff82c9a8e915160b1ef582259a9b6009419b6fc00aee",
+    "arm64_digest": "sha256:df8fc29d5d1f2c285b4917672a7a06a10865c8ee892116c84c327a0f080fcf83"
+  }
+}

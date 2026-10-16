@@ -5,5 +5,7 @@ dist/
 .env
 .npmrc
 src/version.ts
+src/release.generated.ts
+.release-ci/
 test/.tmp-*
 __pycache__/
