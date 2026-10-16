@@ -91,8 +91,6 @@ jobs:
         run: node scripts/release-artifacts.mjs package
       - run: npm ci --no-audit --no-fund
       - name: Verify and prepare frozen fixtures
-        env:
-          OFFLINE_SYMINFO_FEED_URL: ${{ vars.OFFLINE_SYMINFO_FEED_URL }}
         run: python3 scripts/prepare-runtime-fixtures.py
       - name: Install the packed npm entry point
         run: npm install --prefix .release-ci/installed --no-package-lock --ignore-scripts --no-audit --no-fund ./.release-ci/offline-package/*.tgz

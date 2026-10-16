@@ -26,6 +26,8 @@ async function run() {
   const root = process.cwd();
   const feed15 = resolve(".release-ci/corpus/data/derived/ohlcv_ETH-USDT-USDT_15m.csv");
   const feed1 = resolve(".release-ci/corpus/data/ohlcv_ETH-USDT-USDT_1m.csv");
+  const syminfo = resolve(process.env.PF_E2E_SYMINFO_CSV ?? "test/fixtures/syminfo/btcusdt-4h-2188.csv");
+  assert.equal(sha256(readFileSync(syminfo)), inventory.syminfo_feed_sha256, "wrong frozen syminfo feed bytes");
   assert.equal(sha256(readFileSync(feed1)), inventory.feed_1m_sha256);
   const rows = readFileSync(feed15, "utf8").trim().split("\n").slice(1).map((s) => s.split(","));
   assert.ok(rows.length > 1000, "empty/short derived feed");
@@ -49,7 +51,7 @@ async function run() {
   const url = `http://127.0.0.1:${stub.address().port}`;
   const env = { ...process.env,
     PF_RELEASE_GATE: "1", PF_E2E_MODE: mode, PF_E2E_CORPUS: resolve(".release-ci/corpus"),
-    PF_E2E_FEED_15M: feed15, PF_E2E_FEED_1M: feed1, PF_E2E_SYMINFO_CSV: resolve(".release-ci/syminfo.csv"),
+    PF_E2E_FEED_15M: feed15, PF_E2E_FEED_1M: feed1, PF_E2E_SYMINFO_CSV: syminfo,
     PF_E2E_SAMPLE: String(inventory.parity_sample), PF_E2E_SEED: String(inventory.parity_seed),
     PF_E2E_CONCURRENCY: "3", PINEFORGE_PARITY_TIMEOUT_MS: "60000",
     PINEFORGE_BINANCE_SPOT_URL: url, PINEFORGE_BINANCE_FAPI_URL: url,

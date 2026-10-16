@@ -5,7 +5,6 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import urllib.request
 
 root = Path.cwd()
 inventory = json.loads((root / "test/fixtures/release/runtime-inventory.json").read_text())
@@ -20,17 +19,12 @@ for slug in inventory["required_probes"]:
 feed = corpus / "data/ohlcv_ETH-USDT-USDT_1m.csv"
 if hashlib.sha256(feed.read_bytes()).hexdigest() != inventory["feed_1m_sha256"]:
     raise ValueError("wrong/unsmudged corpus feed")
-url = os.environ.get("OFFLINE_SYMINFO_FEED_URL", "")
-if not url.startswith("https://"):
-    raise ValueError("OFFLINE_SYMINFO_FEED_URL must identify the frozen HTTPS feed")
-syminfo = root / ".release-ci/syminfo.csv"
-with urllib.request.urlopen(url) as response:
-    data = response.read()
+syminfo = Path(os.environ.get("PF_E2E_SYMINFO_CSV") or root / "test/fixtures/syminfo/btcusdt-4h-2188.csv")
+data = syminfo.read_bytes()
 if hashlib.sha256(data).hexdigest() != inventory["syminfo_feed_sha256"]:
     raise ValueError("wrong frozen syminfo feed bytes")
 if len(data.splitlines()) - 1 != inventory["syminfo_bars"]:
     raise ValueError("wrong syminfo bar count")
-syminfo.write_bytes(data)
 spec = importlib.util.spec_from_file_location("derive", root / "parity/vendor/derive_corpus_feeds.py")
 derive = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(derive)

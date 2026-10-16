@@ -1,0 +1,49 @@
+name: Regenerate syminfo expected trades
+
+on:
+  workflow_dispatch:
+  # Also on PRs that change the frozen feed, so the regenerated expectations
+  # are produced before the workflow exists on the default branch.
+  pull_request:
+    paths:
+      - test/fixtures/syminfo/**
+      - scripts/regenerate-syminfo-trades.mjs
+      - .github/workflows/regenerate-syminfo-trades.yml
+
+permissions:
+  contents: read
+
+jobs:
+  regenerate-syminfo-trades:
+    name: Record gridless and gridded expected trades
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - name: Resolve the digest-pinned engine runtime
+        id: lock
+        run: node scripts/release-contract.mjs show >> "$GITHUB_OUTPUT"
+      - name: Pull the pinned engine runtime
+        env:
+          IMAGE: ${{ steps.lock.outputs.image }}
+        run: docker pull "$IMAGE"
+      - name: Record both engine modes on the committed feed
+        env:
+          PINEFORGE_DOCKER_TIMEOUT_MS: '600000'
+        run: node scripts/regenerate-syminfo-trades.mjs
+      - name: Upload expected trades and full engine reports for review
+        uses: actions/upload-artifact@v4
+        with:
+          include-hidden-files: true
+          name: syminfo-expected-trades-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .release-ci/syminfo-regeneration/
+          if-no-files-found: error
+          retention-days: 30

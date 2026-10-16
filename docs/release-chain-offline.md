@@ -69,15 +69,17 @@ original LFS feed is SHA-256 checked, and the vendored resampler derives 15m
 bars. The frozen BTC feed must match the committed 2188-bar syminfo hash.
 Required negative-case probes must exist and contain source/trades.
 
-The repository and its available git history record no frozen HTTPS URL for the
-BTC fixture. The original syminfo E2E expects an operator-supplied local
-`PF_E2E_SYMINFO_CSV`; its expected rows and the runtime inventory require SHA-256
-`a53fc5ab420604ad47b0bae1cceed0ccce45e2ff63804e1d2ab8421efc5cecfb`
-and 2188 bars. To configure `OFFLINE_SYMINFO_FEED_URL`, recover those exact CSV
-bytes and publish them in `pineforge-4pass/pineforge-corpus` under
-`data/frozen/btcusdt-4h-a53fc5ab.csv`, then set the repository variable to the
-HTTPS raw-file URL pinned to that full commit SHA. This is a proposed hosting
-location; the fixture has not been published there by this change.
+The BTC fixture lives at `test/fixtures/syminfo/btcusdt-4h-2188.csv`, with SHA-256
+`92210de855452cf82ad7d1be6c47ef68948fbbee94929df11d991c4d54ad91c6`
+and 2188 bars. Runtime CI reads and verifies these committed bytes without an
+external feed URL or repository variable. `PF_E2E_SYMINFO_CSV` optionally names
+a local copy with the same hash. The source window and the reproducible Binance
+fetch command are documented in [the fixture README](../test/fixtures/syminfo/README.md).
+The old feed was lost; until the supervisor reviews and commits the JSON artifact
+from the dispatch-only `regenerate-syminfo-trades` job, the syminfo E2E fails
+explicitly because the expected JSON still names the old CSV hash. No comparison
+or suite is skipped. The recording workflow uses the committed runtime digest
+and emits both gridless and gridded engine rows for review.
 
 The network-fetch negative case uses a local Binance HTTP fixture server serving
 the pinned bars. The real transpiler, compiler, engine and grader still execute.
@@ -221,7 +223,7 @@ after success. It neither rewrites tags nor republishes a successful run. The
 | App permissions | This repository | Contents write, Pull requests write, Actions write for same-tag publisher/final-reporter dispatch (receiver requests Actions read only). No required-check/ruleset bypass. |
 | App callback permissions | Hub repository only | Separate `repositories: pineforge-release` token with Contents write, minted only after artifact upload. |
 | `RELEASE_RECEIPT_POLICY.offline` | Hub `release-automation` environment secret | Set the exact workflow, literal artifact name and complete job inventories from the current executor report. |
-| `OFFLINE_SYMINFO_FEED_URL` | **New repository Actions variable** | HTTPS location of the frozen BTC 4h feed already described by the committed expected rows. The content must match the committed SHA-256 and 2188 bars; an arbitrary new feed is rejected. |
+| Frozen syminfo feed | Committed fixture | `test/fixtures/syminfo/btcusdt-4h-2188.csv`; SHA-256 and 2188 bars checked locally, with no Actions feed variable. |
 | `RELEASE_CHAIN_OWNER` | **New repository/organization Actions variable** | GitHub user or team to mention for failure, recovery and success issues. |
 | `release/ready` | Main branch protection/ruleset | Required status from Test; require up-to-date branch and squash merging. Remove App bypass. Any retained required review must be satisfied before automation can merge. |
 | Actions, Issues, native arm64 runner | Repository settings | Enable workflows/Issues; permit artifact retention, scoped App PRs, package writes and `ubuntu-24.04-arm`. |
