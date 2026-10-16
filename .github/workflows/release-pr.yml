@@ -26,6 +26,9 @@ permissions:
 
 jobs:
   reconcile:
+    # Automatic triggers (workflow_run, push, schedule) run only once the chain is
+    # configured (RELEASE_CHAIN_OWNER set); a manual run without it still fails loudly.
+    if: vars.RELEASE_CHAIN_OWNER != '' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Mint target-scoped App token
@@ -41,6 +44,7 @@ jobs:
           permission-actions: write
       # workflow_run is privileged; never check out or execute the PR's code.
       - uses: actions/checkout@v4
+        id: checkout
         with:
           ref: main
           fetch-depth: 0
@@ -83,6 +87,13 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.hub.outputs.token }}
         run: node scripts/release-receipt.mjs signal
+      # A setup failure before checkout (e.g. the App token) leaves no scripts to alert with.
+      - name: Check out main for the alert when setup failed before checkout
+        if: failure() && steps.checkout.outcome != 'success'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
       - name: Alert on setup or reconciliation failure
         if: failure()
         env:
