@@ -148,3 +148,13 @@ test("only the trusted coordinator uploads the one literal contract artifact, th
   const finalDispatch = consumer.slice(consumer.indexOf("function ensureFinalReport"), consumer.indexOf("async function reportPublication"));
   assert.ok(finalDispatch.indexOf("trustedPublisher(publisher)") < finalDispatch.indexOf('gh("workflow", "run"'), "validate the workflow definition's source before dispatch");
 });
+
+test("automatic reconcile runs only once the chain is configured, and a setup failure can still alert", () => {
+  assert.equal(control.jobs.reconcile.if, "vars.RELEASE_CHAIN_OWNER != '' || github.event_name == 'workflow_dispatch'");
+  const steps = control.jobs.reconcile.steps;
+  const alert = steps.findIndex((s: any) => /release-consumer\.mjs alert/.test(s.run ?? ""));
+  const rescue = steps.findIndex((s: any) => s.if === "failure() && steps.checkout.outcome != 'success'");
+  assert.ok(rescue >= 0 && rescue < alert, "a checkout for the alert must precede it when setup failed");
+  assert.equal(steps[rescue].with["persist-credentials"], false);
+  assert.ok(steps.some((s: any) => s.id === "checkout" && s.with?.token === "${{ steps.app.outputs.token }}"));
+});
