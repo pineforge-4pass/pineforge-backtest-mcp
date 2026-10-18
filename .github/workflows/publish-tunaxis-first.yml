@@ -1,0 +1,63 @@
+name: First publish under @tunaxis
+run-name: First publish @tunaxis/backtest-mcp from ${{ inputs.tag }}
+
+# One-time bootstrap for the Tunaxis rename (owner R211, 10-19). npm trusted publishing is configured on an
+# existing package, so the first @tunaxis/backtest-mcp release uses a short-lived granular token scoped to
+# @tunaxis (secret NPM_FIRST_PUBLISH in the protected environment npm-first, main only). After it exists, the
+# owner adds the trusted publisher, disallows tokens and deletes the token; this workflow is then removed.
+# It publishes the tagged source under the new name only; @pineforge/backtest-mcp is untouched here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        type: string
+        default: v0.9.40
+        description: Release tag whose source is published under @tunaxis/backtest-mcp
+
+concurrency:
+  group: tunaxis-first-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  first-publish:
+    runs-on: ubuntu-latest
+    environment: npm-first
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      # npm 11.5.1 or later: needed by trusted publishing, which replaces this token after the first release.
+      - run: npm install -g npm@11
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - run: npm test
+      - name: Publish the tagged build under @tunaxis/backtest-mcp
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_FIRST_PUBLISH }}
+        run: |
+          set -euo pipefail
+          npm pkg set name=@tunaxis/backtest-mcp
+          test "$(node -p 'require("./package.json").name')" = "@tunaxis/backtest-mcp"
+          npm publish --access public --provenance
+      - name: Read back from the registry
+        run: |
+          set -euo pipefail
+          v=$(node -p 'require("./package.json").version')
+          for _ in 1 2 3 4 5 6; do
+            got=$(npm view "@tunaxis/backtest-mcp@$v" version 2>/dev/null || true)
+            [ "$got" = "$v" ] && { echo "registry has @tunaxis/backtest-mcp@$v"; exit 0; }
+            sleep 10
+          done
+          echo "registry read-back failed for @tunaxis/backtest-mcp@$v" >&2
+          exit 1
