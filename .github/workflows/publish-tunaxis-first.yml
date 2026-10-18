@@ -1,5 +1,5 @@
 name: First publish under @tunaxis
-run-name: First publish @tunaxis/backtest-mcp from ${{ inputs.tag }}
+run-name: First publish @tunaxis/backtest-mcp
 
 # One-time bootstrap for the Tunaxis rename (owner R211, 10-19). npm trusted publishing is configured on an
 # existing package, so the first @tunaxis/backtest-mcp release uses a short-lived granular token scoped to
@@ -9,11 +9,10 @@ run-name: First publish @tunaxis/backtest-mcp from ${{ inputs.tag }}
 
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        type: string
-        default: v0.9.40
-        description: Release tag whose source is published under @tunaxis/backtest-mcp
+
+env:
+  # Fixed: the one released source published under the new name. Not an input, so a dispatch cannot pick other code.
+  FIRST_TAG: v0.9.40
 
 concurrency:
   group: tunaxis-first-publish
@@ -32,7 +31,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: refs/tags/v0.9.40
+          fetch-depth: 0
+      - name: The tag's commit must be on main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$(git rev-parse "refs/tags/${FIRST_TAG}^{commit}")" origin/main
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -49,7 +54,8 @@ jobs:
           set -euo pipefail
           npm pkg set name=@tunaxis/backtest-mcp
           test "$(node -p 'require("./package.json").name')" = "@tunaxis/backtest-mcp"
-          npm publish --access public --provenance
+          # Built and tested above; no package script runs while the token is in the environment.
+          npm publish --access public --provenance --ignore-scripts
       - name: Read back from the registry
         run: |
           set -euo pipefail
