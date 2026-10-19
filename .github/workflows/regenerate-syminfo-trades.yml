@@ -13,6 +13,11 @@ on:
 permissions:
   contents: read
 
+# Keep bot release PRs and manual runs independent, as in the Test workflow.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'bot/pineforge-release/') && format('regen-pr-{0}', github.event.pull_request.number) || format('regen-run-{0}-{1}', github.run_id, github.run_attempt) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'bot/pineforge-release/') }}
+
 jobs:
   regenerate-syminfo-trades:
     name: Record gridless and gridded expected trades

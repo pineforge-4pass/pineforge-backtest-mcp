@@ -61,6 +61,38 @@ existing unit tests, packs npm once, installs that tarball, and builds the
 self-contained candidate natively on `ubuntu-24.04` and `ubuntu-24.04-arm`.
 Both architectures run both delivery entry points against the locked hub image.
 
+Ordinary PR pushes cancel stale runs of `Test` and, when its paths filter matches,
+`Regenerate syminfo expected trades`. Only `pull_request` events whose head branch
+does not start with `bot/pineforge-release/`, with at least one non-empty
+`GITHUB_ACTOR` or `GITHUB_TRIGGERING_ACTOR` and neither login ending in `[bot]`,
+and with a non-empty diff containing exclusively paths matching `^docs/.+\.md$`
+skip `test` and both runtime jobs;
+`release/ready` still verifies successful classification and the skipped jobs.
+README.md, LICENSE and all other paths require the full graph; diff failures
+and two missing/empty actors fail closed. The release App login is derived at
+run time from `steps.app.outputs.app-slug` in `release-pr.yml:60` and
+`pineforge-release.yml:42`; no static bot-login variable or configuration was
+found by repository search, so both actor checks apply to every `[bot]` suffix.
+Publisher `workflow_call` runs inherit `push` or `workflow_dispatch`, which can
+never classify as docs-only. Bot release PRs and publisher calls always run the full Test graph
+with unique run/attempt concurrency groups, without cancellation or queueing.
+
+`scripts/release-receipt.mjs:10-18` retains the CI/E2E/deploy expected names, and
+`checkEvidence` at lines 39-56 looks up only those expected names and requires
+exactly one completed, permitted result per name (lines 45-50), so the additional
+`changes` and publisher `gates / changes` jobs require no hub
+`RELEASE_RECEIPT_POLICY` edit and no job/status/`release/ready` context rename.
+
+`test/docs-only-bot-replay.test.ts` replays the real classifier CLI in a temporary
+Git merge containing only `docs/x.md`, evaluates the job conditions parsed from
+`test.yml`, expands both runtime architectures, and calls the real
+`checkEvidence` for CI and E2E: the bot-shaped release PR must report `test`,
+`runtime (amd64)`, `runtime (arm64)` and `release/ready` as `success`; the same
+human docs-only diff skips test/runtime and is rejected with `approved_skips: []`.
+This is a replay using real expressions and scripts, not a live bot PR;
+jobs selected to run have synthetic successful outcomes, so it verifies routing
+and receipt acceptance/refusal rather than actual runtime execution.
+
 Each entry point runs the existing parity, syminfo and negative stdio suites,
 plus an identity assertion. The declared top-level test counts are respectively
 1, 11, 19 and 1. Parity additionally requires agreement for all 30 seeded probes.

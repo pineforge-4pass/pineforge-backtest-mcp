@@ -9,9 +9,31 @@ permissions:
   actions: read
 
 # A publisher calls this same complete graph on the landed tag source.
-# No workflow-level concurrency: a caller must not cancel its own reusable run.
+# Coalesce only ordinary PRs. Reusable calls inherit the caller's event; unique
+# run/attempt groups keep publisher and bot PR runs independent and unqueued.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'bot/pineforge-release/') && format('test-pr-{0}', github.event.pull_request.number) || format('test-run-{0}-{1}', github.run_id, github.run_attempt) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'bot/pineforge-release/') }}
+
 jobs:
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      docs_only: ${{ steps.docs.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - id: docs
+        run: node scripts/docs-only.mjs
+
   test:
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -143,7 +165,7 @@ jobs:
 
   ready:
     name: release/ready
-    needs: [test, runtime]
+    needs: [changes, test, runtime]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -154,20 +176,35 @@ jobs:
         with:
           node-version: 22
       - name: Fetch the latest evidence for every required runtime job
+        if: needs.changes.outputs.docs_only != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/release-artifacts.mjs evidence
       - name: Require the complete current-source job and suite inventory
+        if: needs.changes.outputs.docs_only != 'true'
         env:
-          NEEDS_JSON: ${{ toJSON(needs) }}
+          NEEDS_JSON: ${{ format('{{"test":{0},"runtime":{1}}}', toJSON(needs.test), toJSON(needs.runtime)) }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: node scripts/release-evidence.mjs gate
       - uses: actions/upload-artifact@v4
+        if: needs.changes.outputs.docs_only != 'true'
         with:
           include-hidden-files: true
           name: offline-gate-${{ github.run_id }}-${{ github.run_attempt }}
           path: .release-ci/gate-receipt.json
           if-no-files-found: error
           retention-days: 90
+      - name: Verify the documentation-only skip
+        if: needs.changes.outputs.docs_only == 'true'
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          RUNTIME_RESULT: ${{ needs.runtime.result }}
+        run: |
+          if [ "$CHANGES_RESULT" != success ] || [ "$TEST_RESULT" != skipped ] || [ "$RUNTIME_RESULT" != skipped ]; then
+            echo '::error::Documentation-only skip requires successful classification and skipped test/runtime jobs'
+            exit 1
+          fi
+          echo '::notice::Documentation-only PR skipped the runtime graph'
