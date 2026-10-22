@@ -18,7 +18,7 @@ jobs:
     steps:
       - name: Mint target-scoped App token
         id: app
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.PINEFORGE_APP_ID }}
           private-key: ${{ secrets.PINEFORGE_APP_PRIVATE_KEY }}
@@ -27,12 +27,12 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
           permission-actions: read
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
           token: ${{ steps.app.outputs.token }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: Validate artifacts and reconcile update PR
@@ -44,7 +44,7 @@ jobs:
         run: node scripts/release-consumer.mjs receive
       - name: Preserve the validated target for trusted coordinator reporting
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           include-hidden-files: true
           name: offline-release-target-${{ github.run_id }}-${{ github.run_attempt }}
