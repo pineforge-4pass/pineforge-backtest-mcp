@@ -11,7 +11,7 @@ import { HUB, api, gh, readLock, sha256, verifyManifest, validateReady, download
 import { integrity, verifyEvidence } from "./release-evidence.mjs";
 import { compareVersions, channel } from "./release-version.mjs";
 import { marker, alert } from "./release-consumer.mjs";
-import { servedIdentity } from "./release-receipt.mjs";
+import { servedIdentity, validateServedIdentity } from "./release-receipt.mjs";
 
 const REPO = process.env.GITHUB_REPOSITORY ?? "pineforge-4pass/pineforge-backtest-mcp";
 const NPM = "@pineforge/backtest-mcp";
@@ -72,12 +72,16 @@ export function validateChannelState(s) {
   assert.equal(channel(s.previous.npm_version).npmDistTag, s.channel, "previous channel version mismatch");
   if (s.channel === "latest") assert.match(s.previous.image_digest, /^sha256:[0-9a-f]{64}$/);
   else assert.equal(s.previous.image_digest, null);
+  const previous = validateServedIdentity(s.previous.identity, { previous: true });
+  if (previous.legacy === true) {
+    assert.equal(previous.npm_version, s.previous.npm_version);
+    if (s.channel === "latest") assert.equal(previous.image_digest, s.previous.image_digest);
+  }
   return s;
 }
-async function previousIdentity(version, consumerImage, ch) {
+export async function previousIdentity(version, consumerImage, ch) {
   // Observe the actual rollback distribution before any channel changes. A
-  // legacy package without source/facts provenance needs a reviewed baseline;
-  // inventing those identities would make a v1 verified receipt dishonest.
+  // legacy package records registry facts only, never invented lock provenance.
   const pkg = await npmMetadata(version);
   assert.equal(pkg?.name, NPM);
   assert.equal(pkg.version, version);
@@ -90,15 +94,19 @@ async function previousIdentity(version, consumerImage, ch) {
   assert.equal(`sha512-${createHash("sha512").update(bytes).digest("base64")}`, pkg.dist.integrity);
   const file = join(mkdtempSync(join(tmpdir(), "pf-previous-")), "package.tgz");
   writeFileSync(file, bytes);
-  const lock = validateReady(JSON.parse(cmd("tar", "-xOf", file, "package/release-lock.json")));
+  const entries = cmd("tar", "-tzf", file).split("\n");
+  const legacy = !entries.includes("package/release-lock.json");
+  const lock = legacy ? null : validateReady(JSON.parse(cmd("tar", "-xOf", file, "package/release-lock.json")));
   const packed = JSON.parse(cmd("tar", "-xOf", file, "package/package.json"));
   assert.equal(packed.version, version);
-  const sourceLock = api(`repos/${REPO}/contents/release-lock.json?ref=${pkg.gitHead}`);
-  assert.deepEqual(JSON.parse(Buffer.from(sourceLock.content, "base64")), lock, "previous package/source lock differs");
-  verifyManifest(lock, downloadManifest(lock));
-  const facts = await fetch(`https://raw.githubusercontent.com/${HUB}/${lock.facts.commit}/${lock.facts.path}`);
-  assert.equal(facts.status, 200);
-  assert.equal(sha256(Buffer.from(await facts.arrayBuffer())), lock.facts.sha256);
+  if (!legacy) {
+    const sourceLock = api(`repos/${REPO}/contents/release-lock.json?ref=${pkg.gitHead}`);
+    assert.deepEqual(JSON.parse(Buffer.from(sourceLock.content, "base64")), lock, "previous package/source lock differs");
+    verifyManifest(lock, downloadManifest(lock));
+    const facts = await fetch(`https://raw.githubusercontent.com/${HUB}/${lock.facts.commit}/${lock.facts.path}`);
+    assert.equal(facts.status, 200);
+    assert.equal(sha256(Buffer.from(await facts.arrayBuffer())), lock.facts.sha256);
+  }
   const fixedImage = imageDigest(`${OCI}:v${version}`);
   if (consumerImage) assert.equal(fixedImage, consumerImage);
   const repository = OCI.slice("ghcr.io/".length);
@@ -121,9 +129,16 @@ async function previousIdentity(version, consumerImage, ch) {
     const manifest = await get("manifests", children[0].digest);
     const config = await get("blobs", manifest.config.digest);
     assert.equal(config.architecture, arch);
-    assert.equal(config.config.Labels["org.opencontainers.image.revision"], pkg.gitHead);
-    assert.equal(config.config.Labels["io.pineforge.release.image"], `${lock.image.repository}@${lock.image.digest}`);
+    if (legacy) {
+      const labels = config.config?.Labels;
+      if (labels && Object.hasOwn(labels, "org.opencontainers.image.revision")) assert.equal(labels["org.opencontainers.image.revision"], pkg.gitHead);
+    } else {
+      assert.equal(config.config.Labels["org.opencontainers.image.revision"], pkg.gitHead);
+      assert.equal(config.config.Labels["io.pineforge.release.image"], `${lock.image.repository}@${lock.image.digest}`);
+    }
   }
+  if (legacy) return validateServedIdentity({ legacy: true, npm_version: version, npm_integrity: pkg.dist.integrity,
+    git_head: pkg.gitHead, image_digest: fixedImage }, { previous: true });
   return servedIdentity(lock, pkg.gitHead, { version, integrity: pkg.dist.integrity, image: fixedImage, channel: ch });
 }
 async function prepare() {

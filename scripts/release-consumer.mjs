@@ -186,29 +186,35 @@ async function receive() {
     mutate("PATCH", `repos/${REPO}/pulls/${old.number}`, { state: "closed" });
   }
 }
-function latestGate(p) {
+export function latestGate(p) {
   const runs = api(`repos/${REPO}/actions/workflows/test.yml/runs?event=pull_request&head_sha=${p.head.sha}&per_page=100`).workflow_runs;
-  const run = runs.find((r) => r.head_sha === p.head.sha && r.pull_requests.some((q) => q.number === p.number));
-  if (!run || run.status !== "completed" || run.conclusion !== "success") return null;
-  const jobs = jobsFor(run);
-  const checks = checkEvidence(run, jobs, RECEIPT_POLICY.ci, p.head.sha);
-  const dir = mkdtempSync(join(tmpdir(), "pf-gate-"));
-  const artifacts = pages(`repos/${REPO}/actions/runs/${run.id}/artifacts?per_page=100`).flatMap((p) => p.artifacts);
-  const name = chooseArtifact(artifacts, "offline-gate", run.id);
-  gh("run", "download", String(run.id), "--repo", REPO, "--name", name, "--dir", dir);
-  const gate = json(join(dir, "gate-receipt.json"));
-  assert.equal(gate.state, "ready"); assert.equal(gate.head_sha, p.head.sha); assert.equal(String(gate.pr), String(p.number));
-  assert.deepEqual(gate.expected_jobs, ["test", "runtime (amd64)", "runtime (arm64)"]);
-  assert.deepEqual(gate.approved_skips, []);
-  assert.equal(String(gate.run_id), String(run.id));
-  assert.equal(Number(gate.attempt), run.run_attempt, "gate belongs to another run attempt");
-  // PR CI exercises GitHub's merge candidate. Bind both parents before using
-  // its runtime evidence as this head/base preview.
-  if (gate.source_sha !== p.head.sha) {
-    const candidate = api(`repos/${REPO}/commits/${gate.source_sha}`);
-    assert.deepEqual(candidate.parents.map((parent) => parent.sha), [gate.base_sha, p.head.sha]);
+  // One page (per_page=100), at most one gate download per candidate run.
+  // GitHub may clear PR associations after merge; the receipt survives.
+  const candidates = runs.filter((r) => r.head_sha === p.head.sha && r.status === "completed" && r.conclusion === "success")
+    .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id);
+  for (const run of candidates) {
+    const dir = mkdtempSync(join(tmpdir(), "pf-gate-"));
+    const artifacts = pages(`repos/${REPO}/actions/runs/${run.id}/artifacts?per_page=100`).flatMap((p) => p.artifacts);
+    const name = chooseArtifact(artifacts, "offline-gate", run.id);
+    gh("run", "download", String(run.id), "--repo", REPO, "--name", name, "--dir", dir);
+    const gate = json(join(dir, "gate-receipt.json"));
+    if (String(gate.pr) !== String(p.number) || gate.head_sha !== p.head.sha) continue;
+    const jobs = jobsFor(run);
+    const checks = checkEvidence(run, jobs, RECEIPT_POLICY.ci, p.head.sha);
+    assert.equal(gate.state, "ready"); assert.equal(gate.head_sha, p.head.sha); assert.equal(String(gate.pr), String(p.number));
+    assert.deepEqual(gate.expected_jobs, ["test", "runtime (amd64)", "runtime (arm64)"]);
+    assert.deepEqual(gate.approved_skips, []);
+    assert.equal(String(gate.run_id), String(run.id));
+    assert.equal(Number(gate.attempt), run.run_attempt, "gate belongs to another run attempt");
+    // PR CI exercises GitHub's merge candidate. Bind both parents before using
+    // its runtime evidence as this head/base preview.
+    if (gate.source_sha !== p.head.sha) {
+      const candidate = api(`repos/${REPO}/commits/${gate.source_sha}`);
+      assert.deepEqual(candidate.parents.map((parent) => parent.sha), [gate.base_sha, p.head.sha]);
+    }
+    return { ...gate, checks, jobs };
   }
-  return { ...gate, checks, jobs };
+  return null;
 }
 function candidateEvidence(p, lock, gate, merge = null) {
   assert.equal(gate.event_id, lock.event_id);
