@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""CI-only adapter for the hub's unmodified receipt checks.
+"""CI-only adapter for the hub's receipt checks.
 
 Vendored because the sibling hub checkout is not present in this repo's CI.
 Sources: pineforge-4pass/pineforge-release/scripts/release_receipts.py and
 scripts/release_contract.py, Consumer receipt contract v1 (2026-10-16).
-Only transport/import plumbing and the fake GitHub API below are local.
+The transport/import plumbing and fake GitHub API below are local.
+MCP-135 adds an explicit offline previous-only legacy identity extension below.
+The production hub must adopt that extension separately; this fixture does not
+establish that its currently deployed verifier accepts legacy predecessors.
 """
 from __future__ import annotations
 
@@ -28,9 +31,9 @@ COMMON_FIELDS = {"schema", "consumer", "attempt", "sequence", "state", "timestam
                  "pr", "ci", "e2e", "deploy", "preview", "deployed", "previous"}
 
 
-# release_receipts.py SHA-256: 6fe7b0afcb7a34de9e28bce9d8372e5a4eaa6695398536697f59ed705b0cc23a
+# Baseline release_receipts.py SHA-256: 6fe7b0afcb7a34de9e28bce9d8372e5a4eaa6695398536697f59ed705b0cc23a
 
-# release_contract.py SHA-256: a0ba4a20d0ef0a978aa6cd31570c200aa5cca0911499e508179fc3fafeb6f409
+# Baseline release_contract.py SHA-256: a0ba4a20d0ef0a978aa6cd31570c200aa5cca0911499e508179fc3fafeb6f409
 
 class Invalid(ValueError):
     pass
@@ -133,7 +136,15 @@ def check_run(client, repo, evidence, policy, expected_sha):
     return run
 
 
-def identity(obj, *, facts_only=False):
+def identity(obj, *, facts_only=False, legacy_previous=False):
+    # MCP-135 additive contract extension; never valid for preview/deployed.
+    if legacy_previous and type(obj) is dict and obj.get("legacy") is True:
+        keys(obj, ("legacy", "npm_version", "npm_integrity", "git_head", "image_digest"))
+        match(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:alpha|beta|rc)\.(?:0|[1-9]\d*))?", obj["npm_version"])
+        match(r"sha512-[A-Za-z0-9+/]{86}==", obj["npm_integrity"])
+        match(COMMIT, obj["git_head"])
+        match("sha256:" + SHA, obj["image_digest"])
+        return
     keys(obj, ("source", "image_digest", "facts_commit", "facts_sha256", "deployment_id_sha256"))
     match(COMMIT, obj["source"])
     match(COMMIT, obj["facts_commit"])
@@ -212,7 +223,8 @@ def validate_receipt(client, repo, receipt, event, policy, reporting_run):
         deployed_run = check_run(client, repo, receipt["deploy"], policy["deploy"], pr["merge"])
         require(receipt["timestamp"] >= deployed_run["checked_finished_at"], "served receipt predates verification")
         identity(receipt["deployed"], facts_only=facts_only)
-        identity(receipt["previous"], facts_only=facts_only)
+        identity(receipt["previous"], facts_only=facts_only,
+                 legacy_previous=not facts_only and receipt["consumer"] == "offline")
         require(receipt["deployed"]["source"] == pr["merge"]
                 and (facts_only or receipt["deployed"]["image_digest"] == event["image"]["digest"]),
                 "actual served source/image differs")

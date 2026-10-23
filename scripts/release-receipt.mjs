@@ -5,6 +5,7 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { HUB, sha256, validateReady } from "./release-contract.mjs";
+import { parseVersion } from "./release-version.mjs";
 
 export const RECEIPT_FILE = ".release-ci/release-receipt.json";
 const checks = ["test", "runtime (amd64)", "runtime (arm64)", "release/ready"];
@@ -35,6 +36,24 @@ export function servedIdentity(lock, source, distribution) {
   assert.match(source, /^[0-9a-f]{40}$/);
   return { source, image_digest: lock.image.digest, facts_commit: lock.facts.commit,
     facts_sha256: lock.facts.sha256, deployment_id_sha256: sha256(canonical(distribution)) };
+}
+export function validateServedIdentity(row, { previous = false } = {}) {
+  assert.ok(row && typeof row === "object" && !Array.isArray(row), "expected served identity");
+  if (previous && row.legacy === true) {
+    assert.deepEqual(Object.keys(row).sort(), ["legacy", "npm_version", "npm_integrity", "git_head", "image_digest"].sort());
+    parseVersion(row.npm_version);
+    assert.ok(!row.npm_version.startsWith("v"));
+    assert.match(row.npm_integrity, /^sha512-[A-Za-z0-9+/]{86}==$/);
+    assert.match(row.git_head, /^[0-9a-f]{40}$/);
+    assert.match(row.image_digest, /^sha256:[0-9a-f]{64}$/);
+  } else {
+    assert.deepEqual(Object.keys(row).sort(), ["source", "image_digest", "facts_commit", "facts_sha256", "deployment_id_sha256"].sort());
+    assert.match(row.source, /^[0-9a-f]{40}$/);
+    assert.match(row.image_digest, /^sha256:[0-9a-f]{64}$/);
+    assert.match(row.facts_commit, /^[0-9a-f]{40}$/);
+    for (const key of ["facts_sha256", "deployment_id_sha256"]) assert.match(row[key], /^[0-9a-f]{64}$/);
+  }
+  return row;
 }
 export function checkEvidence(run, jobs, policy, source) {
   assert.equal(run.path, `.github/workflows/${policy.workflow}`);
@@ -82,6 +101,11 @@ export function buildReceipt(lock, { state, attempt, sequence, timestamp = new D
   }
   for (const name of ["preview", "deployed", "previous"]) if (receipt[name]) {
     const row = receipt[name];
+    if (name === "previous") validateServedIdentity(row, { previous: true });
+    if (name === "previous" && row.legacy === true) {
+      receipt[name] = { ...row };
+      continue;
+    }
     receipt[name] = { source: row.source, image_digest: row.image_digest, facts_commit: row.facts_commit,
       facts_sha256: row.facts_sha256, deployment_id_sha256: row.deployment_id_sha256 };
     assert.match(row.source, /^[0-9a-f]{40}$/);

@@ -4,11 +4,12 @@ import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 // @ts-ignore workflow module.
-import { buildReceipt, canonical, checkEvidence, consumerSignal, RECEIPT_POLICY, servedIdentity } from "../scripts/release-receipt.mjs";
+import { buildReceipt, canonical, checkEvidence, consumerSignal, RECEIPT_POLICY, servedIdentity, validateServedIdentity } from "../scripts/release-receipt.mjs";
 // @ts-ignore workflow module.
 import { publicationAction, terminalRestart } from "../scripts/release-consumer.mjs";
 
 const lock = JSON.parse(readFileSync(new URL("./fixtures/release/release-ready-v1.json", import.meta.url), "utf8"));
+const legacy = JSON.parse(readFileSync(new URL("./fixtures/release/legacy-identity.json", import.meta.url), "utf8"));
 const repo = "pineforge-4pass/pineforge-backtest-mcp";
 const head = "1".repeat(40), merge = "2".repeat(40), base = "3".repeat(40);
 function sample() {
@@ -121,3 +122,45 @@ test("a terminal-state retry requires a fresh reporting attempt, while verified 
   data.receipt = buildReceipt(lock, { state: "pending", attempt: 90, sequence: 2, timestamp: "2020-01-01T00:07:00Z" });
   assert.notEqual(hubValidate(data).status, 0, "verified cannot regress even with a larger attempt");
 });
+
+function legacySample() {
+  const data = sample();
+  data.receipt = buildReceipt(lock, { ...data.receipt, previous: legacy });
+  assert.deepEqual(data.receipt.previous, legacy);
+  assert.deepEqual(JSON.parse(canonical(data.receipt)).previous, legacy);
+  return data;
+}
+test("D2: validateServedIdentity accepts legacy only with previous true", () => {
+  assert.equal(validateServedIdentity(legacy, { previous: true }), legacy);
+  const identityShapeRejection = (error: unknown) => {
+    assert.ok(error instanceof assert.AssertionError);
+    assert.equal(error.code, "ERR_ASSERTION");
+    assert.equal(error.operator, "deepStrictEqual");
+    assert.deepEqual(error.actual, ["git_head", "image_digest", "legacy", "npm_integrity", "npm_version"]);
+    assert.deepEqual(error.expected, ["deployment_id_sha256", "facts_commit", "facts_sha256", "image_digest", "source"]);
+    return true;
+  };
+  assert.throws(() => validateServedIdentity(legacy), identityShapeRejection);
+  assert.throws(() => validateServedIdentity(legacy, { previous: false }), identityShapeRejection);
+});
+test("D2: receipt writer and extended verifier preserve exactly the legacy predecessor", () => {
+  const result = hubValidate(legacySample());
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).previous, legacy);
+});
+for (const [label, identity] of [
+  ["invented field", { ...legacy, event_id: lock.event_id }],
+  // The key is absent, not undefined: canonical() refuses an undefined value before the hub check runs.
+  ["missing digest", Object.fromEntries(Object.entries(legacy).filter(([key]) => key !== "image_digest"))],
+  ["false legacy marker", { ...legacy, legacy: false }],
+  ["legacy preview", legacy],
+  ["legacy deployed", legacy],
+] as Array<[string, any]>) {
+  test(`D2: receipt writer and extended verifier refuse ${label}`, () => {
+    const data = legacySample();
+    const field = label === "legacy preview" ? "preview" : label === "legacy deployed" ? "deployed" : "previous";
+    assert.throws(() => buildReceipt(lock, { ...data.receipt, [field]: identity }));
+    data.receipt[field] = identity;
+    assert.notEqual(hubValidate(data).status, 0);
+  });
+}
