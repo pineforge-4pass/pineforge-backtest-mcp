@@ -82,6 +82,21 @@ test("D1: newest wrong PR is skipped for the older matching gate", () => {
   const { state } = found(gateState([run, newest], { 101: gate, 102: { ...gate, run_id: 102, pr: 39 } }));
   assert.deepEqual(state.calls.filter((c: any) => c.args[0] === "run").map((c: any) => c.args[2]), ["102", "101"]);
 });
+test("D1: two matching gates select the newest run and download only its artifact", () => {
+  const newest = { ...run, id: 102, created_at: "2026-10-21T01:00:00Z" };
+  // Both receipts match; oldest-first input must still select run 102.
+  const actual = invoke("latestGate", () => gateState([run, newest], { 101: gate, 102: { ...gate, run_id: 102 } }));
+  assert.equal(actual.result.status, 0, actual.output.error ?? actual.result.stderr);
+  assert.equal(actual.output.value.run_id, 102);
+  assert.equal(actual.output.value.attempt, 1);
+  assert.equal(actual.output.value.pr, 38);
+  assert.equal(actual.output.value.head_sha, head);
+  assert.equal(actual.output.value.checks.run_id, 102);
+  assert.equal(actual.output.value.checks.run_attempt, 1);
+  assert.deepEqual(actual.state.calls
+    .filter((c: any) => c.tool === "gh" && c.args[0] === "run" && c.args[1] === "download")
+    .map((c: any) => c.args[2]), ["102"]);
+});
 for (const [label, patch] of [
   ["state", { state: "failed" }], ["expected jobs", { expected_jobs: ["test"] }],
   ["approved skips", { approved_skips: ["test"] }], ["run ID", { run_id: 102 }],

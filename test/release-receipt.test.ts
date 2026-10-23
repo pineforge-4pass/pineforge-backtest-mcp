@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 // @ts-ignore workflow module.
-import { buildReceipt, canonical, checkEvidence, consumerSignal, RECEIPT_POLICY, servedIdentity } from "../scripts/release-receipt.mjs";
+import { buildReceipt, canonical, checkEvidence, consumerSignal, RECEIPT_POLICY, servedIdentity, validateServedIdentity } from "../scripts/release-receipt.mjs";
 // @ts-ignore workflow module.
 import { publicationAction, terminalRestart } from "../scripts/release-consumer.mjs";
 
@@ -130,6 +130,19 @@ function legacySample() {
   assert.deepEqual(JSON.parse(canonical(data.receipt)).previous, legacy);
   return data;
 }
+test("D2: validateServedIdentity accepts legacy only with previous true", () => {
+  assert.equal(validateServedIdentity(legacy, { previous: true }), legacy);
+  const identityShapeRejection = (error: unknown) => {
+    assert.ok(error instanceof assert.AssertionError);
+    assert.equal(error.code, "ERR_ASSERTION");
+    assert.equal(error.operator, "deepStrictEqual");
+    assert.deepEqual(error.actual, ["git_head", "image_digest", "legacy", "npm_integrity", "npm_version"]);
+    assert.deepEqual(error.expected, ["deployment_id_sha256", "facts_commit", "facts_sha256", "image_digest", "source"]);
+    return true;
+  };
+  assert.throws(() => validateServedIdentity(legacy), identityShapeRejection);
+  assert.throws(() => validateServedIdentity(legacy, { previous: false }), identityShapeRejection);
+});
 test("D2: receipt writer and extended verifier preserve exactly the legacy predecessor", () => {
   const result = hubValidate(legacySample());
   assert.equal(result.status, 0, result.stderr);
