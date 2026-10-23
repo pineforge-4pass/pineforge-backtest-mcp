@@ -18,11 +18,14 @@ export const openRoute = `repos/${repo}/pulls?state=open&base=main&per_page=100`
 export const runsRoute = `repos/${repo}/actions/workflows/publish.yml/runs?head_sha=${source}&per_page=100`;
 export const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const sri = (bytes) => `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
-export const publisher = {
-  id: 201, run_attempt: 1, path: ".github/workflows/publish.yml",
-  head_sha: source, head_branch: "v0.9.41", event: "push",
-  display_title: "Offline publish v0.9.41", status: "completed", conclusion: "failure",
-};
+// Each fixture and row owns its publisher, including malformed-run mutations.
+export function publisher() {
+  return {
+    id: 201, run_attempt: 1, path: ".github/workflows/publish.yml",
+    head_sha: source, head_branch: "v0.9.41", event: "push",
+    display_title: "Offline publish v0.9.41", status: "completed", conclusion: "failure",
+  };
+}
 export const gitResult = (s, args, output = "") => { s.git[JSON.stringify(args)] = output; };
 export function rereleaseState(root) {
   const lock = JSON.parse(readFileSync(new URL("./release-ready-v1.json", import.meta.url), "utf8"));
@@ -100,7 +103,7 @@ export function rereleaseState(root) {
       [`repos/${repo}/pulls/38/commits?per_page=100`]: [{ author: { login: bot } }],
       [`repos/${repo}/pulls/38/files?per_page=100`]: [{ filename: "VERSION", status: "modified" }],
       [`repos/${repo}/pulls/42`]: openPR,
-      [runsRoute]: [{ workflow_runs: [publisher] }],
+      [runsRoute]: [{ workflow_runs: [publisher()] }],
       [`repos/${hub}/git/ref/tags/v1.6.3`]: { object: { type: "commit", sha: lock.hub_commit } },
       "repos/pineforge-4pass/pineforge-engine/git/ref/tags/v1.6.3": { object: { type: "commit", sha: lock.versions.engine.commit } },
       "repos/pineforge-4pass/pineforge-codegen-oss/git/ref/tags/v1.6.3": { object: { type: "commit", sha: lock.versions.codegen.commit } },

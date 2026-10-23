@@ -96,22 +96,22 @@ for (const [label, patch] of [
   ["skipped", { status: "completed", conclusion: "skipped" }],
 ] as Array<[string, any]>) {
   test(`MCP-136: publisher ${label} opens no PR and pushes nothing`, () => {
-    refused((s) => { s.api[runsRoute] = [{ workflow_runs: [{ ...publisher, ...patch }] }]; });
+    refused((s) => { s.api[runsRoute] = [{ workflow_runs: [{ ...publisher(), ...patch }] }]; });
   });
 }
 test("MCP-136: absent publisher opens no PR and preserves same-tag dispatch", () => {
   refused((s) => { s.api[runsRoute] = [{ workflow_runs: [] }]; });
 });
 test("MCP-136: newest matching publisher wins over an older failure", () => {
-  refused((s) => { s.api[runsRoute] = [{ workflow_runs: [publisher, { ...publisher, id: 202, conclusion: "success" }] }]; });
+  refused((s) => { s.api[runsRoute] = [{ workflow_runs: [publisher(), { ...publisher(), id: 202, conclusion: "success" }] }]; });
 });
 test("MCP-136: newer unrelated publisher cannot authorize re-release", () => {
   refused((s) => { s.api[runsRoute] = [{ workflow_runs: [
-    { ...publisher, conclusion: "success" },
-    { ...publisher, id: 202, head_sha: candidate },
-    { ...publisher, id: 203, head_branch: "v0.9.40" },
-    { ...publisher, id: 204, event: "pull_request" },
-    { ...publisher, id: 205, display_title: "another publisher" },
+    { ...publisher(), conclusion: "success" },
+    { ...publisher(), id: 202, head_sha: candidate },
+    { ...publisher(), id: 203, head_branch: "v0.9.40" },
+    { ...publisher(), id: 204, event: "pull_request" },
+    { ...publisher(), id: 205, display_title: "another publisher" },
   ] }]; });
 });
 for (const [label, response] of [
@@ -230,8 +230,8 @@ test("MCP-136: failed redelivery still advances an existing re-release candidate
 test("MCP-136: delayed old publisher failure cannot fail an open re-release", () => {
   const actual = invoke("advance", (s, root) => {
     openRerelease(s, root);
-    writeFileSync(join(root, "event.json"), JSON.stringify({ workflow_run: publisher }));
-    s.api[`repos/${repo}/actions/runs/201`] = publisher;
+    writeFileSync(join(root, "event.json"), JSON.stringify({ workflow_run: publisher() }));
+    s.api[`repos/${repo}/actions/runs/201`] = publisher();
     s.api[`repos/${repo}/actions/workflows/release-pr.yml/runs?event=workflow_dispatch&head_sha=${source}&per_page=100`] = [{ workflow_runs: [] }];
     gitResult(s, ["fetch", "origin", source]);
   });
@@ -279,3 +279,14 @@ for (const path of ["release-lock.json", "release-manifest.json"]) {
     assert.ok(!existsSync(join(actual.root, ".release-ci/release-receipt.json")));
   });
 }
+
+test("MCP-136: malformed publisher state cannot contaminate another invocation", () => {
+  const malformed = refused((s) => {
+    s.api[runsRoute][0].workflow_runs[0].id = "201";
+  }, /invalid publisher run ID/);
+  const fresh = positive();
+  assert.notEqual(fresh.root, malformed.root, "invocations must own separate mock state files");
+  assert.equal(fresh.state.api[runsRoute][0].workflow_runs[0].id, 201);
+  const preserved = JSON.parse(readFileSync(join(malformed.root, "mock.json"), "utf8"));
+  assert.equal(preserved.api[runsRoute][0].workflow_runs[0].id, "201");
+});
