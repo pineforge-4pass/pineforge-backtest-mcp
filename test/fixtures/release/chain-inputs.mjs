@@ -7,6 +7,8 @@ import { execFileSync } from "node:child_process";
 
 export const head = "1111111111111111111111111111111111111111";
 export const otherHead = "2222222222222222222222222222222222222222";
+export const todayGitHead = "b988217f2aa21b6b772fb723adbc89bd4130c3f5";
+export const todayImageRevision = "f05d2565985710f72f56008dd12eaa013ca8a0eb";
 export const repo = "pineforge-4pass/pineforge-backtest-mcp";
 export const oci = "ghcr.io/pineforge-4pass/pineforge-backtest-mcp";
 export const pr = { number: 38, merged: true, head: { sha: head } };
@@ -45,7 +47,8 @@ export function gateState(runs = [run], gates = { 101: gate }, runJobs = jobs) {
 const hash = (raw) => createHash("sha256").update(raw).digest("hex");
 const sri = (raw) => `sha512-${createHash("sha512").update(raw).digest("base64")}`;
 export function packageState(root, {
-  modern = false, revision, badArch = false, missingArm = false, invalidLock = false, omitLabels = false, releaseImage,
+  modern = false, revision, gitHead = head, packedVersion = "0.9.40",
+  badArch = false, missingArm = false, invalidLock = false, omitLabels = false, releaseImage,
 } = {}) {
   const lock = JSON.parse(readFileSync(new URL("./release-ready-v1.json", import.meta.url), "utf8"));
   // The fixture's measured facts are real bytes, independent of the SUT.
@@ -60,7 +63,7 @@ export function packageState(root, {
   lock.event_id = `sha256:${lock.manifest.sha256}`;
   const packRoot = join(root, "pack");
   mkdirSync(join(packRoot, "package"), { recursive: true });
-  writeFileSync(join(packRoot, "package/package.json"), '{"name":"@pineforge/backtest-mcp","version":"0.9.40"}\n');
+  writeFileSync(join(packRoot, "package/package.json"), JSON.stringify({ name: "@pineforge/backtest-mcp", version: packedVersion }) + "\n");
   if (modern) writeFileSync(join(packRoot, "package/release-lock.json"), JSON.stringify(invalidLock ? {} : lock));
   const tarball = execFileSync("tar", ["-czf", "-", "-C", packRoot, "package"]);
   const responses = {};
@@ -72,7 +75,7 @@ export function packageState(root, {
   };
   const child = (architecture) => {
     const labels = modern ? {
-      "org.opencontainers.image.revision": head,
+      "org.opencontainers.image.revision": gitHead,
       "io.pineforge.release.image": "ghcr.io/pineforge-4pass/pineforge-release@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     } : {};
     if (revision !== undefined) labels["org.opencontainers.image.revision"] = revision;
@@ -88,7 +91,7 @@ export function packageState(root, {
   const image_digest = put("manifests", { schemaVersion: 2, manifests: missingArm ? children.slice(0, 1) : children });
   const npm_integrity = sri(tarball);
   responses["https://registry.npmjs.org/@pineforge%2fbacktest-mcp/0.9.40"] = { json: {
-    name: "@pineforge/backtest-mcp", version: "0.9.40", gitHead: head,
+    name: "@pineforge/backtest-mcp", version: "0.9.40", gitHead,
     dist: { tarball: "https://registry.npmjs.org/@pineforge/backtest-mcp/-/backtest-mcp-0.9.40.tgz", integrity: npm_integrity },
   } };
   responses["https://registry.npmjs.org/@pineforge/backtest-mcp/-/backtest-mcp-0.9.40.tgz"] = { base64: tarball.toString("base64") };
@@ -96,12 +99,12 @@ export function packageState(root, {
   responses[`https://raw.githubusercontent.com/pineforge-4pass/pineforge-release/${lock.facts.commit}/facts/facts.json`] = { body: facts };
   return {
     calls: [], responses, image_digest, manifest,
-    api: { [`repos/${repo}/contents/release-lock.json?ref=${head}`]: { content: Buffer.from(JSON.stringify(lock)).toString("base64") } },
+    api: { [`repos/${repo}/contents/release-lock.json?ref=${gitHead}`]: { content: Buffer.from(JSON.stringify(lock)).toString("base64") } },
     // Exact identity oracles use only the literal inputs above and standard
     // checksums, never servedIdentity/previousIdentity/canonical from the SUT.
-    legacy: { legacy: true, npm_version: "0.9.40", npm_integrity, git_head: head, image_digest },
+    legacy: { legacy: true, npm_version: "0.9.40", npm_integrity, git_head: gitHead, image_digest },
     full: {
-      source: head, image_digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      source: gitHead, image_digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
       facts_commit: "5555555555555555555555555555555555555555", facts_sha256: hash(facts),
       deployment_id_sha256: hash(JSON.stringify({ channel: "latest", image: image_digest, integrity: npm_integrity, version: "0.9.40" }) + "\n"),
     },

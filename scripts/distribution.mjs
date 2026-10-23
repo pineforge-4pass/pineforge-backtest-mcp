@@ -130,8 +130,7 @@ export async function previousIdentity(version, consumerImage, ch) {
     const config = await get("blobs", manifest.config.digest);
     assert.equal(config.architecture, arch);
     if (legacy) {
-      const labels = config.config?.Labels;
-      if (labels && Object.hasOwn(labels, "org.opencontainers.image.revision")) assert.equal(labels["org.opencontainers.image.revision"], pkg.gitHead);
+      // Pre-lock images carry the base image's revision label, not the package source.
     } else {
       assert.equal(config.config.Labels["org.opencontainers.image.revision"], pkg.gitHead);
       assert.equal(config.config.Labels["io.pineforge.release.image"], `${lock.image.repository}@${lock.image.digest}`);
