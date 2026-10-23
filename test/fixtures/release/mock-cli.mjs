@@ -6,16 +6,37 @@ const file = process.env.PF_MOCK_STATE;
 const s = JSON.parse(readFileSync(file, "utf8"));
 const tool = basename(process.argv[1]);
 const args = process.argv.slice(2);
-s.calls.push({ tool, args });
+const input = args.includes("--input") ? JSON.parse(readFileSync(0, "utf8")) : undefined;
+s.calls.push({ tool, args, ...(input ? { input } : {}) });
 writeFileSync(file, JSON.stringify(s));
-if (tool === "gh" && args[0] === "api" && s.api) {
+if (tool === "git" && s.git) {
+  const key = JSON.stringify(args);
+  if (!(key in s.git)) { console.error(`unexpected git command: ${key}`); process.exit(2); }
+  if (args[0] === "fetch" && args.length === 3 && /^[0-9a-f]{40}$/.test(args[2])) {
+    s.fetched_sha = args[2];
+    writeFileSync(file, JSON.stringify(s));
+  }
+  process.stdout.write(args.join(" ") === "rev-parse FETCH_HEAD" && s.fetched_sha ? s.fetched_sha : s.git[key]);
+} else if (tool === "gh" && args[0] === "api" && s.api) {
+  if (input) {
+    const key = `${args[args.indexOf("--method") + 1]} ${args[args.indexOf("--method") + 2]}`;
+    if (!(key in (s.mutations ?? {}))) { console.error(`unexpected mutation: ${key}`); process.exit(2); }
+    console.log(JSON.stringify(s.mutations[key]));
+    process.exit(0);
+  }
   const route = args.at(-1);
+  if (route in (s.api_raw ?? {})) { process.stdout.write(s.api_raw[route]); process.exit(0); }
   if (!(route in s.api)) { console.error(`unexpected API route: ${route}`); process.exit(2); }
   console.log(JSON.stringify(s.api[route]));
 } else if (tool === "gh" && args.slice(0, 2).join(" ") === "run download" && s.downloads) {
   const receipt = s.downloads[args[2]];
   if (!receipt) { console.error("missing fixture receipt"); process.exit(2); }
-  writeFileSync(`${args[args.indexOf("--dir") + 1]}/gate-receipt.json`, JSON.stringify(receipt));
+  const dir = args[args.indexOf("--dir") + 1];
+  if (s.download_files?.[args[2]]) {
+    for (const [name, body] of Object.entries(s.download_files[args[2]])) writeFileSync(`${dir}/${name}`, body);
+  } else writeFileSync(`${dir}/gate-receipt.json`, JSON.stringify(receipt));
+} else if (tool === "gh" && args.slice(0, 2).join(" ") === "release download" && s.release_files?.[args[2]]) {
+  for (const [name, body] of Object.entries(s.release_files[args[2]])) writeFileSync(`${args[args.indexOf("--dir") + 1]}/${name}`, body);
 } else if (tool === "gh" && args.slice(0, 2).join(" ") === "release download" && s.manifest) {
   writeFileSync(`${args[args.indexOf("--dir") + 1]}/release-manifest.json`, s.manifest);
 } else if (tool === "gh" && args[0] === "api") {

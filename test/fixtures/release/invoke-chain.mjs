@@ -12,6 +12,16 @@ try {
   if (name === "latestGate") {
     assert.equal(typeof consumer.latestGate, "function", "latestGate must be testable");
     value = consumer.latestGate(pr);
+  } else if (name === "receive" || name === "advance") {
+    assert.equal(typeof consumer[name], "function", `${name} must be testable`);
+    // Keep the wire result parseable while retaining coordinator diagnostics.
+    const log = console.log;
+    console.log = (...args) => console.error(...args);
+    try { await consumer[name](); value = "done"; }
+    finally { console.log = log; }
+  } else if (name === "landedPR") {
+    assert.equal(typeof consumer.landedPR, "function", "landedPR must bind the current VERSION");
+    value = consumer.landedPR(state.merged_prs, state.lock, "0.9.42");
   } else {
     assert.equal(name, "previousIdentity");
     assert.equal(typeof distribution.previousIdentity, "function", "previousIdentity must be testable");
