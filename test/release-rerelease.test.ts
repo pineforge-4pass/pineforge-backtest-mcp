@@ -99,7 +99,7 @@ for (const [label, patch] of [
     refused((s) => { s.api[runsRoute] = [{ workflow_runs: [{ ...publisher(), ...patch }] }]; });
   });
 }
-test("MCP-136: absent publisher opens no PR and preserves same-tag dispatch", () => {
+test("MCP-136: absent publisher opens no PR and pushes nothing", () => {
   refused((s) => { s.api[runsRoute] = [{ workflow_runs: [] }]; });
 });
 test("MCP-136: newest matching publisher wins over an older failure", () => {
@@ -142,6 +142,15 @@ test("MCP-136: tag pointing at another commit is refused", () => {
     s.api[`repos/${repo}/commits/${candidate}/pulls`] = [s.oldPR];
     gitResult(s, ["merge-base", "--is-ancestor", candidate, "origin/main"]);
   }, /only one merged update PR may bind this VERSION/);
+});
+test("MCP-136: full source PR merge differing from the tag inventory is refused", () => {
+  refused((s) => {
+    s.api[`repos/${repo}/pulls/38`] = { ...s.oldPR, merge_commit_sha: newMerge };
+    gitResult(s, ["show", `${newMerge}:VERSION`], "0.9.41\n");
+    gitResult(s, ["show", `${newMerge}:release-lock.json`], s.lockBytes);
+    assert.equal(s.api[`repos/${repo}/commits/${source}/pulls`][0].merge_commit_sha, source);
+    assert.equal(s.oldPR.merge_commit_sha, source);
+  }, /Expected values to be strictly equal:[\s\S]*\+ 'c{40}'[\s\S]*- 'a{40}'/);
 });
 test("MCP-136: lightweight tag is refused", () => {
   refused((s) => { s.api[`repos/${repo}/git/ref/tags/v0.9.41`].object.type = "commit"; }, /re-release requires an annotated tag/);
@@ -204,6 +213,40 @@ for (const order of ["old PR updated newest", "new PR updated newest"]) {
     }
   });
 }
+// These rows call exported advance, bypassing the production CLI catch that
+// writes failed on an assertion; no-receipt assertions describe the function.
+function advanceRefused(change: Change, error: RegExp) {
+  const actual = invoke("advance", (s, root) => {
+    openRerelease(s, root);
+    change(s, root);
+  });
+  assert.equal(actual.result.status, 1);
+  assert.match(actual.output.error, error);
+  assert.equal(actual.state.calls.filter((c: any) => c.tool === "gh" &&
+    c.args[0] === "api" && c.args[1] === "--method" && c.args[2] === "PUT" &&
+    /\/pulls\/[0-9]+\/(merge|update-branch)$/.test(c.args[3])).length, 0);
+  assert.equal(pushes(actual.state).length, 0);
+  assert.equal(actual.state.calls.filter((c: any) => c.tool === "git" && c.args[0] === "commit").length, 0);
+  assert.ok(!existsSync(join(actual.root, ".release-ci/release-receipt.json")));
+}
+test("MCP-136: advance refuses a human opener on an otherwise valid App-authored re-release", () => {
+  advanceRefused((s) => {
+    // Keep the open inventory valid; only the fetched full PR names a human.
+    s.api[`repos/${repo}/pulls/42`] = { ...s.openPR, user: { login: "release-maintainer" } };
+  }, /re-release PR opener must be the release bot/);
+});
+test("MCP-136: advance refuses a re-release marker naming another bot", () => {
+  advanceRefused((s) => {
+    s.api[`repos/${repo}/pulls/42`] = {
+      ...s.openPR, body: s.openPR.body.replace(`"bot":"${bot}"`, '"bot":"another-release[bot]"'),
+    };
+  }, /re-release marker bot must be the release bot/);
+});
+test("MCP-136: advance refuses re-release after the current publisher succeeds", () => {
+  advanceRefused((s) => {
+    s.api[runsRoute][0].workflow_runs[0].conclusion = "success";
+  }, /current publication no longer permits re-release/);
+});
 test("MCP-136: advance handles the open re-release instead of failing the old tag", () => {
   const actual = invoke("advance", openRerelease);
   assert.equal(actual.result.status, 0, actual.output.error ?? actual.result.stderr);
@@ -237,6 +280,36 @@ test("MCP-136: delayed old publisher failure cannot fail an open re-release", ()
   });
   assert.equal(actual.result.status, 0, actual.output.error ?? actual.result.stderr);
   assert.ok(!existsSync(join(actual.root, ".release-ci/release-receipt.json")));
+  assert.equal(pushes(actual.state).length, 0);
+});
+test("MCP-136: delayed old publisher failure after re-release merge writes no receipt or dispatch", () => {
+  const actual = invoke("advance", (s, root) => {
+    // No open candidate remains; main has the same event at the new VERSION.
+    s.api[`repos/${repo}/pulls/42`] = s.newPR;
+    s.api[`repos/${repo}/pulls?state=closed&base=main&sort=updated&direction=desc&per_page=100`] = [[s.oldPR, s.newPR]];
+    gitResult(s, ["show", "origin/main:VERSION"], "0.9.42\n");
+    writeFileSync(join(root, "event.json"), JSON.stringify({ workflow_run: publisher() }));
+    s.api[`repos/${repo}/actions/runs/201`] = publisher();
+    s.api[`repos/${repo}/actions/workflows/release-pr.yml/runs?event=workflow_dispatch&head_sha=${source}&per_page=100`] = [{ workflow_runs: [] }];
+    gitResult(s, ["fetch", "origin", source]);
+  });
+  assert.equal(actual.result.status, 0, actual.output.error ?? actual.result.stderr);
+  assert.ok(!existsSync(join(actual.root, ".release-ci/release-receipt.json")));
+  assert.equal(actual.state.calls.filter((c: any) => c.tool === "gh" && c.args[0] === "workflow" && c.args[1] === "run").length, 0);
+  assert.equal(pushes(actual.state).length, 0);
+});
+test("MCP-136: current publisher failure without a newer VERSION or open candidate still writes failed", () => {
+  const actual = invoke("advance", (s, root) => {
+    writeFileSync(join(root, "event.json"), JSON.stringify({ workflow_run: publisher() }));
+    s.api[`repos/${repo}/actions/runs/201`] = publisher();
+    s.api[`repos/${repo}/actions/workflows/release-pr.yml/runs?event=workflow_dispatch&head_sha=${source}&per_page=100`] = [{ workflow_runs: [] }];
+    gitResult(s, ["fetch", "origin", source]);
+  });
+  assert.equal(actual.result.status, 0, actual.output.error ?? actual.result.stderr);
+  const receipt = JSON.parse(readFileSync(join(actual.root, ".release-ci/release-receipt.json"), "utf8"));
+  assert.equal(receipt.event_id, actual.state.lock.event_id);
+  assert.equal(receipt.state, "failed");
+  assert.equal(actual.state.calls.filter((c: any) => c.tool === "gh" && c.args[0] === "workflow" && c.args[1] === "run").length, 0);
   assert.equal(pushes(actual.state).length, 0);
 });
 test("MCP-136: superseded lookup preserves the second merged PR's expired report", () => {

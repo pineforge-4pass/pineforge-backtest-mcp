@@ -345,7 +345,7 @@ export async function advance() {
     if (event.path === ".github/workflows/publish.yml" && event.display_title === `Offline publish ${event.head_branch}`) {
       const run = api(`repos/${REPO}/actions/runs/${event.id}`);
       assert.equal(run.path, event.path);
-      const { lock } = trustedPublisher(run);
+      const { lock, tag } = trustedPublisher(run);
       activeLock = lock;
       if (preserveVerifiedReport(run.head_sha)) return;
       if (run.status === "completed" && run.conclusion === "success") ensureFinalReport(run, run.head_branch);
@@ -353,6 +353,9 @@ export async function advance() {
         // A delayed failure wakeup for the old source must not fail a fresh
         // attempt that already has a candidate PR for this same event.
         if (prList().some((p) => marker(p.body).event_id === lock.event_id)) return;
+        // The candidate may already have merged when the old failure arrives.
+        const current = lockAt("origin/main");
+        if (current.event_id === lock.event_id && tag !== `v${git("show", "origin/main:VERSION")}`) return;
         writeReceipt(lock, { state: "failed" });
       }
       // Cancellation is repaired through tagLanded's same-tag reconciliation.
@@ -374,6 +377,8 @@ export async function advance() {
   }
   const current = lockAt("origin/main");
   if (lock.event_id === current.event_id && lock.release_version === current.release_version) {
+    assert.equal(p.user?.login, process.env.RELEASE_BOT_LOGIN, "re-release PR opener must be the release bot");
+    assert.equal(marker(p.body).bot, process.env.RELEASE_BOT_LOGIN, "re-release marker bot must be the release bot");
     // The open PR itself is allowed; no second candidate for this event is.
     assert.equal(prs.filter((q) => marker(q.body).event_id === lock.event_id).length, 1);
     const next = nextVersion(git("show", "origin/main:VERSION"), lock.release_version, git("tag", "-l", "v*").split("\n"));

@@ -84,7 +84,7 @@ export function rereleaseState(root) {
     number: 38, merged: true, merged_at: "2026-10-20T02:00:00Z", merge_commit_sha: source,
     updated_at: "2026-10-23T02:00:00Z", base: { ref: "main", sha: main },
     head: { ref: branch.replace("-r0.9.42", ""), sha: "1111111111111111111111111111111111111111", repo: { full_name: repo } },
-    body: marker(123), state: "closed",
+    body: marker(123), state: "closed", user: { login: bot },
   };
   const openPR = {
     ...oldPR, number: 42, merged: false, merged_at: null, merge_commit_sha: null, state: "open",
