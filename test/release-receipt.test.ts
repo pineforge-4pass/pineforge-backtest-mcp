@@ -137,7 +137,8 @@ test("D2: receipt writer and extended verifier preserve exactly the legacy prede
 });
 for (const [label, identity] of [
   ["invented field", { ...legacy, event_id: lock.event_id }],
-  ["missing digest", { ...legacy, image_digest: undefined }],
+  // The key is absent, not undefined: canonical() refuses an undefined value before the hub check runs.
+  ["missing digest", Object.fromEntries(Object.entries(legacy).filter(([key]) => key !== "image_digest"))],
   ["false legacy marker", { ...legacy, legacy: false }],
   ["legacy preview", legacy],
   ["legacy deployed", legacy],
