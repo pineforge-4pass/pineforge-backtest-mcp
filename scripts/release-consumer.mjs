@@ -45,6 +45,66 @@ export function decision(current, incoming, desired = []) {
   return "new";
 }
 function lockAt(ref) { return JSON.parse(git("show", `${ref}:release-lock.json`)); }
+const bytesAt = (ref, path) => execFileSync("git", ["show", `${ref}:${path}`]);
+const releaseBranch = (lock) => `${PREFIX}${lock.prerelease ? "next" : "stable"}/${lock.release_version}-${lock.manifest.sha256.slice(0, 12)}`;
+function identicalRelease(ref) {
+  for (const path of ["release-lock.json", "release-manifest.json"]) {
+    assert.deepEqual(ref ? bytesAt(ref, path) : readFileSync(path), bytesAt("origin/main", path), `${path} must remain byte-identical to main`);
+  }
+}
+// A repeated event may have several merged PRs. Updated time is not a source
+// binding: select the unique merge that actually installed main's VERSION.
+export function landedPR(rows, lock, version) {
+  const matches = rows.filter((p) => p.merged_at && p.base.ref === "main" && p.head.repo?.full_name === REPO &&
+    p.head.ref.startsWith(PREFIX) && marker(p.body).event_id === lock.event_id)
+    .filter((p) => {
+      assert.match(p.merge_commit_sha, /^[0-9a-f]{40}$/);
+      return lockAt(p.merge_commit_sha).event_id === lock.event_id && git("show", `${p.merge_commit_sha}:VERSION`) === version;
+    });
+  assert.equal(matches.length, 1, "only one merged update PR may bind this VERSION");
+  assert.ok(Number.isSafeInteger(matches[0].number) && matches[0].number > 0, "invalid merged PR number");
+  return matches[0];
+}
+function publishRuns(source, tag) {
+  const runs = pages(`repos/${REPO}/actions/workflows/publish.yml/runs?head_sha=${source}&per_page=100`).flatMap((p) => {
+    assert.ok(Array.isArray(p.workflow_runs), "invalid publisher run inventory");
+    return p.workflow_runs;
+  });
+  for (const run of runs) {
+    assert.ok(Number.isSafeInteger(run.id) && run.id > 0, "invalid publisher run ID");
+    assert.match(run.head_sha, /^[0-9a-f]{40}$/);
+    for (const field of ["head_branch", "event", "display_title", "status"]) assert.equal(typeof run[field], "string", `invalid publisher ${field}`);
+    assert.ok(run.conclusion === null || typeof run.conclusion === "string", "invalid publisher conclusion");
+  }
+  return runs.filter((run) => run.head_sha === source && run.head_branch === tag && ["push", "workflow_dispatch"].includes(run.event) &&
+      run.display_title === `Offline publish ${tag}`)
+    .sort((a, b) => b.id - a.id);
+}
+async function failedPublication(lock) {
+  const version = git("show", "origin/main:VERSION"), tag = `v${version}`;
+  const ref = api(`repos/${REPO}/git/ref/tags/${tag}`).object;
+  assert.equal(ref.type, "tag", "re-release requires an annotated tag");
+  assert.match(ref.sha, /^[0-9a-f]{40}$/);
+  const annotated = api(`repos/${REPO}/git/tags/${ref.sha}`);
+  assert.equal(annotated.object.type, "commit");
+  const source = annotated.object.sha;
+  assert.match(source, /^[0-9a-f]{40}$/);
+  assert.ok(annotated.message.split("\n").includes(`event_id=${lock.event_id}`));
+  git("merge-base", "--is-ancestor", source, "origin/main");
+  const rows = api(`repos/${REPO}/commits/${source}/pulls`);
+  const row = landedPR(rows.filter((p) => p.merge_commit_sha === source), lock, version);
+  const pr = api(`repos/${REPO}/pulls/${row.number}`);
+  assert.equal(pr.merged, true);
+  assert.equal(pr.merge_commit_sha, source);
+  landedPR([pr], lock, version);
+  assert.deepEqual(safePR(pr), lock);
+  const latest = publishRuns(source, tag)[0];
+  if (!latest || latest.status !== "completed" || latest.conclusion !== "failure") return false;
+  // Only an explicit registry 404 proves absence. Transport and API/parse
+  // errors propagate and refuse the delivery; redirects cannot prove absence.
+  const response = await fetch(`https://registry.npmjs.org/@pineforge%2fbacktest-mcp/${version}`, { redirect: "error" });
+  return response.status === 404;
+}
 const jobsFor = (run) => pages(`repos/${REPO}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`).flatMap((p) => p.jobs);
 const artifactsFor = (run) => pages(`repos/${REPO}/actions/runs/${run}/artifacts?per_page=100`).flatMap((p) => p.artifacts);
 function existingSnapshot(run) {
@@ -140,7 +200,7 @@ function trustedPublisher(publisher) {
   verifyManifest(lock, Buffer.from(execFileSync("git", ["show", `${publisher.head_sha}:release-manifest.json`])));
   return { lock, version, tag, pr };
 }
-async function receive() {
+export async function receive() {
   assert.ok(process.env.RELEASE_CHAIN_OWNER, "RELEASE_CHAIN_OWNER is required for release notifications");
   const event = json(process.env.GITHUB_EVENT_PATH);
   assert.equal(event.action, "pineforge-release", "unexpected dispatch type");
@@ -161,19 +221,22 @@ async function receive() {
     console.log("Superseded: bootstrap already consumes this or a newer release"); return;
   }
   const d = decision(current, incoming, desired);
-  if (d !== "new") { console.log(`Release delivery: ${d}; the trusted coordinator reports progress`); return; }
+  const rerelease = d === "duplicate" && current.release_version === incoming.release_version && current.event_id === incoming.event_id &&
+    !desired.some((p) => p.event_id === incoming.event_id) && await failedPublication(current);
+  if (d !== "new" && !rerelease) { console.log(`Release delivery: ${d}; the trusted coordinator reports progress`); return; }
+  const next = nextVersion(git("show", "origin/main:VERSION"), incoming.release_version, git("tag", "-l", "v*").split("\n"));
   const bot = identity();
-  const branch = `${PREFIX}${incoming.prerelease ? "next" : "stable"}/${incoming.release_version}-${incoming.manifest.sha256.slice(0, 12)}`;
+  const branch = `${releaseBranch(incoming)}${rerelease ? `-r${next}` : ""}`;
   // Replays never reset an existing branch or overwrite a maintainer's edits.
   assert.equal(git("ls-remote", "--heads", "origin", `refs/heads/${branch}`), "", "existing branch without open PR requires repair; history preserved");
   git("checkout", "-b", branch, "origin/main");
-  const next = nextVersion(readFileSync("VERSION", "utf8").trim(), incoming.release_version, git("tag", "-l", "v*").split("\n"));
   writeFileSync("VERSION", `${next}\n`);
   write("release-lock.json", incoming);
   writeFileSync("release-manifest.json", manifest);
   execFileSync("node", ["scripts/sync-version.mjs"], { stdio: "inherit" });
+  if (rerelease) identicalRelease();
   git("add", ...ALLOWED);
-  for (const f of git("diff", "--cached", "--name-only").split("\n")) assert.ok(ALLOWED.includes(f));
+  for (const f of git("diff", "--cached", "--name-only").split("\n")) assert.ok(ALLOWED.includes(f), `unexpected staged release file ${f}`);
   git("commit", "-m", `chore(release): ${next} on PineForge ${incoming.release_version}`);
   git("push", "origin", `HEAD:refs/heads/${branch}`);
   const body = `Consume PineForge ${incoming.release_version} with immutable image, package and facts identities.\n\n` +
@@ -231,7 +294,7 @@ function candidateEvidence(p, lock, gate, merge = null) {
     preview: servedIdentity(lock, p.head.sha, { run_id: gate.checks.run_id, run_attempt: gate.checks.run_attempt,
       package_integrity: gate.package.integrity, runtime: gate.runtime }) };
 }
-async function advance() {
+export async function advance() {
   assert.ok(process.env.RELEASE_CHAIN_OWNER, "RELEASE_CHAIN_OWNER is required for release notifications");
   if (restartTerminalRerun()) return;
   if (process.env.PUBLISHER_RUN_ID) { await reportPublication(process.env.PUBLISHER_RUN_ID); return; }
@@ -256,21 +319,27 @@ async function advance() {
           // A previously verified product can never regress, even after a newer
           // product supersedes it. Preserve or finish its landed report first.
           const landed = pages(`repos/${REPO}/pulls?state=closed&base=main&per_page=100`).flat()
-            .find((p) => p.merged_at && p.head.repo?.full_name === REPO && p.head.ref.startsWith(PREFIX) && marker(p.body).event_id === incoming.event_id);
-          if (landed) {
-            const reports = finalReportsFor(landed.merge_commit_sha);
-            if (preserveVerifiedReport(landed.merge_commit_sha)) return;
-            const publishers = pages(`repos/${REPO}/actions/workflows/publish.yml/runs?head_sha=${landed.merge_commit_sha}&per_page=100`).flatMap((p) => p.workflow_runs);
+            .filter((p) => p.merged_at && p.head.repo?.full_name === REPO && p.head.ref.startsWith(PREFIX) && marker(p.body).event_id === incoming.event_id);
+          // An older failed merge must not hide a later verified re-release.
+          let historicalReport = false;
+          for (const merged of landed) {
+            const reports = finalReportsFor(merged.merge_commit_sha);
+            if (preserveVerifiedReport(merged.merge_commit_sha)) return;
+            const publishers = pages(`repos/${REPO}/actions/workflows/publish.yml/runs?head_sha=${merged.merge_commit_sha}&per_page=100`).flatMap((p) => p.workflow_runs);
             const success = publishers.find((r) => r.status === "completed" && r.conclusion === "success" && r.display_title === `Offline publish ${r.head_branch}`);
             if (success) { ensureFinalReport(success, success.head_branch); return; }
             // A historical reporter with expired evidence may already have
             // been collected as verified. Never invent a downgrade for it.
-            if (reports.length) return;
+            if (reports.length) historicalReport = true;
           }
+          if (historicalReport) return;
           writeReceipt(incoming, { state: "superseded" }); return;
         }
-        if (current.event_id === incoming.event_id) { await tagLanded(); return; }
-        if (run.conclusion !== "success") { writeReceipt(incoming, { state: "failed" }); return; }
+        const openRerelease = current.event_id === incoming.event_id && desired.some((p) => p.event_id === incoming.event_id);
+        if (current.event_id === incoming.event_id && !openRerelease) { await tagLanded(); return; }
+        if (run.conclusion !== "success" && !openRerelease) {
+          writeReceipt(incoming, { state: "failed" }); return;
+        }
       }
     }
     if (event.path === ".github/workflows/publish.yml" && event.display_title === `Offline publish ${event.head_branch}`) {
@@ -280,7 +349,12 @@ async function advance() {
       activeLock = lock;
       if (preserveVerifiedReport(run.head_sha)) return;
       if (run.status === "completed" && run.conclusion === "success") ensureFinalReport(run, run.head_branch);
-      else if (run.status === "completed" && !["cancelled", "skipped"].includes(run.conclusion)) writeReceipt(lock, { state: "failed" });
+      else if (run.status === "completed" && !["cancelled", "skipped"].includes(run.conclusion)) {
+        // A delayed failure wakeup for the old source must not fail a fresh
+        // attempt that already has a candidate PR for this same event.
+        if (prList().some((p) => marker(p.body).event_id === lock.event_id)) return;
+        writeReceipt(lock, { state: "failed" });
+      }
       // Cancellation is repaired through tagLanded's same-tag reconciliation.
       if (run.conclusion !== "cancelled" && run.conclusion !== "skipped") return;
     }
@@ -299,7 +373,15 @@ async function advance() {
     }
   }
   const current = lockAt("origin/main");
-  assert.ok(compareVersions(lock.release_version, current.release_version) > 0, "desired release is no longer newer");
+  if (lock.event_id === current.event_id && lock.release_version === current.release_version) {
+    // The open PR itself is allowed; no second candidate for this event is.
+    assert.equal(prs.filter((q) => marker(q.body).event_id === lock.event_id).length, 1);
+    const next = nextVersion(git("show", "origin/main:VERSION"), lock.release_version, git("tag", "-l", "v*").split("\n"));
+    assert.equal(p.head.ref, `${releaseBranch(lock)}-r${next}`);
+    assert.equal(git("show", `${p.head.sha}:VERSION`), next);
+    identicalRelease(p.head.sha);
+    assert.ok(await failedPublication(current), "current publication no longer permits re-release");
+  } else assert.ok(compareVersions(lock.release_version, current.release_version) > 0, "desired release is no longer newer");
   const main = api(`repos/${REPO}/git/ref/heads/main`).object.sha;
   const gate = latestGate(p);
   if (!gate || gate.base_sha !== main) {
@@ -332,8 +414,7 @@ async function tagLanded() {
   const version = git("show", "origin/main:VERSION");
   const tag = `v${version}`;
   const associated = pages(`repos/${REPO}/pulls?state=closed&base=main&sort=updated&direction=desc&per_page=100`).flat();
-  const row = associated.find((p) => p.merged_at && p.head.repo?.full_name === REPO && p.head.ref.startsWith(PREFIX) && marker(p.body).event_id === lock.event_id);
-  assert.ok(row, "only a merged update PR may start publication");
+  const row = landedPR(associated, lock, version);
   const pr = api(`repos/${REPO}/pulls/${row.number}`);
   assert.equal(marker(pr.body).event_id, lock.event_id);
   const source = pr.merge_commit_sha;
@@ -348,8 +429,7 @@ async function tagLanded() {
   const existing = git("tag", "-l", tag);
   if (existing) {
     assert.equal(git("rev-list", "-n", "1", tag), source, "version tag must name the exact merged PR; never rewrite it");
-    const runs = pages(`repos/${REPO}/actions/workflows/publish.yml/runs?head_sha=${source}&per_page=100`).flatMap((p) => p.workflow_runs)
-      .filter((run) => run.head_branch === tag && ["push", "workflow_dispatch"].includes(run.event) && run.display_title === `Offline publish ${tag}`);
+    const runs = publishRuns(source, tag);
     const action = publicationAction(runs);
     const latest = runs.sort((a, b) => b.id - a.id)[0];
     if (action === "report") { ensureFinalReport(latest, tag); return; }
