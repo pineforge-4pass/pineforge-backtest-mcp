@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Test-only external tools. The production distribution script remains intact.
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename } from "node:path";
 const file = process.env.PF_MOCK_STATE;
 const s = JSON.parse(readFileSync(file, "utf8"));
@@ -8,6 +8,7 @@ const tool = basename(process.argv[1]);
 const args = process.argv.slice(2);
 const input = args.includes("--input") ? JSON.parse(readFileSync(0, "utf8")) : undefined;
 s.calls.push({ tool, args, ...(input ? { input } : {}) });
+s.events?.push({ kind: tool, args });
 writeFileSync(file, JSON.stringify(s));
 if (tool === "git" && s.git) {
   const key = JSON.stringify(args);
@@ -48,9 +49,39 @@ if (tool === "git" && s.git) {
   if (args[1] === "create") console.log(s.incident_url);
 } else if (tool === "npm" && args[0] === "--version") console.log(s.cli ?? "11.21.0");
 else if (tool === "npm" && args[0] === "dist-tag" && args[1] === "add") {
+  if (s.npm_tags) {
+    const version = args[2].split("@").at(-1);
+    const tag = args[3];
+    if (s.npm_tags[tag] === version) {
+      console.error(`npm warn dist-tag add ${tag} is already set to version ${version}`);
+      process.exit(0);
+    }
+    if (s.dist_tag_add_stderr) { console.error(s.dist_tag_add_stderr); process.exit(1); }
+    if (s.deny_dist_tag) { console.error("trusted publisher cannot manage dist-tags"); process.exit(1); }
+    s.npm_tags[tag] = version;
+    (s.npm_writes ??= []).push({ operation: "add", tag, version });
+    writeFileSync(file, JSON.stringify(s));
+    process.exit(0);
+  }
   if (s.deny_dist_tag) { console.error("trusted publisher cannot manage dist-tags"); process.exit(1); }
   s.npm_version = args[2].split("@").at(-1);
   writeFileSync(file, JSON.stringify(s));
+} else if (tool === "npm" && args[0] === "dist-tag" && args[1] === "rm" && s.npm_tags) {
+  const error = s.dist_tag_rm_errors?.shift();
+  writeFileSync(file, JSON.stringify(s));
+  if (error) { console.error(error); process.exit(1); }
+  const tag = args[3];
+  if (!Object.hasOwn(s.npm_tags, tag)) { console.error(`npm error dist-tag rm ${tag} is not a dist-tag on @pineforge/backtest-mcp`); process.exit(1); }
+  delete s.npm_tags[tag];
+  (s.npm_writes ??= []).push({ operation: "rm", tag });
+  writeFileSync(file, JSON.stringify(s));
+} else if (tool === "npm" && args[0] === "publish" && s.npm_tags) {
+  s.proof_at_publish = existsSync(".release-ci/oidc-proof.json")
+    ? JSON.parse(readFileSync(".release-ci/oidc-proof.json", "utf8")) : null;
+  s.npm_tags[args[args.indexOf("--tag") + 1]] = s.publish_version;
+  s.published = true;
+  writeFileSync(file, JSON.stringify(s));
+  console.log("Your package is being processed and may take a few minutes to become available.");
 } else if (tool === "docker" && args.slice(0, 3).join(" ") === "buildx imagetools inspect") {
   if (Object.hasOwn(s, "image_inspect_stderr")) {
     process.stderr.write(s.image_inspect_stderr); process.exit(1);

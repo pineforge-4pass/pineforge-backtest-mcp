@@ -59,7 +59,9 @@ let tsChanged = true;
 try {
   const existing = await readFile(TS_FILE, "utf8");
   tsChanged = existing !== tsBody;
-} catch { /* file doesn't exist */ }
+} catch (error) {
+  if (error.code !== "ENOENT") throw error;
+}
 
 if (tsChanged) {
   await writeFile(TS_FILE, tsBody, "utf8");
@@ -68,8 +70,13 @@ if (tsChanged) {
 // server.json: keep the registry `version` and the OCI image tag (`:vX.Y.Z`)
 // aligned with VERSION so a release never publishes mismatched metadata.
 let serverChanged = false;
+let serverRaw;
 try {
-  const serverRaw = await readFile(SERVER_JSON, "utf8");
+  serverRaw = await readFile(SERVER_JSON, "utf8");
+} catch (error) {
+  if (error.code !== "ENOENT") throw error;
+}
+if (serverRaw !== undefined) {
   const server = JSON.parse(serverRaw);
   if (server.version !== version) {
     server.version = version;
@@ -88,7 +95,7 @@ try {
   if (serverChanged) {
     await writeFile(SERVER_JSON, JSON.stringify(server, null, 2) + "\n", "utf8");
   }
-} catch { /* server.json absent — nothing to sync */ }
+}
 
 const tag = (pkgChanged || tsChanged || serverChanged) ? "updated" : "in sync";
 console.error(`[sync-version] ${tag} → ${version}`);

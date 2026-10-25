@@ -125,8 +125,8 @@ function parseArgs(argv) {
 function readStdinLines() {
   try {
     return readFileSync(0, "utf8").split("\n").filter(Boolean);
-  } catch {
-    return [];
+  } catch (error) {
+    throw new Error(`cannot read stdin (${error.code}): ${error.message}`, { cause: error });
   }
 }
 
