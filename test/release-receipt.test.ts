@@ -130,26 +130,59 @@ function legacySample() {
   assert.deepEqual(JSON.parse(canonical(data.receipt)).previous, legacy);
   return data;
 }
-test("D2: validateServedIdentity accepts legacy only with previous true", () => {
+test("D2: validateServedIdentity accepts six-key legacy only with previous true", () => {
   assert.equal(validateServedIdentity(legacy, { previous: true }), legacy);
   const identityShapeRejection = (error: unknown) => {
     assert.ok(error instanceof assert.AssertionError);
     assert.equal(error.code, "ERR_ASSERTION");
     assert.equal(error.operator, "deepStrictEqual");
-    assert.deepEqual(error.actual, ["git_head", "image_digest", "legacy", "npm_integrity", "npm_version"]);
+    assert.deepEqual(error.actual, ["git_head", "image_digest", "image_revision", "legacy", "npm_integrity", "npm_version"]);
     assert.deepEqual(error.expected, ["deployment_id_sha256", "facts_commit", "facts_sha256", "image_digest", "source"]);
     return true;
   };
   assert.throws(() => validateServedIdentity(legacy), identityShapeRejection);
   assert.throws(() => validateServedIdentity(legacy, { previous: false }), identityShapeRejection);
 });
-test("D2: receipt writer and extended verifier preserve exactly the legacy predecessor", () => {
+test("D2: validateServedIdentity accepts a null legacy image revision", () => {
+  const identity = { ...legacy, image_revision: null };
+  assert.equal(validateServedIdentity(identity, { previous: true }), identity);
+});
+const fiveKeyLegacy = Object.fromEntries(Object.entries(legacy).filter(([key]) => key !== "image_revision"));
+for (const [label, identity, operator] of [
+  ["five-key legacy identity", fiveKeyLegacy, "deepStrictEqual"],
+  ["unknown sixth key", { ...fiveKeyLegacy, event_id: lock.event_id }, "deepStrictEqual"],
+  ["extra seventh key", { ...legacy, event_id: lock.event_id }, "deepStrictEqual"],
+  ["39-character image revision", { ...legacy, image_revision: "f05d2565985710f72f56008dd12eaa013ca8a0e" }, "match"],
+  ["uppercase image revision", { ...legacy, image_revision: "F05D2565985710F72F56008DD12EAA013CA8A0EB" }, "match"],
+  ["non-hex image revision", { ...legacy, image_revision: "g05d2565985710f72f56008dd12eaa013ca8a0eb" }, "match"],
+  ["false legacy marker", { ...legacy, legacy: false }, "deepStrictEqual"],
+] as Array<[string, any, string]>) {
+  test(`D2: validateServedIdentity refuses ${label}`, () => {
+    assert.throws(() => validateServedIdentity(identity, { previous: true }), {
+      code: "ERR_ASSERTION", operator,
+    });
+  });
+}
+test("D2: receipt writer and extended verifier preserve exactly the six-key legacy predecessor", () => {
   const result = hubValidate(legacySample());
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout).previous, legacy);
 });
+test("D2: receipt writer and extended verifier preserve a null legacy image revision", () => {
+  const data = sample();
+  const identity = { ...legacy, image_revision: null };
+  data.receipt = buildReceipt(lock, { ...data.receipt, previous: identity });
+  assert.deepEqual(data.receipt.previous, identity);
+  assert.deepEqual(JSON.parse(canonical(data.receipt)).previous, identity);
+  const result = hubValidate(data);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).previous, identity);
+});
 for (const [label, identity] of [
   ["invented field", { ...legacy, event_id: lock.event_id }],
+  ["five-key legacy identity", fiveKeyLegacy],
+  ["unknown sixth key", { ...fiveKeyLegacy, event_id: lock.event_id }],
+  ["malformed image revision", { ...legacy, image_revision: "invalid" }],
   // The key is absent, not undefined: canonical() refuses an undefined value before the hub check runs.
   ["missing digest", Object.fromEntries(Object.entries(legacy).filter(([key]) => key !== "image_digest"))],
   ["false legacy marker", { ...legacy, legacy: false }],
@@ -161,6 +194,8 @@ for (const [label, identity] of [
     const field = label === "legacy preview" ? "preview" : label === "legacy deployed" ? "deployed" : "previous";
     assert.throws(() => buildReceipt(lock, { ...data.receipt, [field]: identity }));
     data.receipt[field] = identity;
-    assert.notEqual(hubValidate(data).status, 0);
+    const result = hubValidate(data);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, label === "malformed image revision" ? /malformed identity/ : /unexpected object fields/);
   });
 }

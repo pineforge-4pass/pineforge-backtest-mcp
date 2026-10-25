@@ -47,7 +47,7 @@ export function gateState(runs = [run], gates = { 101: gate }, runJobs = jobs) {
 const hash = (raw) => createHash("sha256").update(raw).digest("hex");
 const sri = (raw) => `sha512-${createHash("sha512").update(raw).digest("base64")}`;
 export function packageState(root, {
-  modern = false, revision, gitHead = head, packedVersion = "0.9.40",
+  modern = false, revision, revisions = {}, gitHead = head, packedVersion = "0.9.40",
   badArch = false, missingArm = false, invalidLock = false, omitLabels = false, releaseImage,
 } = {}) {
   const lock = JSON.parse(readFileSync(new URL("./release-ready-v1.json", import.meta.url), "utf8"));
@@ -78,7 +78,8 @@ export function packageState(root, {
       "org.opencontainers.image.revision": gitHead,
       "io.pineforge.release.image": "ghcr.io/pineforge-4pass/pineforge-release@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     } : {};
-    if (revision !== undefined) labels["org.opencontainers.image.revision"] = revision;
+    const archRevision = Object.hasOwn(revisions, architecture) ? revisions[architecture] : revision;
+    if (archRevision !== undefined) labels["org.opencontainers.image.revision"] = archRevision;
     if (releaseImage !== undefined) labels["io.pineforge.release.image"] = releaseImage;
     const config = put("blobs", {
       architecture: badArch && architecture === "arm64" ? "amd64" : architecture,
@@ -102,7 +103,8 @@ export function packageState(root, {
     api: { [`repos/${repo}/contents/release-lock.json?ref=${gitHead}`]: { content: Buffer.from(JSON.stringify(lock)).toString("base64") } },
     // Exact identity oracles use only the literal inputs above and standard
     // checksums, never servedIdentity/previousIdentity/canonical from the SUT.
-    legacy: { legacy: true, npm_version: "0.9.40", npm_integrity, git_head: gitHead, image_digest },
+    legacy: { legacy: true, npm_version: "0.9.40", npm_integrity, git_head: gitHead, image_digest,
+      image_revision: omitLabels || revision === undefined ? null : revision },
     full: {
       source: gitHead, image_digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
       facts_commit: "5555555555555555555555555555555555555555", facts_sha256: hash(facts),

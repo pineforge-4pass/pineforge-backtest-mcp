@@ -6,6 +6,7 @@ Sources: pineforge-4pass/pineforge-release/scripts/release_receipts.py and
 scripts/release_contract.py, Consumer receipt contract v1 (2026-10-16).
 The transport/import plumbing and fake GitHub API below are local.
 MCP-135 adds an explicit offline previous-only legacy identity extension below.
+MCP-139 requires its six-key shape, including the observed image_revision.
 The production hub must adopt that extension separately; this fixture does not
 establish that its currently deployed verifier accepts legacy predecessors.
 """
@@ -137,13 +138,15 @@ def check_run(client, repo, evidence, policy, expected_sha):
 
 
 def identity(obj, *, facts_only=False, legacy_previous=False):
-    # MCP-135 additive contract extension; never valid for preview/deployed.
+    # MCP-135/MCP-139 contract extension; never valid for preview/deployed.
     if legacy_previous and type(obj) is dict and obj.get("legacy") is True:
-        keys(obj, ("legacy", "npm_version", "npm_integrity", "git_head", "image_digest"))
+        keys(obj, ("legacy", "npm_version", "npm_integrity", "git_head", "image_digest", "image_revision"))
         match(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:alpha|beta|rc)\.(?:0|[1-9]\d*))?", obj["npm_version"])
         match(r"sha512-[A-Za-z0-9+/]{86}==", obj["npm_integrity"])
         match(COMMIT, obj["git_head"])
         match("sha256:" + SHA, obj["image_digest"])
+        if obj["image_revision"] is not None:
+            match(COMMIT, obj["image_revision"])
         return
     keys(obj, ("source", "image_digest", "facts_commit", "facts_sha256", "deployment_id_sha256"))
     match(COMMIT, obj["source"])

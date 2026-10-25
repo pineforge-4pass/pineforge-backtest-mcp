@@ -69,7 +69,7 @@ test("a prior channel state cannot downgrade latest to a prerelease", () => {
   assert.throws(() => validateChannelState({ ...original, previous: { ...original.previous, npm_version: "0.9.42" } }));
 });
 
-test("D2: channel state accepts only the exact legacy identity and recorded pointers", () => {
+test("D2: channel state accepts only the exact six-key legacy identity and recorded pointers", () => {
   const state = { ...original, previous: { ...original.previous, identity: legacy } };
   assert.deepEqual(validateChannelState(state).previous.identity, legacy);
   for (const identity of [
@@ -85,7 +85,14 @@ test("D2: channel state accepts only the exact legacy identity and recorded poin
   ]) assert.throws(() => validateChannelState({ ...state, previous: { ...state.previous, identity } }));
 });
 
-test("D2: restore uses legacy npm version and image digest and refuses invented identity fields", () => {
+test("D2: channel state refuses a stale five-key legacy identity", () => {
+  const { image_revision, ...stale } = legacy;
+  assert.throws(() => validateChannelState({
+    ...original, previous: { ...original.previous, identity: stale },
+  }), { code: "ERR_ASSERTION", operator: "deepStrictEqual" });
+});
+
+test("D2: restore uses six-key legacy npm version and image digest and refuses invented identity fields", () => {
   const channelState = { ...original, previous: { ...original.previous, identity: legacy } };
   const { result, state, receipt } = restore({}, channelState);
   assert.equal(result.status, 0, result.stderr);

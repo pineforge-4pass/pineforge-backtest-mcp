@@ -123,6 +123,7 @@ export async function previousIdentity(version, consumerImage, ch) {
     return JSON.parse(raw);
   };
   const index = await get("manifests", fixedImage);
+  const legacyRevisions = [];
   for (const arch of ["amd64", "arm64"]) {
     const children = index.manifests.filter((m) => m.platform?.os === "linux" && m.platform.architecture === arch);
     assert.equal(children.length, 1);
@@ -130,14 +131,20 @@ export async function previousIdentity(version, consumerImage, ch) {
     const config = await get("blobs", manifest.config.digest);
     assert.equal(config.architecture, arch);
     if (legacy) {
-      // Pre-lock images carry the base image's revision label, not the package source.
+      // Record the image's observed revision independently of the package source.
+      const labels = config.config?.Labels;
+      const present = labels && Object.hasOwn(labels, "org.opencontainers.image.revision");
+      const revision = present ? labels["org.opencontainers.image.revision"] : null;
+      if (present) assert.match(revision, /^[0-9a-f]{40}$/, "malformed legacy image revision");
+      if (legacyRevisions.length) assert.equal(revision, legacyRevisions[0], "legacy image revision differs between architectures");
+      legacyRevisions.push(revision);
     } else {
       assert.equal(config.config.Labels["org.opencontainers.image.revision"], pkg.gitHead);
       assert.equal(config.config.Labels["io.pineforge.release.image"], `${lock.image.repository}@${lock.image.digest}`);
     }
   }
   if (legacy) return validateServedIdentity({ legacy: true, npm_version: version, npm_integrity: pkg.dist.integrity,
-    git_head: pkg.gitHead, image_digest: fixedImage }, { previous: true });
+    git_head: pkg.gitHead, image_digest: fixedImage, image_revision: legacyRevisions[0] }, { previous: true });
   return servedIdentity(lock, pkg.gitHead, { version, integrity: pkg.dist.integrity, image: fixedImage, channel: ch });
 }
 async function prepare() {

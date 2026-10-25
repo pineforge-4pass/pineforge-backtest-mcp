@@ -40,12 +40,13 @@ export function servedIdentity(lock, source, distribution) {
 export function validateServedIdentity(row, { previous = false } = {}) {
   assert.ok(row && typeof row === "object" && !Array.isArray(row), "expected served identity");
   if (previous && row.legacy === true) {
-    assert.deepEqual(Object.keys(row).sort(), ["legacy", "npm_version", "npm_integrity", "git_head", "image_digest"].sort());
+    assert.deepEqual(Object.keys(row).sort(), ["legacy", "npm_version", "npm_integrity", "git_head", "image_digest", "image_revision"].sort());
     parseVersion(row.npm_version);
     assert.ok(!row.npm_version.startsWith("v"));
     assert.match(row.npm_integrity, /^sha512-[A-Za-z0-9+/]{86}==$/);
     assert.match(row.git_head, /^[0-9a-f]{40}$/);
     assert.match(row.image_digest, /^sha256:[0-9a-f]{64}$/);
+    if (row.image_revision !== null) assert.match(row.image_revision, /^[0-9a-f]{40}$/);
   } else {
     assert.deepEqual(Object.keys(row).sort(), ["source", "image_digest", "facts_commit", "facts_sha256", "deployment_id_sha256"].sort());
     assert.match(row.source, /^[0-9a-f]{40}$/);
