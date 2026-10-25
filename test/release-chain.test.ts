@@ -6,7 +6,9 @@ import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 // @ts-ignore CI fixture module.
-import { gateState, packageState, run, gate, jobs, otherHead, head, oci } from "./fixtures/release/chain-inputs.mjs";
+import {
+  gateState, packageState, run, gate, jobs, otherHead, head, oci, todayGitHead, todayImageRevision,
+} from "./fixtures/release/chain-inputs.mjs";
 
 function invoke(name: string, make: (root: string) => any) {
   const root = mkdtempSync(join(tmpdir(), "pf-chain-test-"));
@@ -126,25 +128,36 @@ test("D1: matching receipt still binds both merge-candidate parents", () => {
   assert.ok(actual.output.error);
 });
 
-test("D2: lockless predecessor has exactly the observed legacy identity", () => {
-  const { output, state } = previous();
+test("D2: TODAY: legacy 0.9.40 with the inherited base-image revision label is accepted", () => {
+  const { output, state } = previous({ gitHead: todayGitHead, revision: todayImageRevision });
   assert.deepEqual(output.value, {
     legacy: true, npm_version: "0.9.40", npm_integrity: state.legacy.npm_integrity,
-    git_head: "1111111111111111111111111111111111111111", image_digest: state.image_digest,
+    git_head: todayGitHead, image_digest: state.image_digest,
   });
+  assert.equal(output.image_revision, todayImageRevision);
   assert.ok(state.calls.some((c: any) => c.tool === "docker" && c.args.at(-1) === `${oci}:v0.9.40`));
   assert.ok(!state.calls.some((c: any) => c.tool === "gh"));
+});
+test("D2: equal per-architecture legacy revisions match the fixture oracle independently of gitHead", () => {
+  const { output, state } = previous({
+    gitHead: todayGitHead, revisions: { amd64: todayImageRevision, arm64: todayImageRevision },
+  });
+  assert.deepEqual(output.value, state.legacy);
+  assert.equal(output.image_revision, todayImageRevision);
+  assert.notEqual(output.image_revision, output.value.git_head);
+  assert.deepEqual(Object.keys(output.value).sort(), ["git_head", "image_digest", "legacy", "npm_integrity", "npm_version"]);
 });
 test("D2: predecessor with a lock retains the exact full identity", () => {
   previous();
   const { output, state } = previous({ modern: true });
   assert.deepEqual(output.value, state.full);
+  assert.ok(!Object.hasOwn(output, "image_revision"));
+  assert.ok(!Object.hasOwn(output.value, "image_revision"));
   assert.ok(state.calls.some((c: any) => c.tool === "gh" && c.args[0] === "release"));
 });
 for (const [label, mutate, error] of [
   ["missing image tag", (s: any) => { s.missing_image = true; }, /Command failed|manifest unknown/],
   ["consumer image digest mismatch", (s: any) => { s.consumer_image = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"; }, /Expected values/],
-  ["different revision label", (_s: any) => {}, /Expected values/],
   ["absent gitHead", (s: any) => { delete s.responses["https://registry.npmjs.org/@pineforge%2fbacktest-mcp/0.9.40"].json.gitHead; }, /lacks source provenance/],
   ["tarball integrity mismatch", (s: any) => { s.responses["https://registry.npmjs.org/@pineforge%2fbacktest-mcp/0.9.40"].json.dist.integrity = "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="; }, /Expected values/],
   ["image content hash mismatch", (s: any) => { s.responses[`https://ghcr.io/v2/pineforge-4pass/pineforge-backtest-mcp/manifests/${s.image_digest}`].body += "\n"; }, /content hash differs/],
@@ -155,7 +168,6 @@ for (const [label, mutate, error] of [
     previous();
     const actual = invoke("previousIdentity", (root) => {
       const s = packageState(root, {
-        revision: label === "different revision label" ? otherHead : undefined,
         missingArm: label === "missing arm64 child", badArch: label === "wrong config architecture",
       });
       mutate(s);
@@ -165,10 +177,11 @@ for (const [label, mutate, error] of [
     assert.match(actual.output.error, error);
   });
 }
-test("D2: legacy revision label may be present only when it matches gitHead", () => {
+test("D2: legacy predecessor refuses a wrong packed package version", () => {
   previous();
-  const { output, state } = previous({ revision: head });
-  assert.deepEqual(output.value, state.legacy);
+  const actual = invoke("previousIdentity", (root) => packageState(root, { packedVersion: "0.9.39" }));
+  assert.equal(actual.result.status, 1);
+  assert.match(actual.output.error, /Expected values/);
 });
 test("D2: packaged lock with a different source lock cannot fall back to legacy", () => {
   previous();
@@ -190,8 +203,49 @@ test("D2: a malformed packaged lock cannot fall back to legacy", () => {
 test("D2: absent legacy image labels are accepted without inventing provenance", () => {
   previous();
   const { output, state } = previous({ omitLabels: true });
-  assert.deepEqual(output.value, state.legacy);
+  assert.deepEqual(output.value, {
+    legacy: true, npm_version: "0.9.40", npm_integrity: state.legacy.npm_integrity,
+    git_head: head, image_digest: state.image_digest,
+  });
+  assert.equal(output.image_revision, null);
 });
+test("D2: absent legacy revision keys in both Labels maps record null", () => {
+  const { output, state } = previous();
+  assert.deepEqual(output.value, {
+    legacy: true, npm_version: "0.9.40", npm_integrity: state.legacy.npm_integrity,
+    git_head: head, image_digest: state.image_digest,
+  });
+  assert.equal(output.image_revision, null);
+});
+test("D2: null Labels maps in both legacy configs record null", () => {
+  const { output, state } = previous({ nullLabels: true });
+  assert.deepEqual(output.value, state.legacy);
+  assert.equal(output.image_revision, null);
+});
+test("D2: missing config keys in both legacy configs record null", () => {
+  const { output, state } = previous({ omitConfig: true });
+  assert.deepEqual(output.value, state.legacy);
+  assert.equal(output.image_revision, null);
+});
+for (const [label, revisions, error] of [
+  ["revision on amd64 only", { amd64: todayImageRevision }, /legacy image revision differs between architectures/],
+  ["revision on arm64 only", { arm64: todayImageRevision }, /legacy image revision differs between architectures/],
+  ["different valid revisions", { amd64: todayImageRevision, arm64: otherHead }, /legacy image revision differs between architectures/],
+  ["39-character revision", { amd64: "f05d2565985710f72f56008dd12eaa013ca8a0e", arm64: "f05d2565985710f72f56008dd12eaa013ca8a0e" }, /malformed legacy image revision/],
+  ["uppercase revision", { amd64: "F05D2565985710F72F56008DD12EAA013CA8A0EB", arm64: "F05D2565985710F72F56008DD12EAA013CA8A0EB" }, /malformed legacy image revision/],
+  ["non-hex revision", { amd64: "g05d2565985710f72f56008dd12eaa013ca8a0eb", arm64: "g05d2565985710f72f56008dd12eaa013ca8a0eb" }, /malformed legacy image revision/],
+  ["malformed arm64 revision", { amd64: todayImageRevision, arm64: "invalid" }, /malformed legacy image revision/],
+  ["explicit null revision label", { amd64: null, arm64: null }, /malformed legacy image revision/],
+  ["surrounding whitespace in revision", { amd64: " f05d2565985710f72f56008dd12eaa013ca8a0eb ", arm64: " f05d2565985710f72f56008dd12eaa013ca8a0eb " }, /malformed legacy image revision/],
+  ["numeric revision label", { amd64: 123, arm64: 123 }, /malformed legacy image revision/],
+  ["empty-string revision label", { amd64: "", arm64: "" }, /malformed legacy image revision/],
+] as Array<[string, any, RegExp]>) {
+  test(`D2: legacy predecessor refuses ${label}`, () => {
+    const actual = invoke("previousIdentity", (root) => packageState(root, { revisions }));
+    assert.equal(actual.result.status, 1);
+    assert.match(actual.output.error, error);
+  });
+}
 for (const [label, options] of [
   ["revision", { revision: otherHead }],
   ["release image", { releaseImage: "ghcr.io/pineforge-4pass/pineforge-release@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" }],

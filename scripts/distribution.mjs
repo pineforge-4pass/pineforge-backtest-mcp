@@ -74,14 +74,20 @@ export function validateChannelState(s) {
   else assert.equal(s.previous.image_digest, null);
   const previous = validateServedIdentity(s.previous.identity, { previous: true });
   if (previous.legacy === true) {
+    assert.deepEqual(Object.keys(s.previous).sort(), ["npm_version", "image_digest", "image_revision", "identity"].sort());
+    if (s.previous.image_revision !== null) assert.match(s.previous.image_revision, /^[0-9a-f]{40}$/);
     assert.equal(previous.npm_version, s.previous.npm_version);
     if (s.channel === "latest") assert.equal(previous.image_digest, s.previous.image_digest);
+  } else {
+    assert.deepEqual(Object.keys(s.previous).sort(), ["npm_version", "image_digest", "identity"].sort());
   }
   return s;
 }
-export async function previousIdentity(version, consumerImage, ch) {
+export async function previousIdentity(version, consumerImage, ch, observation = {}) {
   // Observe the actual rollback distribution before any channel changes. A
   // legacy package records registry facts only, never invented lock provenance.
+  // The separate output object carries the legacy label to the snapshot without
+  // adding any property to the hub-facing identity or changing post-lock returns.
   const pkg = await npmMetadata(version);
   assert.equal(pkg?.name, NPM);
   assert.equal(pkg.version, version);
@@ -123,6 +129,7 @@ export async function previousIdentity(version, consumerImage, ch) {
     return JSON.parse(raw);
   };
   const index = await get("manifests", fixedImage);
+  const legacyRevisions = [];
   for (const arch of ["amd64", "arm64"]) {
     const children = index.manifests.filter((m) => m.platform?.os === "linux" && m.platform.architecture === arch);
     assert.equal(children.length, 1);
@@ -130,15 +137,24 @@ export async function previousIdentity(version, consumerImage, ch) {
     const config = await get("blobs", manifest.config.digest);
     assert.equal(config.architecture, arch);
     if (legacy) {
+      // Record the image's observed revision independently of the package source.
       const labels = config.config?.Labels;
-      if (labels && Object.hasOwn(labels, "org.opencontainers.image.revision")) assert.equal(labels["org.opencontainers.image.revision"], pkg.gitHead);
+      const present = labels && Object.hasOwn(labels, "org.opencontainers.image.revision");
+      const revision = present ? labels["org.opencontainers.image.revision"] : null;
+      if (present) assert.match(revision, /^[0-9a-f]{40}$/, "malformed legacy image revision");
+      if (legacyRevisions.length) assert.equal(revision, legacyRevisions[0], "legacy image revision differs between architectures");
+      legacyRevisions.push(revision);
     } else {
       assert.equal(config.config.Labels["org.opencontainers.image.revision"], pkg.gitHead);
       assert.equal(config.config.Labels["io.pineforge.release.image"], `${lock.image.repository}@${lock.image.digest}`);
     }
   }
-  if (legacy) return validateServedIdentity({ legacy: true, npm_version: version, npm_integrity: pkg.dist.integrity,
-    git_head: pkg.gitHead, image_digest: fixedImage }, { previous: true });
+  if (legacy) {
+    const identity = validateServedIdentity({ legacy: true, npm_version: version, npm_integrity: pkg.dist.integrity,
+      git_head: pkg.gitHead, image_digest: fixedImage }, { previous: true });
+    observation.image_revision = legacyRevisions[0];
+    return identity;
+  }
   return servedIdentity(lock, pkg.gitHead, { version, integrity: pkg.dist.integrity, image: fixedImage, channel: ch });
 }
 async function prepare() {
@@ -172,12 +188,15 @@ async function prepare() {
   assert.ok(compareVersions(version, previousVersion) > 0, "already applied or older channel: no republish; use restoration if needed");
   const previousImage = ch.prerelease ? null : imageDigest(`${OCI}:latest`);
   if (previousImage) assert.equal(imageDigest(`${OCI}:v${previousVersion}`), previousImage, "previous npm/image channels disagree");
-  const previous = await previousIdentity(previousVersion, previousImage, ch.npmDistTag);
+  const observation = {};
+  const previous = await previousIdentity(previousVersion, previousImage, ch.npmDistTag, observation);
   const state = validateChannelState({ role: "offline", event_id: lock.event_id, source_sha: process.env.GITHUB_SHA,
     run_id: Number(process.env.GITHUB_RUN_ID), version, channel: ch.npmDistTag,
     gate_artifact: `offline-gate-${gate.run_id}-${gate.attempt}`,
     package_artifact: `offline-package-${gate.package.run_id}-${gate.package.attempt}`,
-    package_integrity: gate.package.integrity, previous: { npm_version: previousVersion, image_digest: previousImage, identity: previous },
+    package_integrity: gate.package.integrity, previous: {
+      npm_version: previousVersion, image_digest: previousImage, ...observation, identity: previous,
+    },
     pr: pr.number, base_sha: pr.base.sha, head_sha: pr.head.sha, merge_sha: pr.merge_commit_sha });
   save(`${dir}/channel-state.json`, state);
 }
@@ -295,7 +314,10 @@ async function promote() {
   save(`${dir}/distribution-evidence.json`, { event_id: lock.event_id, run_id: Number(process.env.GITHUB_RUN_ID),
     run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT), source: state.source_sha,
     deployed: servedIdentity(lock, state.source_sha, { version: state.version, integrity: state.package_integrity, image: image.digest, channel: state.channel }),
-    previous: state.previous.identity });
+    previous: state.previous.identity,
+    // Internal evidence retains the observed label; reportPublication forwards
+    // only the five-key previous identity to the hub-facing receipt.
+    ...(state.previous.identity.legacy === true ? { image_revision: state.previous.image_revision } : {}) });
   await alert("verified", `Verified npm ${state.channel} and the immutable multi-architecture image. External hosts are not part of this distribution evidence.`);
 }
 async function restore() {

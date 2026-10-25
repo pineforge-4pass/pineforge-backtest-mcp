@@ -130,7 +130,7 @@ function legacySample() {
   assert.deepEqual(JSON.parse(canonical(data.receipt)).previous, legacy);
   return data;
 }
-test("D2: validateServedIdentity accepts legacy only with previous true", () => {
+test("D2: validateServedIdentity accepts five-key legacy only with previous true", () => {
   assert.equal(validateServedIdentity(legacy, { previous: true }), legacy);
   const identityShapeRejection = (error: unknown) => {
     assert.ok(error instanceof assert.AssertionError);
@@ -143,24 +143,67 @@ test("D2: validateServedIdentity accepts legacy only with previous true", () => 
   assert.throws(() => validateServedIdentity(legacy), identityShapeRejection);
   assert.throws(() => validateServedIdentity(legacy, { previous: false }), identityShapeRejection);
 });
-test("D2: receipt writer and extended verifier preserve exactly the legacy predecessor", () => {
+const sixKeyLegacy = { ...legacy, image_revision: "f05d2565985710f72f56008dd12eaa013ca8a0eb" };
+for (const [label, identity, operator] of [
+  ["six-key legacy identity", sixKeyLegacy, "deepStrictEqual"],
+  ["null legacy image revision", { ...legacy, image_revision: null }, "deepStrictEqual"],
+  ["unknown sixth key", { ...legacy, event_id: lock.event_id }, "deepStrictEqual"],
+  ["extra seventh key", { ...sixKeyLegacy, event_id: lock.event_id }, "deepStrictEqual"],
+  ["39-character image revision", { ...legacy, image_revision: "f05d2565985710f72f56008dd12eaa013ca8a0e" }, "deepStrictEqual"],
+  ["uppercase image revision", { ...legacy, image_revision: "F05D2565985710F72F56008DD12EAA013CA8A0EB" }, "deepStrictEqual"],
+  ["non-hex image revision", { ...legacy, image_revision: "g05d2565985710f72f56008dd12eaa013ca8a0eb" }, "deepStrictEqual"],
+  ["false legacy marker", { ...legacy, legacy: false }, "deepStrictEqual"],
+] as Array<[string, any, string]>) {
+  test(`D2: validateServedIdentity refuses ${label}`, () => {
+    assert.throws(() => validateServedIdentity(identity, { previous: true }), {
+      code: "ERR_ASSERTION", operator,
+    });
+  });
+}
+test("D2: receipt writer and vendored hub fixture preserve exactly the five-key legacy predecessor", () => {
   const result = hubValidate(legacySample());
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout).previous, legacy);
 });
 for (const [label, identity] of [
   ["invented field", { ...legacy, event_id: lock.event_id }],
+  ["six-key legacy identity", sixKeyLegacy],
+  ["null legacy image revision", { ...legacy, image_revision: null }],
+  ["unknown sixth key", { ...legacy, event_id: lock.event_id }],
+  ["extra seventh key", { ...sixKeyLegacy, event_id: lock.event_id }],
+  ["malformed image revision", { ...legacy, image_revision: "invalid" }],
   // The key is absent, not undefined: canonical() refuses an undefined value before the hub check runs.
   ["missing digest", Object.fromEntries(Object.entries(legacy).filter(([key]) => key !== "image_digest"))],
   ["false legacy marker", { ...legacy, legacy: false }],
   ["legacy preview", legacy],
   ["legacy deployed", legacy],
 ] as Array<[string, any]>) {
-  test(`D2: receipt writer and extended verifier refuse ${label}`, () => {
+  test(`D2: receipt writer and vendored hub fixture refuse ${label}`, () => {
     const data = legacySample();
     const field = label === "legacy preview" ? "preview" : label === "legacy deployed" ? "deployed" : "previous";
     assert.throws(() => buildReceipt(lock, { ...data.receipt, [field]: identity }));
     data.receipt[field] = identity;
-    assert.notEqual(hubValidate(data).status, 0);
+    const result = hubValidate(data);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, label === "false legacy marker" ? /legacy identity marker must be true/
+      : label === "legacy preview" || label === "legacy deployed" ? /legacy identity is only valid for product offline.previous/
+      : /unexpected object fields/);
   });
 }
+
+test("D2: vendored hub fixture refuses a noncanonical legacy integrity encoding", () => {
+  const data = legacySample();
+  // Same 64 decoded zero bytes as the fixture, but with nonzero base64 pad bits.
+  data.receipt.previous.npm_integrity = "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB==";
+  const result = hubValidate(data);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /noncanonical npm integrity/);
+});
+
+test("D2: vendored hub fixture refuses a legacy previous for a hosted consumer", () => {
+  const data = legacySample();
+  data.receipt.consumer = "hosted";
+  const result = hubValidate(data);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /legacy identity is only valid for product offline.previous/);
+});
