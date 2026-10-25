@@ -49,6 +49,7 @@ const sri = (raw) => `sha512-${createHash("sha512").update(raw).digest("base64")
 export function packageState(root, {
   modern = false, revision, revisions = {}, gitHead = head, packedVersion = "0.9.40",
   badArch = false, missingArm = false, invalidLock = false, omitLabels = false, releaseImage,
+  nullLabels = false, omitConfig = false,
 } = {}) {
   const lock = JSON.parse(readFileSync(new URL("./release-ready-v1.json", import.meta.url), "utf8"));
   // The fixture's measured facts are real bytes, independent of the SUT.
@@ -83,7 +84,7 @@ export function packageState(root, {
     if (releaseImage !== undefined) labels["io.pineforge.release.image"] = releaseImage;
     const config = put("blobs", {
       architecture: badArch && architecture === "arm64" ? "amd64" : architecture,
-      config: omitLabels ? {} : { Labels: labels },
+      ...(omitConfig ? {} : { config: omitLabels ? {} : { Labels: nullLabels ? null : labels } }),
     });
     const digest = put("manifests", { schemaVersion: 2, config: { digest: config }, layers: [] });
     return { digest, platform: { os: "linux", architecture } };
@@ -98,13 +99,19 @@ export function packageState(root, {
   responses["https://registry.npmjs.org/@pineforge/backtest-mcp/-/backtest-mcp-0.9.40.tgz"] = { base64: tarball.toString("base64") };
   responses[`https://ghcr.io/token?scope=repository:${repo}:pull`] = { json: { token: "fixture" } };
   responses[`https://raw.githubusercontent.com/pineforge-4pass/pineforge-release/${lock.facts.commit}/facts/facts.json`] = { body: facts };
+  // Derive the oracle from literal options, independently of the served configs.
+  // Mismatched inputs have no successful legacy identity to compare against.
+  const expectedRevisions = ["amd64", "arm64"].map((architecture) =>
+    omitConfig || omitLabels || nullLabels ? undefined
+      : Object.hasOwn(revisions, architecture) ? revisions[architecture] : revision);
+  const imageRevision = expectedRevisions[0] === expectedRevisions[1] ? expectedRevisions[0] ?? null : undefined;
   return {
     calls: [], responses, image_digest, manifest,
     api: { [`repos/${repo}/contents/release-lock.json?ref=${gitHead}`]: { content: Buffer.from(JSON.stringify(lock)).toString("base64") } },
     // Exact identity oracles use only the literal inputs above and standard
     // checksums, never servedIdentity/previousIdentity/canonical from the SUT.
     legacy: { legacy: true, npm_version: "0.9.40", npm_integrity, git_head: gitHead, image_digest,
-      image_revision: omitLabels || revision === undefined ? null : revision },
+      image_revision: imageRevision },
     full: {
       source: gitHead, image_digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
       facts_commit: "5555555555555555555555555555555555555555", facts_sha256: hash(facts),

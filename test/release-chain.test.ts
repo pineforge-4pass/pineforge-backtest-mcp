@@ -137,6 +137,14 @@ test("D2: TODAY: legacy 0.9.40 with the inherited base-image revision label is a
   assert.ok(state.calls.some((c: any) => c.tool === "docker" && c.args.at(-1) === `${oci}:v0.9.40`));
   assert.ok(!state.calls.some((c: any) => c.tool === "gh"));
 });
+test("D2: equal per-architecture legacy revisions match the fixture oracle independently of gitHead", () => {
+  const { output, state } = previous({
+    gitHead: todayGitHead, revisions: { amd64: todayImageRevision, arm64: todayImageRevision },
+  });
+  assert.deepEqual(output.value, state.legacy);
+  assert.equal(output.value.image_revision, todayImageRevision);
+  assert.notEqual(output.value.image_revision, output.value.git_head);
+});
 test("D2: predecessor with a lock retains the exact full identity", () => {
   previous();
   const { output, state } = previous({ modern: true });
@@ -203,6 +211,16 @@ test("D2: absent legacy revision keys in both Labels maps record null", () => {
     git_head: head, image_digest: state.image_digest, image_revision: null,
   });
 });
+test("D2: null Labels maps in both legacy configs record null", () => {
+  const { output, state } = previous({ nullLabels: true });
+  assert.deepEqual(output.value, state.legacy);
+  assert.equal(output.value.image_revision, null);
+});
+test("D2: missing config keys in both legacy configs record null", () => {
+  const { output, state } = previous({ omitConfig: true });
+  assert.deepEqual(output.value, state.legacy);
+  assert.equal(output.value.image_revision, null);
+});
 for (const [label, revisions, error] of [
   ["revision on amd64 only", { amd64: todayImageRevision }, /legacy image revision differs between architectures/],
   ["revision on arm64 only", { arm64: todayImageRevision }, /legacy image revision differs between architectures/],
@@ -212,6 +230,9 @@ for (const [label, revisions, error] of [
   ["non-hex revision", { amd64: "g05d2565985710f72f56008dd12eaa013ca8a0eb", arm64: "g05d2565985710f72f56008dd12eaa013ca8a0eb" }, /malformed legacy image revision/],
   ["malformed arm64 revision", { amd64: todayImageRevision, arm64: "invalid" }, /malformed legacy image revision/],
   ["explicit null revision label", { amd64: null, arm64: null }, /malformed legacy image revision/],
+  ["surrounding whitespace in revision", { amd64: " f05d2565985710f72f56008dd12eaa013ca8a0eb ", arm64: " f05d2565985710f72f56008dd12eaa013ca8a0eb " }, /malformed legacy image revision/],
+  ["numeric revision label", { amd64: 123, arm64: 123 }, /malformed legacy image revision/],
+  ["empty-string revision label", { amd64: "", arm64: "" }, /malformed legacy image revision/],
 ] as Array<[string, any, RegExp]>) {
   test(`D2: legacy predecessor refuses ${label}`, () => {
     const actual = invoke("previousIdentity", (root) => packageState(root, { revisions }));
