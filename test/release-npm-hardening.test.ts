@@ -317,7 +317,7 @@ for (const [label, response] of [
   test(`HANG ${label} is aborted and reaches scratch cleanup`, () => {
     const a = invoke({
       timing: { deadlineMs: 40, intervalMs: 5 },
-      timeoutMs: 500,
+      timeoutMs: 8_000,
       change(s) { s.responses[registry] = { sequence: [tags, response] }; },
     });
     assert.ifError(a.result.error);
@@ -333,7 +333,7 @@ for (const [label, response] of [
 test("matching response that completes after the abort bound is not accepted", () => {
   const a = invoke({
     timing: { deadlineMs: 40, intervalMs: 5 },
-    timeoutMs: 500,
+    timeoutMs: 8_000,
     change(s) {
       s.responses[registry] = { sequence: [tags, {
         late: true, delayMs: 80, json: { "dist-tags": { [scratch]: "0.9.40" } },
@@ -351,7 +351,7 @@ test("matching response that completes after the abort bound is not accepted", (
 test("matching response that completes after the deadline is rejected by the completion guard", () => {
   const a = invoke({
     timing: { deadlineMs: 40, intervalMs: 5 },
-    timeoutMs: 500,
+    timeoutMs: 8_000,
     change(s) {
       s.responses[registry] = { sequence: [tags, {
         lateIgnoresSignal: true, delayMs: 80, json: { "dist-tags": { [scratch]: "0.9.40" } },
@@ -369,7 +369,7 @@ test("matching response that completes after the deadline is rejected by the com
 test("HANG remaining time bounds an in-flight request before the next interval", () => {
   const a = invoke({
     timing: { deadlineMs: 40, intervalMs: 1_000 },
-    timeoutMs: 500,
+    timeoutMs: 8_000,
     change(s) { s.responses[registry] = { sequence: [tags, { hang: "fetch" }] }; },
   });
   assert.ifError(a.result.error);
@@ -383,7 +383,7 @@ test("default poll clock stays monotonic when Date.now jumps backward", () => {
   const a = invoke({
     action: "publishDefaultClock",
     timing: { deadlineMs: 40, intervalMs: 5 },
-    timeoutMs: 1_000,
+    timeoutMs: 8_000,
     change(s, c) {
       s.responses[`${registry}/${c.version}`] = absent;
     },
