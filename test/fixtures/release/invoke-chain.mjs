@@ -1,6 +1,8 @@
 // CI-only entry point: exercise real helpers and external mock transports.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import * as consumer from "../../../scripts/release-consumer.mjs";
 import * as distribution from "../../../scripts/distribution.mjs";
 import { pr } from "./chain-inputs.mjs";
@@ -26,6 +28,29 @@ try {
   } else if (name === "existingImage") {
     assert.equal(typeof distribution.existingImage, "function", "existingImage must be testable");
     value = distribution.existingImage(state.image_ref);
+  } else if (name === "publishNpm") {
+    let elapsed = 0;
+    const timing = {
+      now: () => elapsed,
+      sleep: async (ms) => {
+        elapsed += ms;
+        const current = JSON.parse(readFileSync(process.env.PF_MOCK_STATE, "utf8"));
+        (current.sleeps ??= []).push(ms);
+        current.elapsed = elapsed;
+        writeFileSync(process.env.PF_MOCK_STATE, JSON.stringify(current));
+      },
+    };
+    if (typeof distribution.publishNpm === "function") await distribution.publishNpm(timing);
+    else {
+      // Red-case runs on the original script must exercise its real CLI, not
+      // fail just because that revision did not yet export publishNpm.
+      const output = execFileSync(process.execPath, [fileURLToPath(new URL("../../../scripts/distribution.mjs", import.meta.url)), "npm"], { encoding: "utf8" });
+      process.stderr.write(output);
+    }
+    value = "published";
+  } else if (name === "npmScratchTag") {
+    assert.equal(typeof distribution.npmScratchTag, "function", "npmScratchTag must be testable");
+    value = distribution.npmScratchTag(...state.scratch_inputs);
   } else {
     assert.equal(name, "previousIdentity");
     assert.equal(typeof distribution.previousIdentity, "function", "previousIdentity must be testable");

@@ -38,11 +38,38 @@ export function existingImage(ref) {
     throw e;
   }
 }
-async function npmMetadata(version = "") {
+async function npmMetadata(version = "", { rejectNull = false } = {}) {
   const response = await fetch(`https://registry.npmjs.org/@pineforge%2fbacktest-mcp${version ? `/${version}` : ""}`);
   if (response.status === 404) return null;
   assert.equal(response.status, 200, `npm registry HTTP ${response.status}`);
-  return response.json();
+  const metadata = await response.json();
+  // Only the explicit 404 above may signal absence to a publication poll.
+  // Other callers retain their existing metadata semantics.
+  if (rejectNull) assert.notEqual(metadata, null, "npm registry HTTP 200 returned null metadata");
+  return metadata;
+}
+export const NPM_POLL_INTERVAL_MS = 10_000;
+export const NPM_POLL_DEADLINE_MS = 10 * 60_000;
+export async function pollNpmMetadata(version, accept, description, {
+  now = Date.now, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+} = {}) {
+  const deadline = now() + NPM_POLL_DEADLINE_MS;
+  for (;;) {
+    const metadata = await npmMetadata(version, { rejectNull: true });
+    if (accept(metadata)) return metadata;
+    const remaining = deadline - now();
+    assert.ok(remaining > 0, `${description}: not visible by deadline ${NPM_POLL_DEADLINE_MS} ms (at ${deadline})`);
+    await sleep(Math.min(NPM_POLL_INTERVAL_MS, remaining));
+  }
+}
+export function npmScratchTag(state, candidate, runId = process.env.GITHUB_RUN_ID, attempt = process.env.GITHUB_RUN_ATTEMPT) {
+  assert.match(runId ?? "", /^[1-9][0-9]*$/, "scratch proof requires a valid run ID");
+  assert.match(attempt ?? "", /^[1-9][0-9]*$/, "scratch proof requires a valid run attempt");
+  // The alphabetic prefix cannot be a semver range; numeric IDs cannot inject
+  // separators or escape into any of the real distribution tags.
+  const scratch = `oidc-proof-${runId}-${attempt}`;
+  assert.ok(![state.channel, "latest", "next", candidate].includes(scratch), "scratch proof must not touch a distribution tag");
+  return scratch;
 }
 function imageDigest(ref) {
   const text = docker("buildx", "imagetools", "inspect", ref);
@@ -246,22 +273,48 @@ async function publishImage() {
   const receipt = { role: "offline", event_id: lock.event_id, version, digest: imageDigest(fixed), children: refs };
   save(`${dir}/image-publication.json`, receipt);
 }
-async function publishNpm() {
+export async function publishNpm(timing = {}) {
   const lock = readLock("release-lock.json", { ready: true }); desired(lock);
   const state = validateChannelState(json(`${dir}/offline-channels/channel-state.json`));
   const pkg = json(`${dir}/offline-package/package.json`);
   assert.equal(integrity(`${dir}/offline-package/${pkg.tar}`), state.package_integrity);
   oidc();
-  assert.equal((await npmMetadata())["dist-tags"][state.channel], state.previous.npm_version, "channel moved before OIDC proof; refusing to restore a newer publication");
-  // A real no-change restoration proves this workflow's exact OIDC dist-tag
-  // operation BEFORE publication. A missing permission fails closed here.
-  cmd("npm", "dist-tag", "add", `${NPM}@${state.previous.npm_version}`, state.channel);
-  assert.equal((await npmMetadata())["dist-tags"][state.channel], state.previous.npm_version);
-  save(`${dir}/oidc-proof.json`, { cli: "11.21.0", operation: "npm dist-tag add", authentication: "github-oidc", channel: state.channel, restored_version: state.previous.npm_version, run_id: process.env.GITHUB_RUN_ID });
+  const metadata = await npmMetadata();
+  assert.equal(metadata["dist-tags"][state.channel], state.previous.npm_version, "channel moved before OIDC proof; refusing to restore a newer publication");
+  const candidate = `candidate-${lock.manifest.sha256.slice(0, 12)}`;
+  const scratch = npmScratchTag(state, candidate);
+  assert.ok(!Object.hasOwn(metadata["dist-tags"], scratch), `scratch tag ${scratch} already exists; refusing a no-op OIDC proof`);
+  // An absent scratch tag forces npm to authorise a PUT, without touching any
+  // channel. An add failure propagates npm's stderr before publication.
+  cmd("npm", "dist-tag", "add", `${NPM}@${state.previous.npm_version}`, scratch);
+  try {
+    await pollNpmMetadata("", (m) => m?.["dist-tags"]?.[scratch] === state.previous.npm_version,
+      `npm scratch tag ${scratch} present at ${state.previous.npm_version}`, timing);
+    cmd("npm", "dist-tag", "rm", NPM, scratch);
+    await pollNpmMetadata("", (m) => m !== null && m["dist-tags"] && !Object.hasOwn(m["dist-tags"], scratch),
+      `npm scratch tag ${scratch} absent after rm`, timing);
+  } catch (error) {
+    let cleanup;
+    try {
+      cmd("npm", "dist-tag", "rm", NPM, scratch);
+      cleanup = "succeeded";
+    } catch (cleanupError) {
+      cleanup = `failed: ${cleanupError.message}`;
+    }
+    throw new Error(`npm OIDC proof failed; scratch tag ${scratch} may be left behind; best-effort rm ${cleanup}; ${error.message}`, { cause: error });
+  }
+  save(`${dir}/oidc-proof.json`, { cli: "11.21.0", operation: "npm dist-tag add + rm (scratch)", authentication: "github-oidc",
+    scratch_tag: scratch, channel: state.channel, previous: state.previous.npm_version, restored_version: state.previous.npm_version,
+    run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT });
   const existing = await npmMetadata(state.version);
   if (existing) assert.equal(existing.dist.integrity, state.package_integrity, "published npm version has different bytes");
-  else cmd("npm", "publish", `${dir}/offline-package/${pkg.tar}`, "--ignore-scripts", "--access=public", "--tag", `candidate-${lock.manifest.sha256.slice(0, 12)}`);
-  assert.equal((await npmMetadata(state.version))?.dist.integrity, state.package_integrity, "npm artifact verification failed");
+  else cmd("npm", "publish", `${dir}/offline-package/${pkg.tar}`, "--ignore-scripts", "--access=public", "--tag", candidate);
+  const published = await pollNpmMetadata(state.version, (m) => {
+    if (m === null) return false;
+    assert.equal(m.dist?.integrity, state.package_integrity, "npm artifact verification failed");
+    return true;
+  }, `npm artifact ${state.version}`, timing);
+  assert.equal(published?.dist.integrity, state.package_integrity, "npm artifact verification failed");
 }
 async function registry(required) {
   const server = json("server.json");
