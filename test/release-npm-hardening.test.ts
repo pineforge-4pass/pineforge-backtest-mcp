@@ -348,6 +348,24 @@ test("matching response that completes after the abort bound is not accepted", (
   assert.equal(removals(a).length, 1);
 });
 
+test("matching response that completes after the deadline is rejected by the completion guard", () => {
+  const a = invoke({
+    timing: { deadlineMs: 40, intervalMs: 5 },
+    timeoutMs: 500,
+    change(s) {
+      s.responses[registry] = { sequence: [tags, {
+        lateIgnoresSignal: true, delayMs: 80, json: { "dist-tags": { [scratch]: "0.9.40" } },
+      }] };
+    },
+  });
+  assert.ifError(a.result.error);
+  failedBeforePublish(a);
+  assert.match(a.output.error, /response arrived after deadline/);
+  assert.match(a.output.error, /deadline 40 ms/);
+  assert.deepEqual(a.state.sleeps, []);
+  assert.equal(removals(a).length, 1);
+});
+
 test("HANG remaining time bounds an in-flight request before the next interval", () => {
   const a = invoke({
     timing: { deadlineMs: 40, intervalMs: 1_000 },

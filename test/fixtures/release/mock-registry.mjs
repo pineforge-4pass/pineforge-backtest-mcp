@@ -2,9 +2,14 @@
 import { readFileSync, writeFileSync } from "node:fs";
 function pendingUntilAbort(signal) {
   return new Promise((resolve, reject) => {
+    const keepalive = setInterval(() => {}, 60_000);
+    const abort = () => {
+      clearInterval(keepalive);
+      reject(signal.reason);
+    };
     if (!signal) return;
-    if (signal.aborted) { reject(signal.reason); return; }
-    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    if (signal.aborted) { abort(); return; }
+    signal.addEventListener("abort", abort, { once: true });
   });
 }
 function delayedJson(payload, signal, delayMs) {
@@ -44,6 +49,10 @@ globalThis.fetch = async (input, { signal } = {}) => {
     if (r.late) return {
       status: r.status ?? 200,
       json: () => delayedJson(payload, signal, r.delayMs),
+    };
+    if (r.lateIgnoresSignal) return {
+      status: r.status ?? 200,
+      json: () => delayedJson(payload, undefined, r.delayMs),
     };
     return new Response(r.base64 ? Buffer.from(r.base64, "base64") : r.body ?? JSON.stringify(payload), { status: r.status ?? 200 });
   }
