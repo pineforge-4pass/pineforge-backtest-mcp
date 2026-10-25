@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, createReadStream, mkdtempSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -38,10 +39,11 @@ export function existingImage(ref) {
     throw e;
   }
 }
-async function npmMetadata(version = "", { rejectNull = false } = {}) {
-  const response = await fetch(`https://registry.npmjs.org/@pineforge%2fbacktest-mcp${version ? `/${version}` : ""}`);
+async function npmMetadata(version = "", { rejectNull = false, signal } = {}) {
+  const response = await fetch(`https://registry.npmjs.org/@pineforge%2fbacktest-mcp${version ? `/${version}` : ""}`, { signal });
   if (response.status === 404) return null;
   assert.equal(response.status, 200, `npm registry HTTP ${response.status}`);
+  // The fetch signal also aborts the body stream (undici); Response.json() takes no options.
   const metadata = await response.json();
   // Only the explicit 404 above may signal absence to a publication poll.
   // Other callers retain their existing metadata semantics.
@@ -50,16 +52,36 @@ async function npmMetadata(version = "", { rejectNull = false } = {}) {
 }
 export const NPM_POLL_INTERVAL_MS = 10_000;
 export const NPM_POLL_DEADLINE_MS = 10 * 60_000;
+export const monotonicNow = () => performance.now();
 export async function pollNpmMetadata(version, accept, description, {
-  now = Date.now, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  now = monotonicNow,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  deadlineMs = NPM_POLL_DEADLINE_MS,
+  intervalMs = NPM_POLL_INTERVAL_MS,
 } = {}) {
-  const deadline = now() + NPM_POLL_DEADLINE_MS;
+  const deadline = now() + deadlineMs;
   for (;;) {
-    const metadata = await npmMetadata(version, { rejectNull: true });
-    if (accept(metadata)) return metadata;
     const remaining = deadline - now();
-    assert.ok(remaining > 0, `${description}: not visible by deadline ${NPM_POLL_DEADLINE_MS} ms (at ${deadline})`);
-    await sleep(Math.min(NPM_POLL_INTERVAL_MS, remaining));
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.max(0, remaining));
+    let metadata;
+    try {
+      metadata = await npmMetadata(version, { rejectNull: true, signal: controller.signal });
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new Error(`${description}: request aborted at deadline ${deadlineMs} ms (at ${deadline})`, { cause: error });
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (controller.signal.aborted || now() > deadline) {
+      throw new Error(`${description}: response arrived after deadline ${deadlineMs} ms (at ${deadline})`);
+    }
+    if (accept(metadata)) return metadata;
+    const remainingAfter = deadline - now();
+    assert.ok(remainingAfter > 0, `${description}: not visible by deadline ${deadlineMs} ms (at ${deadline})`);
+    await sleep(Math.min(intervalMs, remainingAfter));
   }
 }
 export function npmScratchTag(state, candidate, runId = process.env.GITHUB_RUN_ID, attempt = process.env.GITHUB_RUN_ATTEMPT) {

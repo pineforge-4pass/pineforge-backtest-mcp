@@ -39,6 +39,7 @@ try {
         current.elapsed = elapsed;
         writeFileSync(process.env.PF_MOCK_STATE, JSON.stringify(current));
       },
+      ...(state.timing ?? {}),
     };
     if (typeof distribution.publishNpm === "function") await distribution.publishNpm(timing);
     else {
@@ -47,6 +48,11 @@ try {
       const output = execFileSync(process.execPath, [fileURLToPath(new URL("../../../scripts/distribution.mjs", import.meta.url)), "npm"], { encoding: "utf8" });
       process.stderr.write(output);
     }
+    value = "published";
+  } else if (name === "publishDefaultClock") {
+    const wallStart = Date.now();
+    Date.now = () => wallStart - 3_600_000;
+    await distribution.publishNpm(state.timing);
     value = "published";
   } else if (name === "npmScratchTag") {
     assert.equal(typeof distribution.npmScratchTag, "function", "npmScratchTag must be testable");

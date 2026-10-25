@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,7 +28,9 @@ type Options = {
   channel?: "latest" | "next";
   runId?: string;
   attempt?: string;
-  action?: "publishNpm" | "npmScratchTag";
+  action?: "publishDefaultClock" | "publishNpm" | "npmScratchTag";
+  timing?: { deadlineMs?: number; intervalMs?: number };
+  timeoutMs?: number;
   change?: (state: any, context: any) => void;
   noopControl?: boolean;
 };
@@ -70,6 +73,7 @@ function invoke(options: Options = {}) {
       },
       responses: { [registry]: tags, [`${registry}/${version}`]: { sequence: [absent, correct] } },
     };
+    if (options.timing) state.timing = options.timing;
     options.change?.(state, context);
     const file = join(root, "mock.json");
     save("mock.json", state);
@@ -97,7 +101,7 @@ function invoke(options: Options = {}) {
     }
     const result = spawnSync(process.execPath, [
       fileURLToPath(new URL("./fixtures/release/invoke-chain.mjs", import.meta.url)), options.action ?? "publishNpm",
-    ], { cwd: root, env, encoding: "utf8", timeout: 15_000 });
+    ], { cwd: root, env, encoding: "utf8", timeout: options.timeoutMs ?? 15_000 });
     // A deadline mutant must fail the row even when it spins forever.
     assert.ifError(result.error);
     assert.ok(result.stdout.trim(), result.stderr);
@@ -267,6 +271,110 @@ test("RED R8: HTTP 500 throws immediately without widening absence", () => {
   assert.equal(a.state.elapsed, 0);
   assert.deepEqual(a.state.sleeps, []);
   scratchProof(a);
+});
+
+test("real Node fetch signal aborts a stalled HTTP 200 body; Response.json takes no options", { timeout: 10_000 }, async () => {
+  assert.equal(Response.prototype.json.length, 0);
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.flushHeaders();
+    response.write('{"partial":');
+    // Leave the body open: only the client's fetch signal should abort its read.
+  });
+  let guardTimer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<never>((_resolve, reject) => {
+    guardTimer = setTimeout(() => reject(new Error("real Node stalled body exceeded 5000 ms guard")), 5_000);
+  });
+  try {
+    await Promise.race([
+      new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => resolve());
+      }),
+      guard,
+    ]);
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const response = await Promise.race([
+      fetch(`http://127.0.0.1:${address.port}`, { signal: AbortSignal.timeout(200) }),
+      guard,
+    ]);
+    assert.equal(response.status, 200);
+    await assert.rejects(Promise.race([response.json(), guard]), { name: /^(AbortError|TimeoutError)$/ });
+  } finally {
+    clearTimeout(guardTimer);
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+      server.closeAllConnections();
+    });
+  }
+});
+
+for (const [label, response] of [
+  ["fetch before headers", { hang: "fetch" }],
+  ["body after HTTP 200", { status: 200, hang: "body", json: { "dist-tags": { [scratch]: "0.9.40" } } }],
+] as const) {
+  test(`HANG ${label} is aborted and reaches scratch cleanup`, () => {
+    const a = invoke({
+      timing: { deadlineMs: 40, intervalMs: 5 },
+      timeoutMs: 500,
+      change(s) { s.responses[registry] = { sequence: [tags, response] }; },
+    });
+    assert.ifError(a.result.error);
+    assert.equal(a.result.status, 1, a.result.stderr);
+    assert.match(a.output.error, /npm scratch tag .* present/);
+    assert.match(a.output.error, /request aborted/);
+    assert.match(a.output.error, /deadline 40 ms/);
+    assert.deepEqual(a.state.sleeps, []);
+    assert.equal(removals(a).length, 1);
+  });
+}
+
+test("matching response that completes after the abort bound is not accepted", () => {
+  const a = invoke({
+    timing: { deadlineMs: 40, intervalMs: 5 },
+    timeoutMs: 500,
+    change(s) {
+      s.responses[registry] = { sequence: [tags, {
+        late: true, delayMs: 80, json: { "dist-tags": { [scratch]: "0.9.40" } },
+      }] };
+    },
+  });
+  assert.ifError(a.result.error);
+  assert.equal(a.result.status, 1, a.result.stderr);
+  assert.match(a.output.error, /request aborted/);
+  assert.match(a.output.error, /deadline 40 ms/);
+  assert.deepEqual(a.state.sleeps, []);
+  assert.equal(removals(a).length, 1);
+});
+
+test("HANG remaining time bounds an in-flight request before the next interval", () => {
+  const a = invoke({
+    timing: { deadlineMs: 40, intervalMs: 1_000 },
+    timeoutMs: 500,
+    change(s) { s.responses[registry] = { sequence: [tags, { hang: "fetch" }] }; },
+  });
+  assert.ifError(a.result.error);
+  assert.equal(a.result.status, 1, a.result.stderr);
+  assert.match(a.output.error, /request aborted/);
+  assert.match(a.output.error, /deadline 40 ms/);
+  assert.deepEqual(a.state.sleeps, []);
+});
+
+test("default poll clock stays monotonic when Date.now jumps backward", () => {
+  const a = invoke({
+    action: "publishDefaultClock",
+    timing: { deadlineMs: 40, intervalMs: 5 },
+    timeoutMs: 1_000,
+    change(s, c) {
+      s.responses[`${registry}/${c.version}`] = absent;
+    },
+  });
+  assert.ifError(a.result.error);
+  assert.equal(a.result.status, 1, a.result.stderr);
+  assert.match(a.output.error, /npm artifact/);
+  assert.match(a.output.error, /deadline 40 ms/);
+  assert.ok(artifactReads(a).length > 0);
 });
 
 for (const [title, response, message] of [
