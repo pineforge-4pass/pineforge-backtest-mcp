@@ -52,6 +52,12 @@ else if (tool === "npm" && args[0] === "dist-tag" && args[1] === "add") {
   s.npm_version = args[2].split("@").at(-1);
   writeFileSync(file, JSON.stringify(s));
 } else if (tool === "docker" && args.slice(0, 3).join(" ") === "buildx imagetools inspect") {
+  if (Object.hasOwn(s, "image_inspect_stderr")) {
+    process.stderr.write(s.image_inspect_stderr); process.exit(1);
+  }
+  if (Object.hasOwn(s, "image_inspect_stdout")) {
+    process.stdout.write(s.image_inspect_stdout); process.exit(0);
+  }
   if (s.missing_image) { console.error("manifest unknown"); process.exit(1); }
   console.log(`Digest: ${s.image_digest}`);
 } else if (tool === "docker" && args.slice(0, 3).join(" ") === "buildx imagetools create") {

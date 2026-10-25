@@ -41,6 +41,96 @@ function previous(options = {}) {
   return actual;
 }
 
+const inspectedImage = `${oci}:v0.9.43-amd64`;
+function inspectImage(ref: string, response: Record<string, string>) {
+  const actual = invoke("existingImage", () => ({ calls: [], image_ref: ref, ...response }));
+  assert.deepEqual(actual.state.calls, [{
+    tool: "docker", args: ["buildx", "imagetools", "inspect", ref, "--raw"],
+  }]);
+  return actual;
+}
+for (const tag of ["v0.9.43-amd64", "v0.9.43-arm64", "v0.9.43"]) {
+  test(`RED: existingImage accepts real buildx absence for ${tag}`, () => {
+    const ref = `${oci}:${tag}`;
+    const actual = inspectImage(ref, { image_inspect_stderr: `ERROR: ${ref}: not found\n` });
+    assert.equal(actual.result.status, 0, actual.output.error ?? actual.result.stderr);
+    assert.equal(actual.output.value, null);
+  });
+}
+test("existingImage accepts blank lines and trailing whitespace/CR around exact buildx absence", () => {
+  const actual = inspectImage(inspectedImage, {
+    image_inspect_stderr: ` \t\r\nERROR: ${inspectedImage}: not found \t\r\n\n`,
+  });
+  assert.equal(actual.result.status, 0, actual.output.error ?? actual.result.stderr);
+  assert.equal(actual.output.value, null);
+});
+for (const [label, stderr] of [
+  ["different architecture", `ERROR: ${oci}:v0.9.43-arm64: not found\n`],
+  ["different tag", `ERROR: ${oci}:v0.9.44-amd64: not found\n`],
+  ["different repository", "ERROR: ghcr.io/pineforge-4pass/other:v0.9.43-amd64: not found\n"],
+  ["ref prefix", `ERROR: prefix-${inspectedImage}: not found\n`],
+  ["ref suffix", `ERROR: ${inspectedImage}-extra: not found\n`],
+  ["extra unauthorized line", `ERROR: ${inspectedImage}: not found\nERROR: ${inspectedImage}: unauthorized\n`],
+  ["extra transport line", `ERROR: ${inspectedImage}: not found\nERROR: connection reset by peer\n`],
+  ["duplicate absence lines", `ERROR: ${inspectedImage}: not found\nERROR: ${inspectedImage}: not found\n`],
+  ["denied", `ERROR: ${inspectedImage}: denied: not found\n`],
+  ["token", `ERROR: ${inspectedImage}: token: not found\n`],
+  ["missing ERROR prefix", `${inspectedImage}: not found\n`],
+  ["prefix text", `diagnostic ERROR: ${inspectedImage}: not found\n`],
+  ["leading whitespace", ` ERROR: ${inspectedImage}: not found\n`],
+  ["trailing text", `ERROR: ${inspectedImage}: not found.\n`],
+  ["ref inside a sentence", `ERROR: unable to inspect ${inspectedImage}: not found\n`],
+  ["missing docker executable", "docker: command not found\n"],
+  ["missing executable file", "exec: docker: executable file not found in PATH\n"],
+  ["missing local file", "open /tmp/docker-config.json: no such file or directory\n"],
+  ["another repository not found", "repository ghcr.io/pineforge-4pass/other not found\n"],
+  ["empty stderr", ""],
+  ["failed source resolution", "ERROR: failed to resolve source metadata for docker.io/library/missing:latest: docker.io/library/missing:latest: not found\n"],
+  ["legacy unauthorized", "manifest unknown: unauthorized\n"],
+  ["legacy denied", "manifest not found: denied\n"],
+  ["legacy authenticate", "404 Not Found: authenticate\n"],
+  ["legacy token", "manifest unknown: token exchange failed\n"],
+] as Array<[string, string]>) {
+  test(`existingImage throws for ${label}`, () => {
+    const actual = inspectImage(inspectedImage, { image_inspect_stderr: stderr });
+    assert.equal(actual.result.status, 1);
+    assert.match(actual.output.error, /Command failed: docker buildx imagetools inspect/);
+    if (stderr) assert.ok(actual.output.error.includes(stderr));
+    assert.ok(!Object.hasOwn(actual.output, "value"));
+  });
+}
+test("existingImage returns the parsed manifest for an existing tag", () => {
+  const manifest = { schemaVersion: 2, config: { digest: `sha256:${"a".repeat(64)}` } };
+  const actual = inspectImage(inspectedImage, { image_inspect_stdout: JSON.stringify(manifest) });
+  assert.equal(actual.result.status, 0, actual.output.error ?? actual.result.stderr);
+  assert.deepEqual(actual.output.value, manifest);
+});
+test("existingImage throws a parse error for successful non-JSON inspection", () => {
+  const actual = inspectImage(inspectedImage, { image_inspect_stdout: "not-json" });
+  assert.equal(actual.result.status, 1);
+  assert.match(actual.output.error, /JSON|Unexpected token/i);
+  assert.ok(!Object.hasOwn(actual.output, "value"));
+});
+for (const stderr of ["manifest unknown\n", "manifest tag not found\n", "404 Not Found\n"]) {
+  test(`existingImage preserves legacy absence: ${stderr.trim()}`, () => {
+    const actual = inspectImage(inspectedImage, { image_inspect_stderr: stderr });
+    assert.equal(actual.result.status, 0, actual.output.error ?? actual.result.stderr);
+    assert.equal(actual.output.value, null);
+  });
+}
+test("existingImage matches a ref with regex metacharacters only literally", () => {
+  const ref = "repo.name:v1+2";
+  const exact = inspectImage(ref, { image_inspect_stderr: `ERROR: ${ref}: not found\n` });
+  assert.equal(exact.result.status, 0, exact.output.error ?? exact.result.stderr);
+  assert.equal(exact.output.value, null);
+  for (const other of ["repoXname:v1+2", "repo.name:v12", "repoXname:v112"]) {
+    const actual = inspectImage(ref, { image_inspect_stderr: `ERROR: ${other}: not found\n` });
+    assert.equal(actual.result.status, 1);
+    assert.match(actual.output.error, /Command failed: docker buildx imagetools inspect/);
+    assert.ok(!Object.hasOwn(actual.output, "value"));
+  }
+});
+
 test("D1: merged PR with empty pull_requests selects its gate receipt", () => {
   const { output, state } = found();
   assert.equal(output.value.pr, 38);

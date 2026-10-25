@@ -23,6 +23,9 @@ try {
   } else if (name === "landedPR") {
     assert.equal(typeof consumer.landedPR, "function", "landedPR must bind the current VERSION");
     value = consumer.landedPR(state.merged_prs, state.lock, "0.9.42");
+  } else if (name === "existingImage") {
+    assert.equal(typeof distribution.existingImage, "function", "existingImage must be testable");
+    value = distribution.existingImage(state.image_ref);
   } else {
     assert.equal(name, "previousIdentity");
     assert.equal(typeof distribution.previousIdentity, "function", "previousIdentity must be testable");
