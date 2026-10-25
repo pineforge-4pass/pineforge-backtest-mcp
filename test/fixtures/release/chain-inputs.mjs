@@ -110,12 +110,79 @@ export function packageState(root, {
     api: { [`repos/${repo}/contents/release-lock.json?ref=${gitHead}`]: { content: Buffer.from(JSON.stringify(lock)).toString("base64") } },
     // Exact identity oracles use only the literal inputs above and standard
     // checksums, never servedIdentity/previousIdentity/canonical from the SUT.
-    legacy: { legacy: true, npm_version: "0.9.40", npm_integrity, git_head: gitHead, image_digest,
-      image_revision: imageRevision },
+    legacy: { legacy: true, npm_version: "0.9.40", npm_integrity, git_head: gitHead, image_digest },
+    image_revision: imageRevision,
     full: {
       source: gitHead, image_digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
       facts_commit: "5555555555555555555555555555555555555555", facts_sha256: hash(facts),
       deployment_id_sha256: hash(JSON.stringify({ channel: "latest", image: image_digest, integrity: npm_integrity, version: "0.9.40" }) + "\n"),
     },
   };
+}
+
+// Exercise the real distribution CLI with literal registry/GitHub inputs.
+export function distributionState(root, action, options = {}) {
+  const lock = JSON.parse(readFileSync(new URL("./release-ready-v1.json", import.meta.url), "utf8"));
+  const source = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const version = "0.9.41";
+  const candidate = Buffer.from("candidate packed package fixture\n");
+  const package_integrity = sri(candidate);
+  const s = action === "prepare" ? packageState(root, options)
+    : { calls: [], api: {}, responses: {}, image_digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" };
+  const save = (path, value) => writeFileSync(join(root, path), JSON.stringify(value));
+  mkdirSync(join(root, ".release-ci"), { recursive: true });
+  save("release-lock.json", lock);
+  writeFileSync(join(root, "release-manifest.json"), readFileSync(new URL("./manifest-v1.json", import.meta.url)));
+  writeFileSync(join(root, "VERSION"), version + "\n");
+  s.api[`repos/${repo}/contents/release-lock.json?ref=main`] = { content: Buffer.from(JSON.stringify(lock)).toString("base64") };
+  s.api[`repos/${repo}/pulls?state=open&base=main&per_page=100`] = [[]];
+  s.responses["https://registry.npmjs.org/@pineforge%2fbacktest-mcp"] = {
+    json: { "dist-tags": { latest: action === "prepare" ? "0.9.40" : version } },
+  };
+  if (action === "prepare") {
+    const inventoryBytes = readFileSync(new URL("./runtime-inventory.json", import.meta.url));
+    const inventory = JSON.parse(inventoryBytes);
+    mkdirSync(join(root, "test/fixtures/release"), { recursive: true });
+    writeFileSync(join(root, "test/fixtures/release/runtime-inventory.json"), inventoryBytes);
+    mkdirSync(join(root, ".release-ci/offline-gate"));
+    mkdirSync(join(root, ".release-ci/offline-package"));
+    writeFileSync(join(root, ".release-ci/offline-package/candidate.tgz"), candidate);
+    save(".release-ci/offline-gate/gate-receipt.json", {
+      state: "ready", source_sha: source, run_id: "77", attempt: "1", event_id: lock.event_id,
+      package: { tar: "candidate.tgz", integrity: package_integrity, version, run_id: "77", attempt: "1" },
+      runtime: ["amd64", "arm64"].flatMap((arch) => ["npm", "image"].map((mode) => ({
+        arch, mode, source_sha: source, run_id: "77", artifact_attempt: "1", package_integrity,
+        event_id: lock.event_id, hub_image: `${lock.image.repository}@${lock.image.digest}`,
+        image_id: "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        suites: Object.entries(inventory.suites).map(([suite, expected]) => ({
+          suite, expected, passed: expected, skipped: 0, result: "success",
+        })),
+      }))),
+    });
+    s.api[`repos/${repo}/git/ref/tags/v${version}`] = { object: { type: "tag", sha: otherHead } };
+    s.api[`repos/${repo}/git/tags/${otherHead}`] = {
+      object: { sha: source }, message: `Release\n\nevent_id=${lock.event_id}`,
+    };
+    s.api[`repos/${repo}/commits/${source}/pulls`] = [{
+      number: 38, merged_at: "2026-10-25T00:00:00Z", merge_commit_sha: source,
+      base: { ref: "main", sha: otherHead }, head: { ref: "bot/pineforge-release/main/fixture", sha: head },
+      body: `<!-- pineforge-release ${JSON.stringify({ event_id: lock.event_id, base: "main", delivery_run: 77 })} -->`,
+    }];
+  } else {
+    mkdirSync(join(root, ".release-ci/offline-channels"));
+    mkdirSync(join(root, ".release-ci/offline-image-publication"));
+    save(".release-ci/offline-channels/channel-state.json", {
+      role: "offline", event_id: lock.event_id, source_sha: source, run_id: 77,
+      version, channel: "latest", package_integrity, previous: options.previous,
+    });
+    save(".release-ci/offline-image-publication/image-publication.json", {
+      event_id: lock.event_id, version, digest: s.image_digest,
+    });
+    s.responses[`https://registry.npmjs.org/@pineforge%2fbacktest-mcp/${version}`] = {
+      json: { dist: { integrity: package_integrity } },
+    };
+    s.api[`repos/${repo}/issues?state=all&per_page=100`] = [[]];
+    s.incident_url = "https://github.com/pineforge-4pass/pineforge-backtest-mcp/issues/123";
+  }
+  return s;
 }

@@ -43,6 +43,9 @@ if (tool === "git" && s.git) {
   console.log(JSON.stringify({ path: s.workflow ?? ".github/workflows/publish.yml", event: "push", head_sha: "b".repeat(40) }));
 } else if (tool === "gh" && args[0] === "release") {
   // Recorded previous GitHub Latest pointer restoration.
+} else if (tool === "gh" && args[0] === "issue" && s.incident_url) {
+  // Promotion's incident notification stays inside the mock transport.
+  if (args[1] === "create") console.log(s.incident_url);
 } else if (tool === "npm" && args[0] === "--version") console.log(s.cli ?? "11.21.0");
 else if (tool === "npm" && args[0] === "dist-tag" && args[1] === "add") {
   if (s.deny_dist_tag) { console.error("trusted publisher cannot manage dist-tags"); process.exit(1); }

@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 // @ts-ignore workflow module.
 import { validateChannelState } from "../scripts/distribution.mjs";
+// @ts-ignore CI fixture module.
+import { distributionState } from "./fixtures/release/chain-inputs.mjs";
 const original = {
   role: "offline", event_id: `sha256:${"a".repeat(64)}`, source_sha: "b".repeat(40), run_id: 77,
   version: "0.9.41", channel: "latest", previous: {
@@ -15,6 +17,38 @@ const original = {
   },
 };
 const legacy = JSON.parse(readFileSync(new URL("./fixtures/release/legacy-identity.json", import.meta.url), "utf8"));
+const legacyPrevious = {
+  npm_version: "0.9.40",
+  image_digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  image_revision: "f05d2565985710f72f56008dd12eaa013ca8a0eb",
+  identity: legacy,
+};
+function mockEnv(bin: string, file: string) {
+  const env = { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}`, PF_MOCK_STATE: file,
+    NODE_OPTIONS: `--import=${new URL("./fixtures/release/mock-registry.mjs", import.meta.url).href}`,
+    ACTIONS_ID_TOKEN_REQUEST_URL: "https://oidc.invalid", ACTIONS_ID_TOKEN_REQUEST_TOKEN: String(process.pid),
+    RESTORE_SOURCE_RUN: "77", GITHUB_REPOSITORY: "pineforge-4pass/pineforge-backtest-mcp" };
+  delete (env as Record<string, string | undefined>).NODE_AUTH_TOKEN;
+  delete (env as Record<string, string | undefined>).NPM_TOKEN;
+  return env;
+}
+function distribute(action: "prepare" | "promote", options: Record<string, unknown>) {
+  const root = mkdtempSync(join(tmpdir(), "pf-distribute-test-"));
+  const bin = join(root, "bin"); mkdirSync(bin);
+  const state = distributionState(root, action, options);
+  const file = join(root, "mock.json");
+  writeFileSync(file, JSON.stringify(state));
+  const fake = readFileSync(new URL("./fixtures/release/mock-cli.mjs", import.meta.url));
+  for (const tool of ["gh", "npm", "docker"]) writeFileSync(join(bin, tool), fake, { mode: 0o755 });
+  const env = { ...mockEnv(bin, file), GITHUB_REF: "refs/tags/v0.9.41",
+    GITHUB_SHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", GITHUB_RUN_ID: "77", GITHUB_RUN_ATTEMPT: "1" };
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL("../scripts/distribution.mjs", import.meta.url)), action], {
+    cwd: root, env, encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(readFileSync(join(root, ".release-ci", action === "prepare" ? "channel-state.json" : "distribution-evidence.json"), "utf8"));
+  return { output, state };
+}
 function restore(overrides: Record<string, unknown> = {}, channelState = original) {
   const root = mkdtempSync(join(tmpdir(), "pf-restore-test-"));
   const bin = join(root, "bin"); const ci = join(root, ".release-ci"); mkdirSync(bin); mkdirSync(ci);
@@ -26,12 +60,7 @@ function restore(overrides: Record<string, unknown> = {}, channelState = origina
   writeFileSync(join(ci, "offline-image-publication", "image-publication.json"), JSON.stringify({ digest: `sha256:${"c".repeat(64)}` }));
   const fake = readFileSync(new URL("./fixtures/release/mock-cli.mjs", import.meta.url));
   for (const tool of ["gh", "npm", "docker"]) writeFileSync(join(bin, tool), fake, { mode: 0o755 });
-  const env = { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}`, PF_MOCK_STATE: file,
-    NODE_OPTIONS: `--import=${new URL("./fixtures/release/mock-registry.mjs", import.meta.url).href}`,
-    ACTIONS_ID_TOKEN_REQUEST_URL: "https://oidc.invalid", ACTIONS_ID_TOKEN_REQUEST_TOKEN: String(process.pid),
-    RESTORE_SOURCE_RUN: "77", GITHUB_REPOSITORY: "pineforge-4pass/pineforge-backtest-mcp" };
-  delete (env as Record<string, string | undefined>).NODE_AUTH_TOKEN;
-  delete (env as Record<string, string | undefined>).NPM_TOKEN;
+  const env = mockEnv(bin, file);
   const result = spawnSync(process.execPath, [fileURLToPath(new URL("../scripts/distribution.mjs", import.meta.url)), "restore"], { cwd: root, env, encoding: "utf8" });
   return { result, state: JSON.parse(readFileSync(file, "utf8")), receipt: join(ci, "restoration-receipt.json") };
 }
@@ -69,8 +98,8 @@ test("a prior channel state cannot downgrade latest to a prerelease", () => {
   assert.throws(() => validateChannelState({ ...original, previous: { ...original.previous, npm_version: "0.9.42" } }));
 });
 
-test("D2: channel state accepts only the exact six-key legacy identity and recorded pointers", () => {
-  const state = { ...original, previous: { ...original.previous, identity: legacy } };
+test("D2: channel state accepts only the exact five-key legacy identity and recorded pointers", () => {
+  const state = { ...original, previous: legacyPrevious };
   assert.deepEqual(validateChannelState(state).previous.identity, legacy);
   for (const identity of [
     { ...legacy, event_id: original.event_id },
@@ -85,15 +114,75 @@ test("D2: channel state accepts only the exact six-key legacy identity and recor
   ]) assert.throws(() => validateChannelState({ ...state, previous: { ...state.previous, identity } }));
 });
 
-test("D2: channel state refuses a stale five-key legacy identity", () => {
-  const { image_revision, ...stale } = legacy;
+test("D2: channel state accepts a legacy previous with a null observed revision", () => {
+  const state = { ...original, previous: { ...legacyPrevious, image_revision: null } };
+  assert.equal(validateChannelState(state), state);
+});
+
+test("D2: channel state accepts a legacy previous with a 40-hex observed revision", () => {
+  const state = { ...original, previous: legacyPrevious };
+  assert.equal(validateChannelState(state), state);
+  assert.notEqual(state.previous.image_revision, state.previous.identity.git_head);
+});
+
+test("D2: channel state refuses a legacy previous missing image_revision", () => {
   assert.throws(() => validateChannelState({
-    ...original, previous: { ...original.previous, identity: stale },
+    ...original, previous: {
+      npm_version: "0.9.40",
+      image_digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      identity: legacy,
+    },
   }), { code: "ERR_ASSERTION", operator: "deepStrictEqual" });
 });
 
-test("D2: restore uses six-key legacy npm version and image digest and refuses invented identity fields", () => {
-  const channelState = { ...original, previous: { ...original.previous, identity: legacy } };
+for (const [label, revision] of [
+  ["39-character", "f05d2565985710f72f56008dd12eaa013ca8a0e"],
+  ["uppercase", "F05D2565985710F72F56008DD12EAA013CA8A0EB"],
+  ["non-hex", "g05d2565985710f72f56008dd12eaa013ca8a0eb"],
+  ["whitespace", " f05d2565985710f72f56008dd12eaa013ca8a0eb "],
+  ["numeric", 123], ["empty-string", ""], ["undefined", undefined],
+] as Array<[string, unknown]>) {
+  test(`D2: channel state refuses a ${label} observed revision`, () => {
+    assert.throws(() => validateChannelState({
+      ...original, previous: { ...legacyPrevious, image_revision: revision },
+    }), { code: "ERR_ASSERTION", operator: "match" });
+  });
+}
+
+test("D2: channel state refuses an unknown extra key in a legacy previous", () => {
+  assert.throws(() => validateChannelState({
+    ...original, previous: { ...legacyPrevious, invented: true },
+  }), { code: "ERR_ASSERTION", operator: "deepStrictEqual" });
+});
+
+test("D2: channel state refuses a six-key legacy identity even with a recorded revision", () => {
+  assert.throws(() => validateChannelState({
+    ...original, previous: { ...legacyPrevious, identity: { ...legacy, image_revision: legacyPrevious.image_revision } },
+  }), { code: "ERR_ASSERTION", operator: "deepStrictEqual" });
+});
+
+test("D2: channel state accepts a post-lock previous without image_revision", () => {
+  assert.equal(validateChannelState(original), original);
+});
+
+for (const [label, revision] of [
+  ["null", null], ["40-hex", "f05d2565985710f72f56008dd12eaa013ca8a0eb"], ["undefined", undefined],
+] as Array<[string, unknown]>) {
+  test(`D2: channel state refuses a post-lock previous with ${label} image_revision`, () => {
+    assert.throws(() => validateChannelState({
+      ...original, previous: { ...original.previous, image_revision: revision },
+    }), { code: "ERR_ASSERTION", operator: "deepStrictEqual" });
+  });
+}
+
+test("D2: channel state refuses an unknown extra key in a post-lock previous", () => {
+  assert.throws(() => validateChannelState({
+    ...original, previous: { ...original.previous, invented: true },
+  }), { code: "ERR_ASSERTION", operator: "deepStrictEqual" });
+});
+
+test("D2: restore uses legacy pointers from a snapshot with a recorded revision and five-key identity", () => {
+  const channelState = { ...original, previous: legacyPrevious };
   const { result, state, receipt } = restore({}, channelState);
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(state.calls.filter((c: any) => c.tool === "npm" && c.args[0] === "dist-tag").map((c: any) => c.args), [
@@ -104,9 +193,56 @@ test("D2: restore uses six-key legacy npm version and image digest and refuses i
       "ghcr.io/pineforge-4pass/pineforge-backtest-mcp@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],
   ]);
   assert.deepEqual(JSON.parse(readFileSync(receipt, "utf8")).restored.identity, legacy);
+  assert.equal(JSON.parse(readFileSync(receipt, "utf8")).restored.image_revision, "f05d2565985710f72f56008dd12eaa013ca8a0eb");
   const refused = restore({}, { ...channelState, previous: { ...channelState.previous, identity: { ...legacy, event_id: original.event_id } } });
   assert.notEqual(refused.result.status, 0);
   assert.ok(!existsSync(refused.receipt));
   assert.ok(!refused.state.calls.some((c: any) => c.tool === "npm" && c.args[0] === "dist-tag"));
   assert.ok(!refused.state.calls.some((c: any) => c.tool === "docker" && c.args[2] === "create"));
+});
+
+test("D2: prepare records TODAY's image revision beside the five-key legacy identity", () => {
+  const { output, state } = distribute("prepare", {
+    gitHead: "b988217f2aa21b6b772fb723adbc89bd4130c3f5",
+    revisions: {
+      amd64: "f05d2565985710f72f56008dd12eaa013ca8a0eb",
+      arm64: "f05d2565985710f72f56008dd12eaa013ca8a0eb",
+    },
+  });
+  assert.deepEqual(output.previous, {
+    npm_version: "0.9.40", image_digest: state.image_digest,
+    image_revision: "f05d2565985710f72f56008dd12eaa013ca8a0eb", identity: state.legacy,
+  });
+  assert.deepEqual(Object.keys(output.previous.identity).sort(), ["git_head", "image_digest", "legacy", "npm_integrity", "npm_version"]);
+});
+
+test("D2: prepare records null beside the five-key legacy identity when both image labels are absent", () => {
+  const { output, state } = distribute("prepare", { omitLabels: true });
+  assert.deepEqual(output.previous, {
+    npm_version: "0.9.40", image_digest: state.image_digest, image_revision: null, identity: state.legacy,
+  });
+});
+
+test("D2: prepare leaves image_revision absent for a post-lock previous", () => {
+  const { output, state } = distribute("prepare", { modern: true });
+  assert.deepEqual(output.previous, {
+    npm_version: "0.9.40", image_digest: state.image_digest, identity: state.full,
+  });
+});
+
+for (const [label, revision] of [
+  ["40-hex", "f05d2565985710f72f56008dd12eaa013ca8a0eb"], ["null", null],
+] as Array<[string, string | null]>) {
+  test(`D2: promotion evidence carries a ${label} legacy revision beside the five-key identity`, () => {
+    const { output } = distribute("promote", { previous: { ...legacyPrevious, image_revision: revision } });
+    assert.deepEqual(output.previous, legacy);
+    assert.equal(output.image_revision, revision);
+    assert.deepEqual(Object.keys(output).sort(), ["deployed", "event_id", "image_revision", "previous", "run_attempt", "run_id", "source"]);
+  });
+}
+
+test("D2: promotion evidence leaves image_revision absent for a post-lock previous", () => {
+  const { output } = distribute("promote", { previous: original.previous });
+  assert.deepEqual(output.previous, original.previous.identity);
+  assert.deepEqual(Object.keys(output).sort(), ["deployed", "event_id", "previous", "run_attempt", "run_id", "source"]);
 });

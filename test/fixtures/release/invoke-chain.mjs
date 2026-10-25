@@ -9,6 +9,7 @@ const state = JSON.parse(readFileSync(process.env.PF_MOCK_STATE, "utf8"));
 try {
   const name = process.argv[2];
   let value;
+  const observation = {};
   if (name === "latestGate") {
     assert.equal(typeof consumer.latestGate, "function", "latestGate must be testable");
     value = consumer.latestGate(pr);
@@ -25,9 +26,9 @@ try {
   } else {
     assert.equal(name, "previousIdentity");
     assert.equal(typeof distribution.previousIdentity, "function", "previousIdentity must be testable");
-    value = await distribution.previousIdentity("0.9.40", state.consumer_image ?? state.image_digest, "latest");
+    value = await distribution.previousIdentity("0.9.40", state.consumer_image ?? state.image_digest, "latest", observation);
   }
-  console.log(JSON.stringify({ value }));
+  console.log(JSON.stringify({ value, ...observation }));
 } catch (e) {
   console.log(JSON.stringify({ error: e.message }));
   process.exitCode = 1;

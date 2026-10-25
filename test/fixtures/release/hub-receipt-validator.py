@@ -6,13 +6,14 @@ Sources: pineforge-4pass/pineforge-release/scripts/release_receipts.py and
 scripts/release_contract.py, Consumer receipt contract v1 (2026-10-16).
 The transport/import plumbing and fake GitHub API below are local.
 MCP-135 adds an explicit offline previous-only legacy identity extension below.
-MCP-139 requires its six-key shape, including the observed image_revision.
+The production five-key branch is quoted from pineforge-4pass/pineforge-release/scripts/release_receipts.py, sha256 7b1f842c59097a6c86a7445e5dd1da1a0e9333c226e24cbccdafae16e07687b5.
 The production hub must adopt that extension separately; this fixture does not
 establish that its currently deployed verifier accepts legacy predecessors.
 """
 from __future__ import annotations
 
 import datetime as dt
+import base64
 import hashlib
 import io
 import json
@@ -137,16 +138,19 @@ def check_run(client, repo, evidence, policy, expected_sha):
     return run
 
 
-def identity(obj, *, facts_only=False, legacy_previous=False):
-    # MCP-135/MCP-139 contract extension; never valid for preview/deployed.
-    if legacy_previous and type(obj) is dict and obj.get("legacy") is True:
-        keys(obj, ("legacy", "npm_version", "npm_integrity", "git_head", "image_digest", "image_revision"))
+def identity(obj, *, facts_only=False, consumer=None, slot=None):
+    if type(obj) is dict and "legacy" in obj:
+        require(not facts_only and consumer == "offline" and slot == "previous",
+                "legacy identity is only valid for product offline.previous")
+        keys(obj, ("legacy", "npm_version", "npm_integrity", "git_head", "image_digest"))
+        require(obj["legacy"] is True, "legacy identity marker must be true")
         match(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:alpha|beta|rc)\.(?:0|[1-9]\d*))?", obj["npm_version"])
         match(r"sha512-[A-Za-z0-9+/]{86}==", obj["npm_integrity"])
+        encoded = obj["npm_integrity"][len("sha512-"):]
+        require(base64.b64encode(base64.b64decode(encoded, validate=True)).decode("ascii") == encoded,
+                "noncanonical npm integrity")
         match(COMMIT, obj["git_head"])
         match("sha256:" + SHA, obj["image_digest"])
-        if obj["image_revision"] is not None:
-            match(COMMIT, obj["image_revision"])
         return
     keys(obj, ("source", "image_digest", "facts_commit", "facts_sha256", "deployment_id_sha256"))
     match(COMMIT, obj["source"])
@@ -226,8 +230,7 @@ def validate_receipt(client, repo, receipt, event, policy, reporting_run):
         deployed_run = check_run(client, repo, receipt["deploy"], policy["deploy"], pr["merge"])
         require(receipt["timestamp"] >= deployed_run["checked_finished_at"], "served receipt predates verification")
         identity(receipt["deployed"], facts_only=facts_only)
-        identity(receipt["previous"], facts_only=facts_only,
-                 legacy_previous=not facts_only and receipt["consumer"] == "offline")
+        identity(receipt["previous"], facts_only=facts_only, consumer=receipt["consumer"], slot="previous")
         require(receipt["deployed"]["source"] == pr["merge"]
                 and (facts_only or receipt["deployed"]["image_digest"] == event["image"]["digest"]),
                 "actual served source/image differs")

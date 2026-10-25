@@ -132,8 +132,9 @@ test("D2: TODAY: legacy 0.9.40 with the inherited base-image revision label is a
   const { output, state } = previous({ gitHead: todayGitHead, revision: todayImageRevision });
   assert.deepEqual(output.value, {
     legacy: true, npm_version: "0.9.40", npm_integrity: state.legacy.npm_integrity,
-    git_head: todayGitHead, image_digest: state.image_digest, image_revision: todayImageRevision,
+    git_head: todayGitHead, image_digest: state.image_digest,
   });
+  assert.equal(output.image_revision, todayImageRevision);
   assert.ok(state.calls.some((c: any) => c.tool === "docker" && c.args.at(-1) === `${oci}:v0.9.40`));
   assert.ok(!state.calls.some((c: any) => c.tool === "gh"));
 });
@@ -142,13 +143,16 @@ test("D2: equal per-architecture legacy revisions match the fixture oracle indep
     gitHead: todayGitHead, revisions: { amd64: todayImageRevision, arm64: todayImageRevision },
   });
   assert.deepEqual(output.value, state.legacy);
-  assert.equal(output.value.image_revision, todayImageRevision);
-  assert.notEqual(output.value.image_revision, output.value.git_head);
+  assert.equal(output.image_revision, todayImageRevision);
+  assert.notEqual(output.image_revision, output.value.git_head);
+  assert.deepEqual(Object.keys(output.value).sort(), ["git_head", "image_digest", "legacy", "npm_integrity", "npm_version"]);
 });
 test("D2: predecessor with a lock retains the exact full identity", () => {
   previous();
   const { output, state } = previous({ modern: true });
   assert.deepEqual(output.value, state.full);
+  assert.ok(!Object.hasOwn(output, "image_revision"));
+  assert.ok(!Object.hasOwn(output.value, "image_revision"));
   assert.ok(state.calls.some((c: any) => c.tool === "gh" && c.args[0] === "release"));
 });
 for (const [label, mutate, error] of [
@@ -201,25 +205,27 @@ test("D2: absent legacy image labels are accepted without inventing provenance",
   const { output, state } = previous({ omitLabels: true });
   assert.deepEqual(output.value, {
     legacy: true, npm_version: "0.9.40", npm_integrity: state.legacy.npm_integrity,
-    git_head: head, image_digest: state.image_digest, image_revision: null,
+    git_head: head, image_digest: state.image_digest,
   });
+  assert.equal(output.image_revision, null);
 });
 test("D2: absent legacy revision keys in both Labels maps record null", () => {
   const { output, state } = previous();
   assert.deepEqual(output.value, {
     legacy: true, npm_version: "0.9.40", npm_integrity: state.legacy.npm_integrity,
-    git_head: head, image_digest: state.image_digest, image_revision: null,
+    git_head: head, image_digest: state.image_digest,
   });
+  assert.equal(output.image_revision, null);
 });
 test("D2: null Labels maps in both legacy configs record null", () => {
   const { output, state } = previous({ nullLabels: true });
   assert.deepEqual(output.value, state.legacy);
-  assert.equal(output.value.image_revision, null);
+  assert.equal(output.image_revision, null);
 });
 test("D2: missing config keys in both legacy configs record null", () => {
   const { output, state } = previous({ omitConfig: true });
   assert.deepEqual(output.value, state.legacy);
-  assert.equal(output.value.image_revision, null);
+  assert.equal(output.image_revision, null);
 });
 for (const [label, revisions, error] of [
   ["revision on amd64 only", { amd64: todayImageRevision }, /legacy image revision differs between architectures/],
