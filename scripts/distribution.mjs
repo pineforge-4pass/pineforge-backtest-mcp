@@ -26,12 +26,15 @@ async function fileHash(path) {
   for await (const chunk of createReadStream(path)) h.update(chunk);
   return h.digest("hex");
 }
-function existingImage(ref) {
+export function existingImage(ref) {
   try { return JSON.parse(docker("buildx", "imagetools", "inspect", ref, "--raw")); }
   catch (e) {
     // Transport/authentication errors are failures, never evidence of absence.
     const error = String(e.stderr ?? "");
-    if (/manifest unknown|manifest.*not found|404 Not Found/i.test(error) && !/unauthorized|denied|authenticate|token/i.test(error)) return null;
+    const lines = error.split("\n").filter((line) => line.trim() !== "");
+    const escapedRef = ref.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const buildxMissing = lines.length === 1 && new RegExp(`^ERROR: ${escapedRef}: not found\\s*$`).test(lines[0]);
+    if ((/manifest unknown|manifest.*not found|404 Not Found/i.test(error) || buildxMissing) && !/unauthorized|denied|authenticate|token/i.test(error)) return null;
     throw e;
   }
 }
