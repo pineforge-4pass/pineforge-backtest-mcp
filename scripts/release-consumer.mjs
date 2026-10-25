@@ -250,8 +250,16 @@ export async function receive() {
   }
 }
 export function latestGate(p) {
-  const runs = api(`repos/${REPO}/actions/workflows/test.yml/runs?event=pull_request&head_sha=${p.head.sha}&per_page=100`).workflow_runs;
-  // One page (per_page=100), at most one gate download per candidate run.
+  const inventory = [pages(`repos/${REPO}/actions/workflows/test.yml/runs?event=pull_request&head_sha=${p.head.sha}&per_page=100`)].flat();
+  const runs = inventory.flatMap((page) => {
+    assert.ok(Array.isArray(page.workflow_runs), "invalid gate run inventory");
+    return page.workflow_runs;
+  });
+  // GitHub caps filtered run searches at 1,000; never infer absence beyond it.
+  const count = Math.max(runs.length, ...inventory.map((page) => page.total_count ?? runs.length));
+  assert.ok(count <= 1000, `gate run inventory count ${count} exceeds ceiling 1000`);
+  assert.ok(count === runs.length, `incomplete gate run inventory: count ${count}, received ${runs.length}`);
+  // At most one gate download per candidate run.
   // GitHub may clear PR associations after merge; the receipt survives.
   const candidates = runs.filter((r) => r.head_sha === p.head.sha && r.status === "completed" && r.conclusion === "success")
     .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id);
