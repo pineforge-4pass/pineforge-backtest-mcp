@@ -14,7 +14,11 @@ permissions:
 
 jobs:
   update-pr:
-    runs-on: ubuntu-latest
+    # Holds the release App private key: GKE protected runners (gkp-*, group gke-protected),
+    # which require a job environment (checker R13). The existing environment `release-bot`
+    # (deployment branch policy: main) holds the App secrets.
+    environment: release-bot
+    runs-on: gkp-2cpu-4gb-amd64
     steps:
       - name: Mint target-scoped App token
         id: app
