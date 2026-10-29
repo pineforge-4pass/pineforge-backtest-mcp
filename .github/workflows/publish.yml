@@ -37,8 +37,8 @@ jobs:
     outputs:
       prerelease: ${{ steps.channel.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -53,7 +53,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/distribution.mjs prepare
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           include-hidden-files: true
           name: offline-channels-${{ github.run_id }}-${{ github.run_attempt }}
@@ -69,8 +69,8 @@ jobs:
       actions: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -87,7 +87,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/distribution.mjs image
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           include-hidden-files: true
           name: offline-image-publication-${{ github.run_id }}-${{ github.run_attempt }}
@@ -103,8 +103,8 @@ jobs:
       actions: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       # https://docs.npmjs.com/trusted-publishers/#managing-dist-tags-with-trusted-publishing
@@ -117,7 +117,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/distribution.mjs npm
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           include-hidden-files: true
@@ -134,8 +134,8 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: Check immutable Registry entry for replay
@@ -163,8 +163,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: Create GitHub Release with immutable manifest (no Latest movement)
@@ -187,8 +187,8 @@ jobs:
       packages: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - run: npm install -g npm@11.21.0
@@ -209,7 +209,7 @@ jobs:
         run: node scripts/distribution.mjs promote
       - name: Retain internal distribution identity observations
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           include-hidden-files: true
           name: offline-distribution-${{ github.run_id }}-${{ github.run_attempt }}
@@ -230,10 +230,10 @@ jobs:
       id-token: write
     steps:
       # Restoration code is always from trusted main, including manual calls.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: main
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - run: npm install -g npm@11.21.0
@@ -263,7 +263,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RESTORE_SOURCE_RUN: ${{ steps.source.outputs.run }}
         run: node scripts/distribution.mjs restore
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           include-hidden-files: true
@@ -280,10 +280,10 @@ jobs:
       contents: read
       issues: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: main
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: Report the failed step and recovery state
