@@ -248,6 +248,10 @@ test("test and regeneration concurrency namespaces cannot collide", () => {
   ]);
 });
 
+// Only the action name is pinned here: the tag or SHA after the @ is managed by Dependabot.
+const checkoutRef = /^actions\/checkout@\S+$/;
+const setupNodeRef = /^actions\/setup-node@\S+$/;
+
 test("changes uses a shallow merge checkout and contents-read-only classifier", () => {
   const changes = ci.jobs.changes;
   assert.equal(Object.keys(ci.jobs)[0], "changes");
@@ -257,10 +261,12 @@ test("changes uses a shallow merge checkout and contents-read-only classifier", 
   assert.equal(changes.if, undefined, "classification must also run for publisher calls");
   assert.equal(changes.needs, undefined);
   assert.deepEqual(changes.outputs, { docs_only: "${{ steps.docs.outputs.docs_only }}" });
-  assert.deepEqual(changes.steps, [
-    { uses: "actions/checkout@v4", with: { "fetch-depth": 2, "persist-credentials": false } },
-    { id: "docs", run: "node scripts/docs-only.mjs" },
-  ]);
+  assert.ok(Array.isArray(changes.steps));
+  assert.equal(changes.steps.length, 2);
+  const { uses: checkoutUses, ...checkoutStep } = changes.steps[0];
+  assert.match(checkoutUses, checkoutRef);
+  assert.deepEqual(checkoutStep, { with: { "fetch-depth": 2, "persist-credentials": false } });
+  assert.deepEqual(changes.steps[1], { id: "docs", run: "node scripts/docs-only.mjs" });
 });
 
 function readySteps() {
@@ -284,8 +290,8 @@ test("docs-only conditions skip exactly the test/runtime graph and gate receipt"
   assert.equal(ci.jobs.ready.if, "always()");
   const { steps, evidence, gate, upload, docs } = readySteps();
   assert.equal(steps.length, 6);
-  assert.equal(steps[0].uses, "actions/checkout@v4");
-  assert.equal(steps[1].uses, "actions/setup-node@v4");
+  assert.match(steps[0].uses, checkoutRef);
+  assert.match(steps[1].uses, setupNodeRef);
   assert.equal(steps[0].if, undefined);
   assert.equal(steps[1].if, undefined);
   assert.equal(docs.if, docsSkip);
