@@ -24,7 +24,7 @@ jobs:
     outputs:
       docs_only: ${{ steps.docs.outputs.docs_only }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 2
           persist-credentials: false
@@ -36,10 +36,10 @@ jobs:
     if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -64,7 +64,7 @@ jobs:
           npm pack --ignore-scripts --pack-destination .release-ci
           node scripts/release-evidence.mjs package
           git diff --exit-code -- VERSION package.json package-lock.json server.json release-lock.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           include-hidden-files: true
           name: offline-package-${{ github.run_id }}-${{ github.run_attempt }}
@@ -92,17 +92,17 @@ jobs:
       PF_ARCH: ${{ matrix.arch }}
       PF_E2E_CANDIDATE_IMAGE: pineforge-offline-candidate:${{ matrix.arch }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: pineforge-4pass/pineforge-corpus
           ref: a35c7c4adf7ac3cdf9b0b193e8640510d49cfd3c
           path: .release-ci/corpus
           lfs: true
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -141,7 +141,7 @@ jobs:
           node scripts/distribution.mjs archive
       - name: Retain runtime evidence even on failure
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           include-hidden-files: true
           name: offline-runtime-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -152,7 +152,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
       - name: Retain tested image
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           include-hidden-files: true
           name: offline-image-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -169,10 +169,10 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: Fetch the latest evidence for every required runtime job
@@ -188,7 +188,7 @@ jobs:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: node scripts/release-evidence.mjs gate
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: needs.changes.outputs.docs_only != 'true'
         with:
           include-hidden-files: true

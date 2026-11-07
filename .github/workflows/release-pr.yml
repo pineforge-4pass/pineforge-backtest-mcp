@@ -33,7 +33,7 @@ jobs:
     steps:
       - name: Mint target-scoped App token
         id: app
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.PINEFORGE_APP_ID }}
           private-key: ${{ secrets.PINEFORGE_APP_PRIVATE_KEY }}
@@ -43,13 +43,13 @@ jobs:
           permission-pull-requests: write
           permission-actions: write
       # workflow_run is privileged; never check out or execute the PR's code.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         id: checkout
         with:
           ref: main
           fetch-depth: 0
           token: ${{ steps.app.outputs.token }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: Report failed bot CI or merge the current tested candidate
@@ -64,7 +64,7 @@ jobs:
       - name: Persist the contract receipt snapshot
         id: receipt
         if: always() && steps.advance.outputs.receipt == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           include-hidden-files: true
           name: release-receipt-offline
@@ -75,7 +75,7 @@ jobs:
       - name: Mint a separate hub-only signal token
         id: hub
         if: always() && steps.receipt.outcome == 'success'
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.PINEFORGE_APP_ID }}
           private-key: ${{ secrets.PINEFORGE_APP_PRIVATE_KEY }}
@@ -90,7 +90,7 @@ jobs:
       # A setup failure before checkout (e.g. the App token) leaves no scripts to alert with.
       - name: Check out main for the alert when setup failed before checkout
         if: failure() && steps.checkout.outcome != 'success'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: main
           persist-credentials: false
