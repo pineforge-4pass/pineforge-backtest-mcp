@@ -1,47 +1,62 @@
 {
-  "event_id": "sha256:87bcaf7515b9d0414cd613006e5c2b2d8ed707d6a936edced164e95088062a90",
+  "event_id": "sha256:2cd1b865438734f187dce7ff39a501d07fdce465c3da093f5630edffe335d4ef",
   "facts": {
-    "commit": "8282f2414e26120dcbf130a3840989d62a2aaa1a",
+    "commit": "8a4fe57b88a2df347bedaa51b6d663aee3a92713",
     "path": "facts/facts.json",
-    "release_key": "1.6.3",
-    "sha256": "fa0c68f51e680953455b53ad4815f15ad5b2e47997ab7420f69711bc1bf2df43"
+    "release_key": "1.12.0",
+    "sha256": "c94d8845b101c427e8b8fdde90fe1d984b7e4975145ac7a93688b5d90687c97e"
   },
-  "hub_commit": "8282f2414e26120dcbf130a3840989d62a2aaa1a",
+  "hub_commit": "52ab5d1123f0183b93700362195789fce557def8",
   "image": {
-    "amd64_digest": "sha256:e27012997b6ad60750d91508b5193d202993ebe08812c05d74c950d951870601",
-    "arm64_digest": "sha256:6fc49ccc92af7d8300b955110be2a828d30b6c14fba6f12d1515fa89199a2f38",
-    "digest": "sha256:d13d9b785438b56151544f37cb1493449749d7cd4dcd56f8a210d7a0f1caceaf",
+    "amd64_digest": "sha256:3add6f60f227bc45e423613aa076e0cecbb617cb35be86f74357be6a753c8a14",
+    "arm64_digest": "sha256:3eab7966de1c05a64b72915fb4db52bc36c9a43dd9dc51364039bace1dbe98ed",
+    "digest": "sha256:061580c89306ae7a4503d34096ed986f5feadc3d00d4449ee4deee8c386d9278",
     "repository": "ghcr.io/pineforge-4pass/pineforge-release"
   },
   "manifest": {
     "asset": "release-manifest.json",
-    "sha256": "87bcaf7515b9d0414cd613006e5c2b2d8ed707d6a936edced164e95088062a90"
+    "sha256": "2cd1b865438734f187dce7ff39a501d07fdce465c3da093f5630edffe335d4ef"
   },
   "prerelease": false,
-  "release_version": "1.6.3",
-  "run_id": 39888718882,
+  "release_version": "1.12.0",
+  "run_id": 43257565845,
   "schema": "pineforge/release-ready/v1",
   "versions": {
     "codegen": {
-      "commit": "3ac65032bb23b59bfc9b6fe5ba91b791adc73ee2",
-      "npm_integrity": "sha512-9W0UotlusivO5PsfsBKHH6rMYQIEc2x1HejB79rfyKcsqsU7nZ0EszZKtY7LFIpEV/VIhpbXrtj0dfA0t4CIRw==",
-      "npm_version": "1.6.3",
-      "pypi_version": "1.6.3",
-      "sdist_sha256": "968ac925e021c5096391e4145b3f6c7f964fbb1e15927f5c357dde548193de95",
-      "version": "1.6.3"
+      "commit": "126e055f07b316a2b4a1a56451f98beaf52ac927",
+      "npm_integrity": "sha512-OCz7pjryeA7dJ9/D6GZNeRkYgS+DEVFDuu+ISI+PGRBisT+y+xBbR6nxAploDKqDOQE8Brl/Jj2pl4IQTBWOgw==",
+      "npm_version": "1.12.0",
+      "pypi_version": "1.12.0",
+      "sdist_sha256": "6671fafdf266f6d65e7c14904d52424cafd1cbc2242f81eb1ec0532ce5a1b605",
+      "version": "1.12.0"
     },
     "engine": {
-      "commit": "e799ac8ea911b4a83d4ec730fbcb742019ab086a",
-      "tag": "v1.6.3",
-      "version": "1.6.3"
+      "commit": "6e27d0f29460e44270d1e497c09062fbdc8470bc",
+      "parity": {
+        "descriptor_sha256": "654474f9264a8b53755f3782a8cf6da2d6fabce11541ddbd077dd426eb03075f",
+        "engine_commit": "6e27d0f29460e44270d1e497c09062fbdc8470bc",
+        "payload_sha256": {
+          "derive_corpus_feeds.py": "4e611e68553affd9a777eccb5f66eda46019d4de46a8f1d108732958f499eae6",
+          "parity_paths.py": "34f03af021990245187283230ba72bdfaa1f5618ff156b526cbd1468aa30f3e0",
+          "pf_release_run.py": "91171e1e0ea7a72fa6532b385e9b61f7cee080d04f02085dac11bb4fed6cdbe7",
+          "run_parity_jailed.py": "afbb79772f6694a1b886a681cf2284f997a52416b551116949a30152a139fc28",
+          "run_strategy.py": "feb55745a88e7298e85b023bba7a2ca4812eb6a604f6ae80dd226830e27d9ff7",
+          "verify_corpus.py": "e4ef1c9f48585d5461301e9d49afcdb629b7f39379c4dcb44eb83f252b99d636"
+        },
+        "schema": "pineforge/parity-descriptor/v1",
+        "source_manifest_sha256": "7b5d35dd87a45dfa46cb66abb536efd905e18e755f7cc76c2618c20668703566",
+        "sums_sha256": "8bf19acfe88982deff51e20f14c7945af6d35ae0802fa2253127856193554bbb"
+      },
+      "tag": "v1.12.0",
+      "version": "1.12.0"
     },
     "hpo": {
-      "commit": "3f269a868ee3f56ae9ee1b236b0cebd5a5539ff8",
-      "package_version": "1.6.3",
-      "sdist_sha256": "e9bb7db604f98fd9ea1e15c74d0044c22ab1cde7b515da0f721d2072f13e1ab5",
-      "tag": "v1.6.3",
-      "version": "1.6.3",
-      "wheel_sha256": "310b7f879de6fd3527e2e38a3a4332be9529d714ab2816260b0a56f7d12e66e3"
+      "commit": "8f758a29df6c7830dd829097e23d83fca0a88ad6",
+      "package_version": "1.12.0",
+      "sdist_sha256": "62576ee8175f36668bddf300deb79920295d932520dd048a89b6b4676ff1ee8e",
+      "tag": "v1.12.0",
+      "version": "1.12.0",
+      "wheel_sha256": "367a9e177f3ae74a660e3c05e0743d05a0188dfe6bd4c9dbedb1a1d530467630"
     }
   }
 }
