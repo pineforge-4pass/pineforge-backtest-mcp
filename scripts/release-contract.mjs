@@ -21,6 +21,34 @@ const keys = (x, expected, label) => {
   check(object(x), `${label}: expected object`);
   assert.deepEqual(Object.keys(x).sort(), expected.split(" ").sort(), `${label}: unexpected/missing fields`);
 };
+// From this release on the hub's engine object also carries the engine's parity
+// identity; earlier releases keep the historical version/tag/commit fields.
+const PARITY_CAPABILITY_FROM = "1.11.0";
+const PARITY_SCHEMA = "pineforge/parity-descriptor/v1";
+const PARITY_PAYLOAD = ["derive_corpus_feeds.py", "parity_paths.py", "pf_release_run.py", "run_parity_jailed.py", "run_strategy.py", "verify_corpus.py"];
+// Keys sorted at every level, "," and ":" separators, non-ASCII left as it is, one trailing newline.
+const canonicalBytes = (value) => {
+  const sorted = (x) => Array.isArray(x) ? x.map(sorted)
+    : object(x) ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, sorted(x[k])])) : x;
+  return Buffer.from(`${JSON.stringify(sorted(value))}\n`, "utf8");
+};
+function validateParity(engine) {
+  const p = engine.parity;
+  keys(p, "schema source_manifest_sha256 engine_commit payload_sha256 descriptor_sha256 sums_sha256", "engine parity");
+  assert.equal(p.schema, PARITY_SCHEMA, "engine parity schema mismatch");
+  check(hex(engine.commit, 40) && hex(p.engine_commit, 40), "malformed engine parity commit");
+  assert.equal(p.engine_commit, engine.commit, "engine parity commit mismatch");
+  for (const k of ["source_manifest_sha256", "descriptor_sha256", "sums_sha256"]) check(hex(p[k], 64), `malformed engine parity ${k}`);
+  keys(p.payload_sha256, PARITY_PAYLOAD.join(" "), "engine parity payload");
+  for (const name of PARITY_PAYLOAD) check(hex(p.payload_sha256[name], 64), `malformed engine parity payload digest ${name}`);
+  const descriptor = sha256(canonicalBytes({
+    schema: p.schema, source_manifest_sha256: p.source_manifest_sha256, engine_commit: p.engine_commit, payload_sha256: p.payload_sha256,
+  }));
+  assert.equal(descriptor, p.descriptor_sha256, "engine parity descriptor hash mismatch");
+  // ASCII text: the descriptor line, then one line per payload file in sorted order, two spaces between digest and name.
+  const sums = [`${descriptor}  PARITY-MANIFEST.json\n`, ...[...PARITY_PAYLOAD].sort().map((name) => `${p.payload_sha256[name]}  ${name}\n`)].join("");
+  assert.equal(sha256(sums), p.sums_sha256, "engine parity sums hash mismatch");
+}
 export function normalizedVersion(x) {
   check(typeof x === "string", "version must be a string");
   return x.replace(/^v/, "").replace(/(\d)(a|b|rc)(\d+)$/, (_, n, k, i) => `${n}-${{ a: "alpha", b: "beta", rc: "rc" }[k]}.${i}`);
@@ -54,7 +82,9 @@ export function validateReady(x) {
   assert.equal(x.facts.release_key, x.release_version, "facts release_key mismatch");
   keys(x.versions, "engine codegen hpo", "versions");
   const { engine, codegen, hpo } = x.versions;
-  keys(engine, "version tag commit", "engine");
+  const withParity = compareVersions(x.release_version, PARITY_CAPABILITY_FROM) >= 0;
+  keys(engine, withParity ? "version tag commit parity" : "version tag commit", "engine");
+  if (withParity) validateParity(engine);
   keys(codegen, "version pypi_version commit sdist_sha256 npm_version npm_integrity", "codegen");
   for (const c of [engine, codegen]) {
     version(c.version);
