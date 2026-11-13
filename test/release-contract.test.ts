@@ -303,3 +303,75 @@ for (const release of ["1.11.0", "1.12.0", "2.0.0"]) {
     refusesWith(() => validateReady(without), "engine: unexpected/missing fields");
   });
 }
+
+// The same cut-off for prereleases. A release outranks every prerelease of the same X.Y.Z, so 1.11.0-rc.1 is below 1.11.0 and keeps
+// the three historical engine fields, while 1.11.1-rc.1 is above it and carries parity.
+// The hub's real payload labelled as a prerelease the way the hub writes one: the prerelease flag is true; the semver spelling
+// (1.11.0-rc.1) stands in the release version, the facts key, the engine and codegen versions, the engine tag, the npm version and the HPO
+// version; the Python spelling (1.11.0rc1, 1.11.0a0, 1.11.0b2) stands in the PyPI version, the HPO package version and the HPO tag, which
+// is v<package_version>. The Python spelling is written out beside each label: it is neither computed here nor made with the receiver's
+// own normalisation.
+function atPrerelease(p: any, release: string, python: string): any {
+  assert.match(release, /^\d+\.\d+\.\d+-(alpha|beta|rc)\.\d+$/, `${release} is not a semver prerelease`);
+  assert.match(python, /^\d+\.\d+\.\d+(a|b|rc)\d+$/, `${python} is not a Python prerelease spelling`);
+  atRelease(p, release);
+  p.prerelease = true;
+  const { codegen, hpo } = p.versions;
+  codegen.pypi_version = hpo.package_version = python;
+  hpo.tag = `v${python}`;
+  return p;
+}
+// The same payload with the engine object cut back to the three historical fields.
+function withoutParity(p: any): any {
+  delete p.versions.engine.parity;
+  return p;
+}
+
+// Below the cut-off. Each test passes the payload with the three historical fields first, so a wrong label fails there and loudly; the
+// payload refused after it is the same label with the parity block left in: the engine key check is what refuses it.
+for (const [release, python] of [
+  ["1.11.0-rc.1", "1.11.0rc1"],
+  ["1.11.0-alpha.0", "1.11.0a0"],
+  ["1.11.0-beta.2", "1.11.0b2"],
+  // A very high release-candidate number: a cut-off set at any earlier prerelease of 1.11.0 would wrongly demand parity from it.
+  ["1.11.0-rc.999999", "1.11.0rc999999"],
+  ["1.10.5-rc.3", "1.10.5rc3"],
+] as Array<[string, string]>) {
+  test(`prerelease ${release} is below the cut-off: it keeps the three historical engine fields and refuses parity`, () => {
+    const ready = validateReady(withoutParity(atPrerelease(hubPayload(), release, python)));
+    assert.equal(ready.release_version, release);
+    assert.equal(ready.prerelease, true);
+    assert.deepEqual(Object.keys(ready.versions.engine).sort(), ["commit", "tag", "version"]);
+    refusesWith(() => validateReady(atPrerelease(hubPayload(), release, python)), "engine: unexpected/missing fields");
+  });
+}
+
+// At or above the cut-off. The payload with parity passes first; the same label without it is then refused on the engine key check.
+for (const [release, python] of [
+  ["1.11.1-rc.1", "1.11.1rc1"],
+  ["1.12.0-alpha.0", "1.12.0a0"],
+  ["1.13.0-rc.1", "1.13.0rc1"],
+] as Array<[string, string]>) {
+  test(`prerelease ${release} is above the cut-off: with engine parity the payload passes, without it it is refused`, () => {
+    const ready = validateReady(atPrerelease(hubPayload(), release, python));
+    assert.equal(ready.release_version, release);
+    assert.equal(ready.prerelease, true);
+    assert.deepEqual(Object.keys(ready.versions.engine).sort(), ["commit", "parity", "tag", "version"]);
+    refusesWith(() => validateReady(withoutParity(atPrerelease(hubPayload(), release, python))), "engine: unexpected/missing fields");
+  });
+}
+
+// The boundary in one place: one hub payload, labelled 1.11.0-rc.1 and labelled 1.11.0.
+test("the cut-off lies between 1.11.0-rc.1 and 1.11.0: the prerelease needs the three engine fields, the release needs parity", () => {
+  const base = hubPayload();
+  const prerelease = () => atPrerelease(structuredClone(base), "1.11.0-rc.1", "1.11.0rc1");
+  const stable = () => atRelease(structuredClone(base), "1.11.0");
+  // 1.11.0-rc.1: the three historical fields pass, the parity block is refused.
+  const prereleaseReady = validateReady(withoutParity(prerelease()));
+  assert.deepEqual([prereleaseReady.release_version, prereleaseReady.prerelease], ["1.11.0-rc.1", true]);
+  refusesWith(() => validateReady(prerelease()), "engine: unexpected/missing fields");
+  // 1.11.0: the parity block passes, the three historical fields are refused.
+  const stableReady = validateReady(stable());
+  assert.deepEqual([stableReady.release_version, stableReady.prerelease], ["1.11.0", false]);
+  refusesWith(() => validateReady(withoutParity(stable())), "engine: unexpected/missing fields");
+});
