@@ -63,9 +63,12 @@ function assertFound(actual: ReturnType<typeof invokeGate>, id = run.id) {
     ...gate, run_id: id, jobs,
     checks: {
       run_id: id, run_attempt: 1, sha: head,
-      expected: ["test", "runtime (amd64)", "runtime (arm64)", "release/ready"],
+      expected: ["test", "runtime-npm (amd64)", "runtime-npm (arm64)", "runtime-image (amd64)", "runtime-image (arm64)", "release/ready"],
       approved_skips: [],
-      results: { test: "success", "runtime (amd64)": "success", "runtime (arm64)": "success", "release/ready": "success" },
+      results: {
+        test: "success", "runtime-npm (amd64)": "success", "runtime-npm (arm64)": "success",
+        "runtime-image (amd64)": "success", "runtime-image (arm64)": "success", "release/ready": "success",
+      },
     },
   });
 }

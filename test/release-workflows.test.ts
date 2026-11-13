@@ -51,18 +51,72 @@ test("App tokens are scoped to this consumer and privileged transitions use trus
   assert.doesNotMatch(consumer, /--admin|git push.*--force/);
 });
 
-test("the required aggregate covers every runtime architecture and packed npm distribution", () => {
+test("the required aggregate covers parallel npm and image jobs on every native architecture", () => {
+  assert.deepEqual(Object.keys(ci.jobs).sort(), ["changes", "ready", "runtime-image", "runtime-npm", "test"]);
   assert.equal(ci.jobs.ready.name, "release/ready");
   assert.equal(ci.jobs.ready.if, "always()");
-  assert.deepEqual(ci.jobs.ready.needs, ["changes", "test", "runtime"]);
-  assert.deepEqual(ci.jobs.runtime.strategy.matrix.include.map((x: any) => x.arch), ["amd64", "arm64"]);
-  assert.equal(ci.jobs.runtime.strategy["fail-fast"], false);
+  assert.deepEqual(ci.jobs.ready.needs, ["changes", "test", "runtime-npm", "runtime-image"]);
+  for (const mode of ["npm", "image"]) {
+    const job = ci.jobs[`runtime-${mode}`];
+    assert.equal(job.name, `runtime-${mode} (` + "${{ matrix.arch }})");
+    assert.equal(job.needs, "test", "both modes must start independently after packaging");
+    assert.equal(job.if, undefined);
+    assert.equal(job["continue-on-error"], undefined);
+    assert.equal(job.strategy["fail-fast"], false);
+    assert.deepEqual(job.strategy.matrix, { include: [
+      { arch: "amd64", runner: "ubuntu-24.04" }, { arch: "arm64", runner: "ubuntu-24.04-arm" },
+    ] });
+    assert.equal(job["runs-on"], "${{ matrix.runner }}");
+    assert.equal(job.env.PF_ARCH, "${{ matrix.arch }}");
+    const corpus = job.steps.find((s: any) => s.with?.repository === "pineforge-4pass/pineforge-corpus");
+    assert.equal(corpus.with.ref, "a35c7c4adf7ac3cdf9b0b193e8640510d49cfd3c");
+    assert.equal(corpus.with.lfs, true);
+    assert.match(runs(job), /release-artifacts\.mjs package/);
+    assert.match(runs(job), /npm ci --no-audit --no-fund/);
+    assert.match(runs(job), /python3 scripts\/prepare-runtime-fixtures\.py/);
+    assert.match(runs(job), /release-contract\.mjs show/);
+    assert.match(runs(job), /docker pull "\$IMAGE"/);
+    assert.deepEqual(job.steps.filter((s: any) => /runtime-e2e\.mjs/.test(s.run ?? "")).map((s: any) => s.run),
+      [`node scripts/runtime-e2e.mjs ${mode}`]);
+    for (const step of job.steps) assert.equal(step["continue-on-error"], undefined);
+  }
   assert.match(runs(ci.jobs.test), /npm run build/);
   assert.match(runs(ci.jobs.test), /npm test/);
   assert.match(runs(ci.jobs.test), /npm pack --ignore-scripts/);
-  assert.match(runs(ci.jobs.runtime), /runtime-e2e\.mjs npm/);
-  assert.match(runs(ci.jobs.runtime), /runtime-e2e\.mjs image/);
+  assert.match(runs(ci.jobs["runtime-npm"]), /npm install --prefix \.release-ci\/installed .*\.\/\.release-ci\/offline-package\/\*\.tgz/);
+  assert.doesNotMatch(runs(ci.jobs["runtime-npm"]), /buildx build|docker save|distribution\.mjs archive/);
+  assert.match(runs(ci.jobs["runtime-image"]), /docker buildx build --load --platform "linux\/\$PF_ARCH"/);
+  assert.match(runs(ci.jobs["runtime-image"]), /PINEFORGE_RELEASE_IMAGE=\$IMAGE/);
+  assert.match(runs(ci.jobs["runtime-image"]), /PINEFORGE_RELEASE_VERSION=\$RELEASE/);
+  assert.match(runs(ci.jobs["runtime-image"]), /PINEFORGE_SOURCE_SHA=\$GITHUB_SHA/);
+  assert.match(runs(ci.jobs["runtime-image"]), /docker save "\$PF_E2E_CANDIDATE_IMAGE"/);
+  assert.match(runs(ci.jobs["runtime-image"]), /distribution\.mjs archive/);
   assert.match(runs(ci.jobs.ready), /release-evidence\.mjs gate/);
+});
+
+test("runtime uploads have distinct mode/architecture identities and only image jobs retain tested image bytes", () => {
+  const names: string[] = [];
+  for (const mode of ["npm", "image"]) {
+    const job = ci.jobs[`runtime-${mode}`];
+    const uploads = job.steps.filter((s: any) => s.uses?.startsWith("actions/upload-artifact@"));
+    assert.equal(uploads.length, mode === "image" ? 2 : 1);
+    const evidence = uploads[0];
+    assert.equal(evidence.if, "always()");
+    assert.equal(evidence.with.name, `offline-runtime-${mode}-` + "${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}");
+    assert.equal(evidence.with["if-no-files-found"], "error");
+    assert.ok(evidence.with.path.split("\n").includes(".release-ci/runtime-${{ matrix.arch }}-" + `${mode}.json`));
+    assert.ok(evidence.with.path.split("\n").includes(`.release-ci/${mode}-*.tap`));
+    for (const upload of uploads) for (const { arch } of job.strategy.matrix.include) {
+      names.push(upload.with.name.replace("${{ matrix.arch }}", arch));
+    }
+    if (mode === "image") {
+      assert.equal(uploads[1].with.name, "offline-image-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}");
+      assert.equal(uploads[1].with["compression-level"], 0);
+      assert.equal(uploads[1].with["if-no-files-found"], "error");
+      assert.equal(uploads[1].with.path, ".release-ci/image-${{ matrix.arch }}.tar\n.release-ci/candidate-${{ matrix.arch }}.json\n");
+    }
+  }
+  assert.equal(new Set(names).size, 6, "all four evidence and both image artifacts must be distinct");
 });
 
 test("no publication path bypasses the same complete CI and runtime graph", () => {
@@ -168,11 +222,12 @@ const groupExpression = (prefix: string) => "${{ " + ordinaryPR
   + ` || format('${prefix}-run-{0}-{1}', github.run_id, github.run_attempt) }}`;
 const fullGraph = "needs.changes.outputs.docs_only != 'true'";
 const docsSkip = "needs.changes.outputs.docs_only == 'true'";
-const gateNeeds = '${{ format(\'{{"test":{0},"runtime":{1}}}\', toJSON(needs.test), toJSON(needs.runtime)) }}';
+const gateNeeds = "${{ toJSON(needs) }}";
 const supportedExpressions = new Set([
   cancelExpression, groupExpression("test"), groupExpression("regen"),
   fullGraph, docsSkip, gateNeeds,
-  "${{ needs.changes.result }}", "${{ needs.test.result }}", "${{ needs.runtime.result }}",
+  "${{ needs.changes.result }}", "${{ needs.test.result }}",
+  "${{ needs['runtime-npm'].result }}", "${{ needs['runtime-image'].result }}",
 ]);
 
 // Only the fixed workflow expressions above are supported. Their operators are
@@ -283,10 +338,12 @@ test("docs-only conditions skip exactly the test/runtime graph and gate receipt"
   assert.equal(ci.jobs.test.needs, "changes");
   assert.equal(ci.jobs.test.if, fullGraph);
   assert.equal(ci.jobs.test.name ?? "test", "test");
-  assert.equal(ci.jobs.runtime.needs, "test");
-  assert.equal(ci.jobs.runtime.if, undefined);
-  assert.equal(ci.jobs.runtime.name, "runtime (${{ matrix.arch }})");
-  assert.deepEqual(ci.jobs.ready.needs, ["changes", "test", "runtime"]);
+  for (const mode of ["npm", "image"]) {
+    assert.equal(ci.jobs[`runtime-${mode}`].needs, "test");
+    assert.equal(ci.jobs[`runtime-${mode}`].if, undefined);
+    assert.equal(ci.jobs[`runtime-${mode}`].name, `runtime-${mode} (` + "${{ matrix.arch }})");
+  }
+  assert.deepEqual(ci.jobs.ready.needs, ["changes", "test", "runtime-npm", "runtime-image"]);
   assert.equal(ci.jobs.ready.if, "always()");
   const { steps, evidence, gate, upload, docs } = readySteps();
   assert.equal(steps.length, 6);
@@ -304,18 +361,20 @@ test("docs-only conditions skip exactly the test/runtime graph and gate receipt"
   }
 });
 
-test("gate NEEDS_JSON evaluates to exactly test and runtime, excluding changes", () => {
+test("gate NEEDS_JSON preserves the exact changes/test/npm/image results", () => {
   const { gate } = readySteps();
   assert.equal(gate.env.NEEDS_JSON, gateNeeds);
-  for (const testResult of ["success", "failure", "skipped", "cancelled"]) {
-    const needs = {
+  for (const name of ["changes", "test", "runtime-npm", "runtime-image"]) for (const result of ["success", "failure", "skipped", "cancelled"]) {
+    const needs: Record<string, any> = {
       changes: { result: "success", outputs: { docs_only: "false" } },
-      test: { result: testResult, outputs: { package: "packed" } },
-      runtime: { result: "success", outputs: {} },
+      test: { result: "success", outputs: { package: "packed" } },
+      "runtime-npm": { result: "success", outputs: {} },
+      "runtime-image": { result: "success", outputs: {} },
     };
+    needs[name].result = result;
     const actual = JSON.parse(evaluate(gate.env.NEEDS_JSON, { needs }));
-    assert.deepEqual(Object.keys(actual).sort(), ["runtime", "test"]);
-    assert.deepEqual(actual, { test: needs.test, runtime: needs.runtime });
+    assert.deepEqual(Object.keys(actual).sort(), ["changes", "runtime-image", "runtime-npm", "test"]);
+    assert.deepEqual(actual, needs);
   }
 });
 
@@ -323,29 +382,33 @@ test("failed changes with empty docs_only runs the evidence gate and cannot use 
   const { evidence, gate, upload, docs } = readySteps();
   const needs = {
     changes: { result: "failure", outputs: { docs_only: "" } },
-    test: { result: "skipped" }, runtime: { result: "skipped" },
+    test: { result: "skipped" }, "runtime-npm": { result: "skipped" }, "runtime-image": { result: "skipped" },
   };
   assert.equal(ci.jobs.ready.if, "always()");
   for (const step of [evidence, gate, upload]) assert.equal(evaluate(step.if, { needs }), true);
   assert.equal(evaluate(docs.if, { needs }), false);
   const projected = JSON.parse(evaluate(gate.env.NEEDS_JSON, { needs }));
-  assert.deepEqual(Object.values(projected).map((job: any) => job.result), ["skipped", "skipped"]);
+  assert.deepEqual(Object.values(projected).map((job: any) => job.result), ["failure", "skipped", "skipped", "skipped"]);
 });
 
-test("docs-only ready step succeeds only for successful changes and two skipped jobs", () => {
+test("docs-only ready step succeeds only for successful changes and all three execution jobs skipped", () => {
   const { docs } = readySteps();
   assert.deepEqual(docs.env, {
     CHANGES_RESULT: "${{ needs.changes.result }}",
     TEST_RESULT: "${{ needs.test.result }}",
-    RUNTIME_RESULT: "${{ needs.runtime.result }}",
+    RUNTIME_NPM_RESULT: "${{ needs['runtime-npm'].result }}",
+    RUNTIME_IMAGE_RESULT: "${{ needs['runtime-image'].result }}",
   });
   const results = ["success", "failure", "cancelled", "skipped", ""];
-  for (const changes of results) for (const test of results) for (const runtime of results) {
-    const needs = { changes: { result: changes }, test: { result: test }, runtime: { result: runtime } };
+  for (const changes of results) for (const test of results) for (const npm of results) for (const image of results) {
+    const needs = {
+      changes: { result: changes }, test: { result: test },
+      "runtime-npm": { result: npm }, "runtime-image": { result: image },
+    };
     const env = Object.fromEntries(Object.entries(docs.env)
       .map(([key, expression]) => [key, evaluate(expression as string, { needs })]));
     const result = spawnSync("bash", ["-c", docs.run], { encoding: "utf8", env: { ...process.env, ...env } });
-    const allowed = changes === "success" && test === "skipped" && runtime === "skipped";
+    const allowed = changes === "success" && test === "skipped" && npm === "skipped" && image === "skipped";
     assert.equal(result.status, allowed ? 0 : 1, JSON.stringify(needs));
     if (allowed) assert.ok(result.stdout.includes("::notice::Documentation-only PR skipped the runtime graph"));
     else assert.ok(result.stdout.includes("::error::"), JSON.stringify(needs));

@@ -10,7 +10,7 @@ import { parse } from "yaml";
 import { checkEvidence, RECEIPT_POLICY } from "../scripts/release-receipt.mjs";
 
 const ci = parse(readFileSync(new URL("../.github/workflows/test.yml", import.meta.url), "utf8"));
-const requiredNames = ["test", "runtime (amd64)", "runtime (arm64)", "release/ready"];
+const requiredNames = ["test", "runtime-npm (amd64)", "runtime-npm (arm64)", "runtime-image (amd64)", "runtime-image (arm64)", "release/ready"];
 type Result = "success" | "skipped";
 type State = { result: Result; outputs: Record<string, string> };
 type Needs = Record<string, State>;
@@ -123,7 +123,7 @@ function replay(t: TestContext, github: Context) {
     }
     const names: string[] = job.strategy
       ? job.strategy.matrix.include.map(({ arch }: { arch: string }) => {
-        assert.equal(job.name, "runtime (${{ matrix.arch }})");
+        assert.equal(job.name, `${id} (` + "${{ matrix.arch }})");
         return job.name.replace("${{ matrix.arch }}", arch);
       })
       : [job.name ?? id];
@@ -135,8 +135,8 @@ function replay(t: TestContext, github: Context) {
     return state;
   }
 
-  assert.deepEqual(Object.keys(ci.jobs).sort(), ["changes", "ready", "runtime", "test"]);
-  assert.deepEqual(ci.jobs.ready.needs, ["changes", "test", "runtime"]);
+  assert.deepEqual(Object.keys(ci.jobs).sort(), ["changes", "ready", "runtime-image", "runtime-npm", "test"]);
+  assert.deepEqual(ci.jobs.ready.needs, ["changes", "test", "runtime-npm", "runtime-image"]);
   for (const id of Object.keys(ci.jobs)) visit(id);
   const run = {
     id: 101, run_attempt: 1, path: ".github/workflows/test.yml", head_sha: sha,
@@ -159,6 +159,8 @@ test("docs-only bot replay runs every required job and passes real receipt evide
   }
 
   // The reusable publisher adds "gates / changes" alongside its expected jobs.
+  assert.deepEqual(RECEIPT_POLICY.deploy.expected.filter((name: string) => name.startsWith("gates / ")),
+    requiredNames.map((name) => `gates / ${name}`));
   const deployJobs = RECEIPT_POLICY.deploy.expected.map((name: string) => ({
     name, status: "completed", conclusion: "success", completed_at: "2026-10-19T00:00:00Z",
   }));
@@ -170,12 +172,37 @@ test("docs-only bot replay runs every required job and passes real receipt evide
   assert.ok(!Object.hasOwn(deploy.results, "gates / changes"));
 });
 
-test("docs-only human replay skips test/runtime and real receipt evidence rejects it", (t) => {
+test("CR-1084: receipt policy refuses each missing or unsuccessful runtime child in CI, E2E and deployment", (t) => {
+  const { run, sha } = replay(t, bot);
+  for (const kind of ["ci", "e2e", "deploy"] as const) {
+    const policy = RECEIPT_POLICY[kind];
+    const workflowRun = { ...run, path: `.github/workflows/${policy.workflow}` };
+    const jobs = policy.expected.map((name: string) => ({
+      name, status: "completed", conclusion: "success", completed_at: "2026-10-19T00:00:00Z",
+    }));
+    assert.doesNotThrow(() => checkEvidence(workflowRun, jobs, policy, sha));
+    for (const runtime of requiredNames.filter((name) => name.startsWith("runtime-"))) {
+      const name = kind === "deploy" ? `gates / ${runtime}` : runtime;
+      for (const conclusion of ["missing", "failure", "cancelled", "skipped"]) {
+        const changed = conclusion === "missing" ? jobs.filter((job: any) => job.name !== name)
+          : jobs.map((job: any) => job.name === name ? { ...job, conclusion } : job);
+        assert.throws(() => checkEvidence(workflowRun, changed, policy, sha), (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.ok(error.message.includes(name), `${kind}: ${conclusion}: ${name}`);
+          return true;
+        });
+      }
+    }
+  }
+});
+
+test("docs-only human replay skips test and both runtime families and real receipt evidence rejects it", (t) => {
   const { docsOnly, jobs, run, sha } = replay(t, human);
   assert.equal(docsOnly, "true");
   assert.deepEqual(Object.fromEntries(jobs.map((job) => [job.name, job.conclusion])), {
     changes: "success", test: "skipped",
-    "runtime (amd64)": "skipped", "runtime (arm64)": "skipped", "release/ready": "success",
+    "runtime-npm (amd64)": "skipped", "runtime-npm (arm64)": "skipped",
+    "runtime-image (amd64)": "skipped", "runtime-image (arm64)": "skipped", "release/ready": "success",
   });
   for (const policy of [RECEIPT_POLICY.ci, RECEIPT_POLICY.e2e]) {
     assert.deepEqual(policy.approved_skips, []);

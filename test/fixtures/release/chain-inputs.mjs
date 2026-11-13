@@ -20,13 +20,15 @@ export const run = {
 export const gate = {
   state: "ready", pr: 38, head_sha: head, source_sha: head,
   base_sha: "3333333333333333333333333333333333333333",
-  expected_jobs: ["test", "runtime (amd64)", "runtime (arm64)"], approved_skips: [],
+  expected_jobs: ["test", "runtime-npm (amd64)", "runtime-npm (arm64)", "runtime-image (amd64)", "runtime-image (arm64)"], approved_skips: [],
   run_id: 101, attempt: 1,
 };
 export const jobs = [
   { name: "test", status: "completed", conclusion: "success", completed_at: "2026-10-20T01:01:00Z" },
-  { name: "runtime (amd64)", status: "completed", conclusion: "success", completed_at: "2026-10-20T01:02:00Z" },
-  { name: "runtime (arm64)", status: "completed", conclusion: "success", completed_at: "2026-10-20T01:02:00Z" },
+  { name: "runtime-npm (amd64)", status: "completed", conclusion: "success", completed_at: "2026-10-20T01:02:00Z" },
+  { name: "runtime-npm (arm64)", status: "completed", conclusion: "success", completed_at: "2026-10-20T01:02:00Z" },
+  { name: "runtime-image (amd64)", status: "completed", conclusion: "success", completed_at: "2026-10-20T01:02:00Z" },
+  { name: "runtime-image (arm64)", status: "completed", conclusion: "success", completed_at: "2026-10-20T01:02:00Z" },
   { name: "release/ready", status: "completed", conclusion: "success", completed_at: "2026-10-20T01:03:00Z" },
 ];
 export function gateState(runs = [run], gates = { 101: gate }, runJobs = jobs) {

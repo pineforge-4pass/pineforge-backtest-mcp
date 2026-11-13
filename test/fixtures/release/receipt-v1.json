@@ -4,14 +4,18 @@
     "approved_skips": [],
     "expected": [
       "test",
-      "runtime (amd64)",
-      "runtime (arm64)",
+      "runtime-npm (amd64)",
+      "runtime-npm (arm64)",
+      "runtime-image (amd64)",
+      "runtime-image (arm64)",
       "release/ready"
     ],
     "results": {
       "release/ready": "success",
-      "runtime (amd64)": "success",
-      "runtime (arm64)": "success",
+      "runtime-image (amd64)": "success",
+      "runtime-image (arm64)": "success",
+      "runtime-npm (amd64)": "success",
+      "runtime-npm (arm64)": "success",
       "test": "success"
     },
     "run_attempt": 1,
@@ -27,8 +31,10 @@
     ],
     "expected": [
       "gates / test",
-      "gates / runtime (amd64)",
-      "gates / runtime (arm64)",
+      "gates / runtime-npm (amd64)",
+      "gates / runtime-npm (arm64)",
+      "gates / runtime-image (amd64)",
+      "gates / runtime-image (arm64)",
       "gates / release/ready",
       "prepare",
       "image",
@@ -41,8 +47,10 @@
     ],
     "results": {
       "gates / release/ready": "success",
-      "gates / runtime (amd64)": "success",
-      "gates / runtime (arm64)": "success",
+      "gates / runtime-image (amd64)": "success",
+      "gates / runtime-image (arm64)": "success",
+      "gates / runtime-npm (amd64)": "success",
+      "gates / runtime-npm (arm64)": "success",
       "gates / test": "success",
       "image": "success",
       "mcp-registry": "success",
@@ -68,14 +76,18 @@
     "approved_skips": [],
     "expected": [
       "test",
-      "runtime (amd64)",
-      "runtime (arm64)",
+      "runtime-npm (amd64)",
+      "runtime-npm (arm64)",
+      "runtime-image (amd64)",
+      "runtime-image (arm64)",
       "release/ready"
     ],
     "results": {
       "release/ready": "success",
-      "runtime (amd64)": "success",
-      "runtime (arm64)": "success",
+      "runtime-image (amd64)": "success",
+      "runtime-image (arm64)": "success",
+      "runtime-npm (amd64)": "success",
+      "runtime-npm (arm64)": "success",
       "test": "success"
     },
     "run_attempt": 1,
