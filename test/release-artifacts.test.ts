@@ -9,21 +9,29 @@ import { fileURLToPath } from "node:url";
 import { chooseArtifact } from "../scripts/release-artifacts.mjs";
 const artifact = (name: string, expired = false) => ({ name, expired });
 test("reruns retain history and use the newest evidence for the same source run", () => {
-  const a = [artifact("offline-runtime-amd64-17-1"), artifact("offline-runtime-amd64-17-2"), artifact("offline-runtime-amd64-18-9")];
-  assert.equal(chooseArtifact(a, "offline-runtime-amd64", 17), "offline-runtime-amd64-17-2");
-  assert.equal(chooseArtifact(a, "offline-runtime-amd64", 18), "offline-runtime-amd64-18-9");
-  assert.throws(() => chooseArtifact(a, "offline-runtime-arm64", 17));
-  assert.throws(() => chooseArtifact(a, "offline-runtime-amd64", 19));
+  for (const mode of ["npm", "image"]) for (const arch of ["amd64", "arm64"]) {
+    const prefix = `offline-runtime-${mode}-${arch}`;
+    const other = `offline-runtime-${mode === "npm" ? "image" : "npm"}-${arch}`;
+    const a = [artifact(`${prefix}-17-1`), artifact(`${prefix}-17-2`), artifact(`${prefix}-18-9`), artifact(`${other}-17-9`)];
+    assert.equal(chooseArtifact(a, prefix, 17), `${prefix}-17-2`);
+    assert.equal(chooseArtifact(a, prefix, 18), `${prefix}-18-9`);
+    assert.throws(() => chooseArtifact(a, prefix, 19), /missing/);
+    assert.throws(() => chooseArtifact([artifact(`${other}-17-9`), artifact(`offline-runtime-${arch}-17-9`)], prefix, 17), /missing/);
+  }
 });
 test("an expired newest attempt cannot be replaced by an older green artifact", () => {
   assert.throws(() => chooseArtifact([artifact("offline-gate-17-1"), artifact("offline-gate-17-2", true)], "offline-gate", 17), /expired/);
   assert.throws(() => chooseArtifact([artifact("offline-gate-17-two")], "offline-gate", 17), /missing/);
+  for (const mode of ["npm", "image"]) for (const arch of ["amd64", "arm64"]) {
+    const prefix = `offline-runtime-${mode}-${arch}`;
+    assert.throws(() => chooseArtifact([artifact(`${prefix}-17-1`), artifact(`${prefix}-17-2`, true)], prefix, 17), /expired/);
+  }
 });
 
 test("collectors isolate colliding artifact files and read recorded inputs from their directories", () => {
   const selections: Record<string, string[]> = {
     package: ["offline-package"],
-    evidence: ["offline-package", "offline-runtime-amd64", "offline-runtime-arm64"],
+    evidence: ["offline-package", "offline-runtime-npm-amd64", "offline-runtime-npm-arm64", "offline-runtime-image-amd64", "offline-runtime-image-arm64"],
     gate: ["offline-gate", "offline-package"],
     "image-input": ["offline-channels", "offline-gate", "offline-image-amd64", "offline-image-arm64"],
     "npm-input": ["offline-channels", "offline-package"],
@@ -37,7 +45,7 @@ test("collectors isolate colliding artifact files and read recorded inputs from 
 const { mkdirSync, writeFileSync } = require("node:fs");
 const { join } = require("node:path");
 const args = process.argv.slice(2);
-const prefixes = ["offline-package", "offline-runtime-amd64", "offline-runtime-arm64", "offline-gate", "offline-channels", "offline-image-amd64", "offline-image-arm64", "offline-image-publication"];
+const prefixes = ["offline-package", "offline-runtime-npm-amd64", "offline-runtime-npm-arm64", "offline-runtime-image-amd64", "offline-runtime-image-arm64", "offline-gate", "offline-channels", "offline-image-amd64", "offline-image-arm64", "offline-image-publication"];
 if (args[0] === "api") {
   console.log(JSON.stringify([{ artifacts: prefixes.flatMap((p) => [1, 2].map((a) => ({ name: p + "-17-" + a, expired: false }))) }]));
 } else {
@@ -52,6 +60,8 @@ if (args[0] === "api") {
     "offline-gate": { "gate-receipt.json": { package: { attempt: "1" }, runtime: ["amd64", "arm64"].map((arch) => ({ arch, mode: "image", artifact_attempt: "1" })) } },
     "offline-channels": { "channel-state.json": { run_id: "17", gate_artifact: "offline-gate-17-1", package_artifact: "offline-package-17-1" } },
   };
+  const runtime = /^offline-runtime-(npm|image)-(amd64|arm64)$/.exec(prefix);
+  if (runtime) files[prefix] = { ["runtime-" + runtime[2] + "-" + runtime[1] + ".json"]: { mode: runtime[1], arch: runtime[2], artifact_attempt: name.endsWith("-1") ? "1" : "2" } };
   for (const [file, value] of Object.entries(files[prefix] || {})) writeFileSync(join(dir, file), JSON.stringify(value), { flag: "wx" });
 }
 `, { mode: 0o755 });
@@ -65,6 +75,16 @@ if (args[0] === "api") {
     if (["package", "evidence", "gate", "npm-input"].includes(kind)) {
       const pkg = JSON.parse(readFileSync(join(root, ".release-ci/offline-package/package.json"), "utf8"));
       assert.equal(pkg.attempt, ["gate", "npm-input"].includes(kind) ? "1" : "2");
+    }
+    if (kind === "evidence") {
+      const rows = [];
+      for (const mode of ["npm", "image"]) for (const arch of ["amd64", "arm64"]) {
+        rows.push(JSON.parse(readFileSync(join(root, `.release-ci/offline-runtime-${mode}-${arch}/runtime-${arch}-${mode}.json`), "utf8")));
+      }
+      assert.deepEqual(rows, [
+        { mode: "npm", arch: "amd64", artifact_attempt: "2" }, { mode: "npm", arch: "arm64", artifact_attempt: "2" },
+        { mode: "image", arch: "amd64", artifact_attempt: "2" }, { mode: "image", arch: "arm64", artifact_attempt: "2" },
+      ]);
     }
   }
 });

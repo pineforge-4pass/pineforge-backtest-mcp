@@ -1,6 +1,7 @@
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -207,6 +208,28 @@ test("D1: matching receipt still enforces required job success", () => {
   assert.equal(actual.result.status, 1);
   assert.match(actual.output.error, /unsuccessful required job/);
 });
+for (const name of ["runtime-npm (amd64)", "runtime-npm (arm64)", "runtime-image (amd64)", "runtime-image (arm64)"]) {
+  test(`a successful workflow and ready job cannot conceal missing/unsuccessful ${name}`, () => {
+    found();
+    for (const conclusion of ["missing", "failure", "cancelled", "skipped", "duplicate"]) {
+      const changed = conclusion === "missing" ? jobs.filter((job: any) => job.name !== name)
+        : conclusion === "duplicate" ? [...jobs, jobs.find((job: any) => job.name === name)]
+          : jobs.map((job: any) => job.name === name ? { ...job, conclusion } : job);
+      const actual = invoke("latestGate", () => gateState([run], { 101: gate }, changed));
+      assert.equal(actual.result.status, 1, `${name}: ${conclusion}`);
+      assert.match(actual.output.error, /missing\/duplicate required job|unsuccessful required job/);
+      assert.ok(actual.output.error.includes(name));
+    }
+  });
+}
+test("the former broad runtime job inventory cannot replace all four required mode jobs", () => {
+  found();
+  const actual = invoke("latestGate", () => gateState([run], {
+    101: { ...gate, expected_jobs: ["test", "runtime (amd64)", "runtime (arm64)"] },
+  }));
+  assert.equal(actual.result.status, 1);
+  assert.ok(actual.output.error);
+});
 test("D1: matching receipt still binds both merge-candidate parents", () => {
   found();
   const actual = invoke("latestGate", () => {
@@ -216,6 +239,139 @@ test("D1: matching receipt still binds both merge-candidate parents", () => {
   });
   assert.equal(actual.result.status, 1);
   assert.ok(actual.output.error);
+});
+
+function runtimeGate(t: TestContext) {
+  const root = mkdtempSync(join(tmpdir(), "pf-runtime-gate-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const lockBytes = readFileSync(new URL("./fixtures/release/release-ready-v1.json", import.meta.url));
+  const lock = JSON.parse(lockBytes.toString());
+  const inventoryBytes = readFileSync(new URL("./fixtures/release/runtime-inventory.json", import.meta.url));
+  const inventory = JSON.parse(inventoryBytes.toString());
+  const hash = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+  const tar = Buffer.from("packed npm bytes for the runtime gate\n");
+  const pkg = {
+    tar: "candidate.tgz", version: "0.9.41", source_sha: head, run_id: "17", attempt: "1",
+    event_id: lock.event_id, integrity: `sha512-${createHash("sha512").update(tar).digest("base64")}`, sha256: hash(tar),
+  };
+  const save = (path: string, value: any) => writeFileSync(join(root, path), JSON.stringify(value));
+  writeFileSync(join(root, "release-lock.json"), lockBytes);
+  mkdirSync(join(root, "test/fixtures/release"), { recursive: true });
+  writeFileSync(join(root, "test/fixtures/release/runtime-inventory.json"), inventoryBytes);
+  mkdirSync(join(root, ".release-ci/offline-package"), { recursive: true });
+  writeFileSync(join(root, ".release-ci/offline-package/candidate.tgz"), tar);
+  save(".release-ci/offline-package/package.json", pkg);
+  const rows = [];
+  for (const arch of ["amd64", "arm64"]) for (const mode of ["npm", "image"]) {
+    const dir = `.release-ci/offline-runtime-${mode}-${arch}`;
+    mkdirSync(join(root, dir));
+    const row = {
+      arch, mode, source_sha: head, run_id: "17", artifact_attempt: mode === "npm" ? "1" : "2",
+      event_id: lock.event_id, package_integrity: pkg.integrity,
+      fixture_inventory_sha256: hash(inventoryBytes),
+      hub_image: `${lock.image.repository}@${lock.image.digest}`,
+      image_id: mode === "image" ? `sha256:${"7".repeat(64)}` : null,
+      suites: Object.entries(inventory.suites).map(([suite, expected]) => ({
+        suite, expected, passed: expected, skipped: 0, result: "success",
+      })),
+    };
+    const file = `${dir}/runtime-${arch}-${mode}.json`;
+    save(file, row);
+    rows.push({ dir, file, row });
+  }
+  const needs: Record<string, { result: string }> = {
+    changes: { result: "success" }, test: { result: "success" },
+    "runtime-npm": { result: "success" }, "runtime-image": { result: "success" },
+  };
+  const receipt = join(root, ".release-ci/gate-receipt.json");
+  const invoke = (results = needs) => {
+    rmSync(receipt, { force: true });
+    const result = spawnSync(process.execPath, [
+      fileURLToPath(new URL("../scripts/release-evidence.mjs", import.meta.url)), "gate",
+    ], {
+      cwd: root, encoding: "utf8",
+      env: {
+        ...process.env, NEEDS_JSON: JSON.stringify(results), GITHUB_SHA: head,
+        GITHUB_RUN_ID: "17", GITHUB_RUN_ATTEMPT: "2", PR_HEAD_SHA: head, PR_BASE_SHA: gate.base_sha, PR_NUMBER: "38",
+      },
+    });
+    assert.ifError(result.error);
+    assert.equal(result.signal, null, result.stderr);
+    return result;
+  };
+  return { root, rows, needs, pkg, receipt, save, invoke };
+}
+
+test("the real gate retains every mode/architecture row and its independent rerun attempt", (t) => {
+  const fixture = runtimeGate(t);
+  const result = fixture.invoke();
+  assert.equal(result.status, 0, result.stderr);
+  const receipt = JSON.parse(readFileSync(fixture.receipt, "utf8"));
+  assert.deepEqual(receipt.expected_jobs, [
+    "test", "runtime-npm (amd64)", "runtime-npm (arm64)", "runtime-image (amd64)", "runtime-image (arm64)",
+  ]);
+  assert.deepEqual(receipt.approved_skips, []);
+  assert.deepEqual(receipt.runtime, fixture.rows.map(({ row }) => row));
+  assert.equal(receipt.package.integrity, fixture.pkg.integrity);
+});
+
+test("leftover successful evidence cannot authorize a missing, failed, cancelled or skipped dependency", (t) => {
+  const fixture = runtimeGate(t);
+  assert.equal(fixture.invoke().status, 0);
+  for (const name of ["changes", "test", "runtime-npm", "runtime-image"]) {
+    for (const result of ["missing", "failure", "cancelled", "skipped"]) {
+      const needs: Record<string, { result: string }> = { ...fixture.needs, [name]: { result } };
+      if (result === "missing") delete needs[name];
+      const actual = fixture.invoke(needs);
+      assert.equal(actual.status, 1, `${name}: ${result}`);
+      assert.ok(!existsSync(fixture.receipt), `${name}: ${result} produced a receipt`);
+    }
+  }
+  const broad = fixture.invoke({ changes: { result: "success" }, test: { result: "success" }, runtime: { result: "success" } });
+  assert.equal(broad.status, 1);
+  assert.ok(!existsSync(fixture.receipt));
+});
+
+test("each runtime artifact must contain its own required mode/architecture row", (t) => {
+  const fixture = runtimeGate(t);
+  assert.equal(fixture.invoke().status, 0);
+  for (const { file, row } of fixture.rows) {
+    rmSync(join(fixture.root, file));
+    const missing = fixture.invoke();
+    assert.equal(missing.status, 1, file);
+    assert.match(missing.stderr, /missing\/duplicate or misplaced runtime evidence/);
+    assert.ok(!existsSync(fixture.receipt));
+    fixture.save(file, row);
+  }
+  const first = fixture.rows[0];
+  fixture.save(`${first.dir}/runtime-arm64-npm.json`, first.row);
+  const duplicate = fixture.invoke();
+  assert.equal(duplicate.status, 1);
+  assert.match(duplicate.stderr, /missing\/duplicate or misplaced runtime evidence/);
+  assert.ok(!existsSync(fixture.receipt));
+});
+
+test("split evidence still binds directory, source, run, package, fixtures and image identity", (t) => {
+  const fixture = runtimeGate(t);
+  assert.equal(fixture.invoke().status, 0);
+  const { file, row } = fixture.rows.find(({ row }) => row.mode === "image" && row.arch === "arm64")!;
+  for (const [patch, error] of [
+    [{ mode: "npm" }, /runtime artifact mode mismatch/],
+    [{ arch: "amd64" }, /runtime artifact architecture mismatch/],
+    [{ source_sha: otherHead }, /stale source evidence/],
+    [{ run_id: "16" }, /stale run evidence/],
+    [{ event_id: `sha256:${"9".repeat(64)}` }, /stale manifest evidence/],
+    [{ package_integrity: `sha512-${createHash("sha512").update("other package").digest("base64")}` }, /runtime tested another npm tarball/],
+    [{ fixture_inventory_sha256: "0".repeat(64) }, /Expected values/],
+    [{ hub_image: "ghcr.io/pineforge-4pass/pineforge-release:latest" }, /wrong tested hub image/],
+    [{ image_id: null }, /string|sha256/],
+  ] as Array<[Record<string, any>, RegExp]>) {
+    fixture.save(file, { ...row, ...patch });
+    const actual = fixture.invoke();
+    assert.equal(actual.status, 1, JSON.stringify(patch));
+    assert.match(actual.stderr, error);
+    assert.ok(!existsSync(fixture.receipt));
+  }
 });
 
 test("D2: TODAY: legacy 0.9.40 with the inherited base-image revision label is accepted", () => {

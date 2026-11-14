@@ -32,7 +32,7 @@ export function collect(kind, run = process.env.GITHUB_RUN_ID) {
   if (kind === "package") latest("offline-package");
   else if (kind === "evidence") {
     latest("offline-package");
-    for (const arch of ["amd64", "arm64"]) latest(`offline-runtime-${arch}`);
+    for (const mode of ["npm", "image"]) for (const arch of ["amd64", "arm64"]) latest(`offline-runtime-${mode}-${arch}`);
   } else if (kind === "gate") {
     latest("offline-gate");
     const p = read("offline-gate", "gate-receipt.json").package;

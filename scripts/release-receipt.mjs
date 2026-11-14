@@ -8,7 +8,7 @@ import { HUB, sha256, validateReady } from "./release-contract.mjs";
 import { parseVersion } from "./release-version.mjs";
 
 export const RECEIPT_FILE = ".release-ci/release-receipt.json";
-const checks = ["test", "runtime (amd64)", "runtime (arm64)", "release/ready"];
+const checks = ["test", "runtime-npm (amd64)", "runtime-npm (arm64)", "runtime-image (amd64)", "runtime-image (arm64)", "release/ready"];
 export const RECEIPT_POLICY = {
   workflow: "release-pr.yml", artifact: "release-receipt-offline", base: "main",
   ci: { workflow: "test.yml", expected: checks, approved_skips: [] },

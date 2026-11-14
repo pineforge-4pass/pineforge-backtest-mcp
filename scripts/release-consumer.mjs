@@ -279,7 +279,7 @@ export function latestGate(p) {
     const jobs = jobsFor(run);
     const checks = checkEvidence(run, jobs, RECEIPT_POLICY.ci, p.head.sha);
     assert.equal(gate.state, "ready"); assert.equal(gate.head_sha, p.head.sha); assert.equal(String(gate.pr), String(p.number));
-    assert.deepEqual(gate.expected_jobs, ["test", "runtime (amd64)", "runtime (arm64)"]);
+    assert.deepEqual(gate.expected_jobs, ["test", "runtime-npm (amd64)", "runtime-npm (arm64)", "runtime-image (amd64)", "runtime-image (arm64)"]);
     assert.deepEqual(gate.approved_skips, []);
     assert.equal(String(gate.run_id), String(run.id));
     assert.equal(Number(gate.attempt), run.run_attempt, "gate belongs to another run attempt");
