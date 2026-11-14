@@ -75,19 +75,24 @@ function driverAssignmentOffsets(driver, key) {
   // Strings/comments cannot supply a declaration or conceal a second target.
   // Conservatively treat every owned name before an assignment operator as a
   // target, including chained, unpacked, annotated and augmented assignments.
-  const tokens = /#[^\r\n]*|[rubfRUBF]*(?:"""(?:\\[\s\S]|(?!""")[\s\S])*"""|'''(?:\\[\s\S]|(?!''')[\s\S])*'''|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*')|\\\r?\n|[A-Za-z_]\w*|==|!=|<=|>=|(?:\*\*|\/\/|<<|>>|[+\-*/%@&|^:])?=|[^\S\r\n]+|[\s\S]/g;
+  // ID_* plus underscore covers Python's XID_* identifiers conservatively.
+  // Compare whole identifiers by NFKC identity, but keep original spelling and
+  // offsets: normalization must never turn an alias into a canonical line.
+  const tokens = /#[^\r\n]*|[rubfRUBF]*(?:"""(?:\\[\s\S]|(?!""")[\s\S])*"""|'''(?:\\[\s\S]|(?!''')[\s\S])*'''|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*')|\\\r?\n|[_\p{ID_Start}][_\p{ID_Continue}]*|==|!=|<=|>=|(?:\*\*|\/\/|<<|>>|[+\-*/%@&|^:])?=|[^\S\r\n]+|[\s\S]/gu;
   for (const match of driver.matchAll(tokens)) {
     const token = match[0];
     if (/^(?:[rubf]*["']|#|\\\r?\n)/i.test(token)) {
       // A formatted string can evaluate a named expression. Fail closed on an
       // owned assignment there as well, without accepting it as canonical.
-      if (/^[rubf]*f[rubf]*["']/i.test(token) &&
-          new RegExp(`\\b${key}\\b(?:\\s|\\\\\\r?\\n)*:=`).test(token)) {
-        offsets.add(match.index);
+      if (/^[rubf]*f[rubf]*["']/i.test(token)) {
+        const bindings = /([_\p{ID_Start}][_\p{ID_Continue}]*)(?:\s|\\\r?\n)*:=/gu;
+        for (const binding of token.matchAll(bindings)) {
+          if (binding[1].normalize("NFKC") === key) offsets.add(match.index + binding.index);
+        }
       }
       continue;
     }
-    if (token === key) targets.push(match.index);
+    if (token.normalize("NFKC") === key) targets.push(match.index);
     if (/^(?:\*\*|\/\/|<<|>>|[+\-*/%@&|^:])?=$/.test(token)) {
       for (const index of targets) offsets.add(index);
       targets = [];

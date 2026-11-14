@@ -148,6 +148,36 @@ const expectedDriverValues = (w: ReturnType<typeof wire>) => [
 ] as Array<[string, string]>;
 const priorDriverValue = (key: string) =>
   bytesOf("parity/pf_parity.py").toString("utf8").match(new RegExp(`^${key} = "([^"\\n]*)"$`, "m"))![1]!;
+// Hand-identified Python identifier aliases: each table column normalizes to
+// its literal ASCII key. U+FF33 is fullwidth S; fullwidth letters/digits and
+// U+FF3F (continuation underscore) have their ASCII compatibility mappings.
+// U+211D is double-struck R; U+1D406 is mathematical bold capital G, including
+// at identifier start. These letters are Python XID_Start/XID_Continue, the
+// digits/low line are valid continuations, and NFKC yields the named ASCII key.
+// This is a source-level witness rationale, not a claim of Python execution.
+const unicodeAliases: Array<[string, Record<string, string>]> = [
+  ["mixed fullwidth", {
+    GRADER_SHA256: "GRADER_\uFF33HA256", GRADER_SOURCE: "GRADER_\uFF33OURCE",
+  }],
+  ["fully fullwidth", {
+    GRADER_SHA256: "ＧＲＡＤＥＲ＿ＳＨＡ２５６", GRADER_SOURCE: "ＧＲＡＤＥＲ＿ＳＯＵＲＣＥ",
+  }],
+  ["letterlike symbol", {
+    GRADER_SHA256: "G\u211DADER_SHA256", GRADER_SOURCE: "G\u211DADER_SOURCE",
+  }],
+  ["supplementary compatibility letter", {
+    GRADER_SHA256: "\u{1D406}RADER_SHA256", GRADER_SOURCE: "\u{1D406}RADER_SOURCE",
+  }],
+];
+const unicodeBindings: Array<[string, (alias: string, value: string) => string]> = [
+  ["second assignment", (alias, value) => `${alias} = '${value}'`],
+  ["annotated assignment", (alias, value) => `${alias}: str = '${value}'`],
+  ["augmented assignment", (alias, value) => `${alias} += '${value}'`],
+  ["continued assignment", (alias, value) => `${alias} \\\n = '${value}'`],
+  ["named expression", (alias, value) => `(${alias} := '${value}')`],
+  ["formatted string named expression", (alias, value) => `f"{(${alias} := '${value}')}"`],
+  ["raw triple formatted string named expression", (alias, value) => `RF"""{(${alias} := '${value}')}"""`],
+];
 const assignmentMutations: Array<[string, (text: string, key: string, line: string) => string]> = [
   ["second single-quoted assignment", (text, key, line) =>
     text.replace(line, `${line}\n${key} = '${priorDriverValue(key)}'`)],
@@ -188,6 +218,19 @@ const assignmentMutations: Array<[string, (text: string, key: string, line: stri
     text.replace(line, `${line}\nf"{(${key} := 'stale provenance')}"`)],
   ["declaration concealed in a string", (text, _key, line) =>
     text.replace(line, `"""\n${line}\n"""`)],
+  // These duplicate aliases must be newly red on the old scanner: preserve the
+  // correct canonical line and append a stale binding to the installed driver.
+  ...unicodeAliases.flatMap(([style, aliases]) =>
+    unicodeBindings.map(([syntax, binding]): [string, (text: string, key: string, line: string) => string] => [
+      `${style} ${syntax}`,
+      (text, key, _line) => `${text}\n${binding(aliases[key]!, priorDriverValue(key))}\n`,
+    ])),
+  // Already refused by the old strict canonical check; these rows are controls,
+  // not evidence of newly red duplicate-alias discovery.
+  ...unicodeAliases.map(([style, aliases]): [string, (text: string, key: string, line: string) => string] => [
+    `${style} single noncanonical identifier`,
+    (text, key, line) => text.replace(line, line.replace(key, aliases[key]!)),
+  ]),
 ];
 for (const key of ["GRADER_SHA256", "GRADER_SOURCE"]) {
   for (const [label, mutate] of assignmentMutations) {
@@ -225,6 +268,50 @@ for (const key of ["GRADER_SHA256", "GRADER_SOURCE"]) {
       });
     }
   }
+}
+for (const [style, aliases] of unicodeAliases) {
+  test(`${style} non-binding text and unrelated Unicode identifiers preserve canonical provenance`, async () => {
+    const root = checkout();
+    try {
+      const current = wire(), incoming = wire("b".repeat(40));
+      const currentPlan = await prepare(current), incomingPlan = await prepare(incoming);
+      installParityUpdate(currentPlan, root);
+      verifyParityVendor(current.lock, root);
+      const target = join(root, "parity/pf_parity.py"), original = readFileSync(target, "utf8");
+      const controls = Object.entries(aliases).flatMap(([key, alias]) => [
+        `# ${alias} = 'stale provenance'; (${alias} := 'stale provenance')`,
+        `note = "${alias} = 'stale provenance'; (${alias} := 'stale provenance')"`,
+        `note = r"${alias} = 'stale provenance'"`,
+        `note = """\n${alias} = 'stale provenance'\n"""`,
+        `${alias}_OTHER = 'unrelated'`,
+        `前${key} = 'unrelated'`,
+        `${key}後 = 'unrelated'`,
+        `${alias}\u0301 = 'unrelated'`,
+        `f"{(前${key} := 'unrelated')}"`,
+        `f"{(${key}後 := 'unrelated')}"`,
+        `f"{(${alias}_OTHER := 'unrelated')}"`,
+        `(${alias})`,
+        `f"{${alias}}"`,
+      ]).join("\n");
+      // A supplementary character before both canonical lines also exercises
+      // original UTF-16 offsets rather than offsets into normalized text.
+      const decorated = original.replace("GRADER_SHA256 = ", "# \u{1D406} Unicode offset control\nGRADER_SHA256 = ") +
+        `\n測試 = 'unrelated Unicode variable'\n${controls}\n`;
+      writeFileSync(target, decorated);
+      const installed = installedSnapshot(root);
+      verifyParityVendor(current.lock, root);
+      installParityUpdate(currentPlan, root);
+      assert.deepEqual(installedSnapshot(root), installed, "accepted controls must keep their original spelling and bytes");
+      installParityUpdate(incomingPlan, root);
+      verifyParityVendor(incoming.lock, root);
+      let expected = decorated;
+      for (const [key, value] of expectedDriverValues(incoming)) {
+        const prior = expectedDriverValues(current).find(([name]) => name === key)![1];
+        expected = expected.replace(`${key} = "${prior}"`, `${key} = "${value}"`);
+      }
+      assert.equal(readFileSync(target, "utf8"), expected, "only the strict ASCII canonical values may be updated");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
 }
 test("one canonical assignment per name accepts prior values and installs the release-derived values", async () => {
   const root = checkout();
