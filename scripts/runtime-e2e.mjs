@@ -8,6 +8,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { readLock, sha256 } from "./release-contract.mjs";
 import { integrity } from "./release-evidence.mjs";
+import { verifyParityVendor } from "./release-parity.mjs";
 
 export function verifyTap(tap, expected) {
   assert.ok(Number.isInteger(expected) && expected > 0, "nonzero expected tests required");
@@ -18,6 +19,7 @@ export function verifyTap(tap, expected) {
 }
 async function run() {
   const lock = readLock();
+  verifyParityVendor(lock);
   const inventory = JSON.parse(readFileSync("test/fixtures/release/runtime-inventory.json"));
   const packed = JSON.parse(readFileSync(".release-ci/offline-package/package.json"));
   assert.equal(integrity(`.release-ci/offline-package/${packed.tar}`), packed.integrity, "test tarball changed");

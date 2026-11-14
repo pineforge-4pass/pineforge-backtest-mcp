@@ -32,8 +32,14 @@ A new event creates:
 bot/pineforge-release/main/<stable|next>/<version>-<manifest12>
 ```
 
-The PR changes only `VERSION`, `package.json`, `package-lock.json`, `server.json`,
-`release-lock.json` and `release-manifest.json`. The independent package version
+The PR changes `VERSION`, `package.json`, `package-lock.json`, `server.json`,
+`release-lock.json` and `release-manifest.json`. From hub release 1.11.0 onward,
+it also refreshes the six engine parity payload files in `parity/vendor`,
+`parity/vendor/SHA256SUMS`, the source statement in `parity/README.md`, and the
+grader hash/source in `parity/pf_parity.py`. The receiver checks every fetched
+byte from the pinned engine commit against the manifest before writing any
+vendor file. The strict PR allowlist includes exactly these additional paths
+for events carrying the validated parity identity. The independent package version
 uses the existing semver/patch-bump rules. The full event identity appears in a
 machine-readable PR marker. The App pushes only this branch. Duplicate desired
 or applied events create no new PR or publication. Older events are superseded;

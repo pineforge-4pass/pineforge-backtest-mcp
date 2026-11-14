@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { compareVersions, parseVersion } from "./release-version.mjs";
 
 export const HUB = "pineforge-4pass/pineforge-release";
@@ -25,7 +25,7 @@ const keys = (x, expected, label) => {
 // identity; earlier releases keep the historical version/tag/commit fields.
 const PARITY_CAPABILITY_FROM = "1.11.0";
 const PARITY_SCHEMA = "pineforge/parity-descriptor/v1";
-const PARITY_PAYLOAD = ["derive_corpus_feeds.py", "parity_paths.py", "pf_release_run.py", "run_parity_jailed.py", "run_strategy.py", "verify_corpus.py"];
+export const PARITY_PAYLOAD = ["derive_corpus_feeds.py", "parity_paths.py", "pf_release_run.py", "run_parity_jailed.py", "run_strategy.py", "verify_corpus.py"];
 // Keys sorted at every level, "," and ":" separators, non-ASCII left as it is, one trailing newline.
 const canonicalBytes = (value) => {
   const sorted = (x) => Array.isArray(x) ? x.map(sorted)
@@ -216,7 +216,12 @@ export async function verifyArtifacts(payload, manifestBytes) {
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   try {
     const lock = readLock("release-lock.json", { ready: process.argv[2] === "verify" });
-    if (process.argv[2] === "verify") await verifyArtifacts(lock, readFileSync("release-manifest.json"));
+    if (process.argv[2] === "verify") {
+      // A child avoids a top-level-await cycle: the verifier imports this
+      // module's contract functions, but must not wait on this CLI to finish.
+      execFileSync(process.execPath, [fileURLToPath(new URL("./release-parity.mjs", import.meta.url)), "verify"], { stdio: "inherit" });
+      await verifyArtifacts(lock, readFileSync("release-manifest.json"));
+    }
     else if (process.argv[2] === "image") await verifyOCI(lock);
     else if (process.argv[2] !== "show") throw new Error("expected verify, image or show");
     console.log(`release=${lock.release_version}\nimage=${lock.image.repository}@${lock.image.digest}\nevent_id=${lock.event_id ?? "bootstrap"}`);

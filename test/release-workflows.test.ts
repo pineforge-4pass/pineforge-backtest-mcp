@@ -29,6 +29,23 @@ test("the original event name accepts only the versioned ready contract", () => 
   assert.match(consumer, /verifyArtifacts\(incoming, manifest\)/);
 });
 
+test("the dispatch receiver refreshes the verified parity input before staging, and gates check it before runtime", () => {
+  const receive = consumer.slice(consumer.indexOf("async function receive()"), consumer.indexOf("function latestGate"));
+  const artifacts = receive.indexOf("await verifyArtifacts(incoming, manifest)");
+  const prepare = receive.indexOf("await prepareParityUpdate(incoming, manifest)");
+  const install = receive.indexOf("installParityUpdate(parityUpdate)");
+  const stage = receive.indexOf('git("add", ...allowed)');
+  assert.ok(artifacts >= 0 && artifacts < prepare && prepare < install && install < stage);
+  assert.match(consumer, /allowedFiles\(lock\)/);
+  assert.match(consumer, /allowedFiles\(incoming\)/);
+  const contract = read("scripts/release-contract.mjs");
+  assert.match(contract, /execFileSync\(process\.execPath, \[fileURLToPath\(new URL\("\.\/release-parity\.mjs", import\.meta\.url\)\), "verify"\]/);
+  assert.ok(contract.indexOf('"verify"], { stdio: "inherit" })') < contract.indexOf('await verifyArtifacts(lock, readFileSync'));
+  const runtime = read("scripts/runtime-e2e.mjs");
+  assert.ok(runtime.indexOf("verifyParityVendor(lock)") < runtime.indexOf("const inventory ="));
+  assert.match(runs(ci.jobs.test), /release-contract\.mjs verify/);
+});
+
 test("receipt opens a PR and cannot directly push main or a release tag", () => {
   assert.doesNotMatch(runs(receiver.jobs["update-pr"]), /git push|npm publish|distribution\.mjs/);
   const receive = consumer.slice(consumer.indexOf("async function receive()"), consumer.indexOf("function latestGate"));
