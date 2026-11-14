@@ -75,19 +75,95 @@ function driverAssignmentOffsets(driver, key) {
   // Strings/comments cannot supply a declaration or conceal a second target.
   // Conservatively treat every owned name before an assignment operator as a
   // target, including chained, unpacked, annotated and augmented assignments.
-  const tokens = /#[^\r\n]*|[rubfRUBF]*(?:"""(?:\\[\s\S]|(?!""")[\s\S])*"""|'''(?:\\[\s\S]|(?!''')[\s\S])*'''|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*')|\\\r?\n|[A-Za-z_]\w*|==|!=|<=|>=|(?:\*\*|\/\/|<<|>>|[+\-*/%@&|^:])?=|[^\S\r\n]+|[\s\S]/g;
-  for (const match of driver.matchAll(tokens)) {
-    const token = match[0];
-    if (/^(?:[rubf]*["']|#|\\\r?\n)/i.test(token)) {
-      // A formatted string can evaluate a named expression. Fail closed on an
-      // owned assignment there as well, without accepting it as canonical.
-      if (/^[rubf]*f[rubf]*["']/i.test(token) &&
-          new RegExp(`\\b${key}\\b(?:\\s|\\\\\\r?\\n)*:=`).test(token)) {
-        offsets.add(match.index);
+  // ID_* plus underscore covers Python's XID_* identifiers conservatively.
+  // Compare whole identifiers by NFKC identity, but keep original spelling and
+  // offsets: normalization must never turn an alias into a canonical line.
+  const tokens = /#[^\r\n]*|[rubfRUBF]*(?:"""|'''|"|')|\\\r?\n|[_\p{ID_Start}][_\p{ID_Continue}]*|==|!=|<=|>=|(?:\*\*|\/\/|<<|>>|[+\-*/%@&|^:])?=|[^\S\r\n]+|[\s\S]/guy;
+  const stringHeader = /^[rubf]*["']/i;
+  const identifier = /^[_\p{ID_Start}][_\p{ID_Continue}]*$/u;
+  const invalid = () => fail("PARITY_PROVENANCE_INVALID", key);
+  const tokenAt = (index) => {
+    tokens.lastIndex = index;
+    return tokens.exec(driver);
+  };
+  // Backslashes do not escape replacement braces, even in raw f-strings.
+  // A non-raw Unicode name escape, however, owns its braces as literal text.
+  function escapeEnd(index, raw) {
+    if (!raw && driver.startsWith("\\N{", index)) {
+      const end = driver.indexOf("}", index + 3);
+      if (end === -1) invalid();
+      return end + 1;
+    }
+    return index + (/[{}]/.test(driver[index + 1] ?? "") ? 1 : 2);
+  }
+  function stringEnd(index, header) {
+    const quote = header.match(/(?:"""|'''|"|')$/)[0];
+    const formatted = /f/i.test(header), raw = /r/i.test(header);
+    index += header.length;
+    while (index < driver.length) {
+      if (driver.startsWith(quote, index)) return index + quote.length;
+      const char = driver[index];
+      if (char === "\\") {
+        index = formatted ? escapeEnd(index, raw) : index + 2;
+      } else if (formatted && char === "{") {
+        index = driver[index + 1] === "{" ? index + 2 : fieldEnd(index + 1, quote, raw);
+      } else if (formatted && char === "}") {
+        if (driver[index + 1] !== "}") invalid();
+        index += 2;
+      } else index++;
+    }
+    invalid();
+  }
+  function formatEnd(index, quote, raw) {
+    // Format text is literal too; only its nested replacement fields evaluate.
+    // Unlike the outer literal, "{{" here starts a field containing a dict/set.
+    while (index < driver.length) {
+      if (driver.startsWith(quote, index)) invalid();
+      const char = driver[index];
+      if (char === "}") return index + 1;
+      if (char === "{") index = fieldEnd(index + 1, quote, raw);
+      else if (char === "\\") index = escapeEnd(index, raw);
+      else index++;
+    }
+    invalid();
+  }
+  function fieldEnd(index, quote, raw) {
+    const brackets = [];
+    let previous;
+    while (index < driver.length) {
+      const match = tokenAt(index), token = match[0];
+      index += token.length;
+      if (/^(?:#|\\\r?\n|\s)/.test(token)) continue;
+      if (stringHeader.test(token)) {
+        index = stringEnd(match.index, token);
+        previous = undefined;
+        continue;
       }
+      if (brackets.length === 0) {
+        if (token === "}") return index;
+        // At field level even ":=" introduces format text ("=" is fill/
+        // alignment); an evaluated walrus must be inside brackets.
+        if (token === ":" || token === ":=") return formatEnd(match.index + 1, quote, raw);
+      }
+      if (token === ":=" && previous?.[0].normalize("NFKC") === key) {
+        offsets.add(previous.index);
+      }
+      if (/^[([{]$/.test(token)) brackets.push(token);
+      if (/^[)\]}]$/.test(token) && brackets.pop() !== { ")": "(", "]": "[", "}": "{" }[token]) invalid();
+      previous = identifier.test(token) ? match : undefined;
+    }
+    invalid();
+  }
+  for (let index = 0; index < driver.length;) {
+    const match = tokenAt(index);
+    const token = match[0];
+    index += token.length;
+    if (stringHeader.test(token)) {
+      index = stringEnd(match.index, token);
       continue;
     }
-    if (token === key) targets.push(match.index);
+    if (/^(?:#|\\\r?\n)/.test(token)) continue;
+    if (token.normalize("NFKC") === key) targets.push(match.index);
     if (/^(?:\*\*|\/\/|<<|>>|[+\-*/%@&|^:])?=$/.test(token)) {
       for (const index of targets) offsets.add(index);
       targets = [];
