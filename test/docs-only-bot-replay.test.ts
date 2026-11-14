@@ -172,7 +172,7 @@ test("docs-only bot replay runs every required job and passes real receipt evide
   assert.ok(!Object.hasOwn(deploy.results, "gates / changes"));
 });
 
-test("CR-1084: receipt policy refuses each missing or unsuccessful runtime child in CI, E2E and deployment", (t) => {
+test("receipt policy refuses each missing or unsuccessful runtime child in CI, E2E and deployment", (t) => {
   const { run, sha } = replay(t, bot);
   for (const kind of ["ci", "e2e", "deploy"] as const) {
     const policy = RECEIPT_POLICY[kind];

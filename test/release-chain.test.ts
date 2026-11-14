@@ -209,7 +209,7 @@ test("D1: matching receipt still enforces required job success", () => {
   assert.match(actual.output.error, /unsuccessful required job/);
 });
 for (const name of ["runtime-npm (amd64)", "runtime-npm (arm64)", "runtime-image (amd64)", "runtime-image (arm64)"]) {
-  test(`CR-1084: a successful workflow and ready job cannot conceal missing/unsuccessful ${name}`, () => {
+  test(`a successful workflow and ready job cannot conceal missing/unsuccessful ${name}`, () => {
     found();
     for (const conclusion of ["missing", "failure", "cancelled", "skipped", "duplicate"]) {
       const changed = conclusion === "missing" ? jobs.filter((job: any) => job.name !== name)
@@ -222,7 +222,7 @@ for (const name of ["runtime-npm (amd64)", "runtime-npm (arm64)", "runtime-image
     }
   });
 }
-test("CR-1084: the former broad runtime job inventory cannot replace all four required mode jobs", () => {
+test("the former broad runtime job inventory cannot replace all four required mode jobs", () => {
   found();
   const actual = invoke("latestGate", () => gateState([run], {
     101: { ...gate, expected_jobs: ["test", "runtime (amd64)", "runtime (arm64)"] },
@@ -302,7 +302,7 @@ function runtimeGate(t: TestContext) {
   return { root, rows, needs, pkg, receipt, save, invoke };
 }
 
-test("CR-1084: the real gate retains every mode/architecture row and its independent rerun attempt", (t) => {
+test("the real gate retains every mode/architecture row and its independent rerun attempt", (t) => {
   const fixture = runtimeGate(t);
   const result = fixture.invoke();
   assert.equal(result.status, 0, result.stderr);
@@ -315,7 +315,7 @@ test("CR-1084: the real gate retains every mode/architecture row and its indepen
   assert.equal(receipt.package.integrity, fixture.pkg.integrity);
 });
 
-test("CR-1084: leftover successful evidence cannot authorize a missing, failed, cancelled or skipped dependency", (t) => {
+test("leftover successful evidence cannot authorize a missing, failed, cancelled or skipped dependency", (t) => {
   const fixture = runtimeGate(t);
   assert.equal(fixture.invoke().status, 0);
   for (const name of ["changes", "test", "runtime-npm", "runtime-image"]) {
@@ -332,7 +332,7 @@ test("CR-1084: leftover successful evidence cannot authorize a missing, failed, 
   assert.ok(!existsSync(fixture.receipt));
 });
 
-test("CR-1084: each runtime artifact must contain its own required mode/architecture row", (t) => {
+test("each runtime artifact must contain its own required mode/architecture row", (t) => {
   const fixture = runtimeGate(t);
   assert.equal(fixture.invoke().status, 0);
   for (const { file, row } of fixture.rows) {
@@ -351,7 +351,7 @@ test("CR-1084: each runtime artifact must contain its own required mode/architec
   assert.ok(!existsSync(fixture.receipt));
 });
 
-test("CR-1084: split evidence still binds directory, source, run, package, fixtures and image identity", (t) => {
+test("split evidence still binds directory, source, run, package, fixtures and image identity", (t) => {
   const fixture = runtimeGate(t);
   assert.equal(fixture.invoke().status, 0);
   const { file, row } = fixture.rows.find(({ row }) => row.mode === "image" && row.arch === "arm64")!;
