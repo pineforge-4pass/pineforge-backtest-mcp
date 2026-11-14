@@ -10,8 +10,10 @@ import { compareVersions, nextVersion } from "./release-version.mjs";
 import { chooseArtifact } from "./release-artifacts.mjs";
 import { verifyEvidence } from "./release-evidence.mjs";
 import { RECEIPT_POLICY, checkEvidence, servedIdentity, writeReceipt } from "./release-receipt.mjs";
+import { PARITY_FILES, prepareParityUpdate, installParityUpdate } from "./release-parity.mjs";
 
 export const ALLOWED = ["VERSION", "package.json", "package-lock.json", "server.json", "release-lock.json", "release-manifest.json"];
+const allowedFiles = (lock) => lock.versions?.engine?.parity ? [...ALLOWED, ...PARITY_FILES] : ALLOWED;
 const PREFIX = "bot/pineforge-release/main/";
 let activeLock, priorSnapshot;
 const REPO = process.env.GITHUB_REPOSITORY ?? "pineforge-4pass/pineforge-backtest-mcp";
@@ -161,11 +163,12 @@ function safePR(p) {
   assert.ok(commits.length > 0 && commits.length < 100, "unexpected commit inventory");
   for (const c of commits) assert.equal(c.author?.login, process.env.RELEASE_BOT_LOGIN, "human/unknown commits on bot branch; refusing to modify/merge");
   const files = api(`repos/${REPO}/pulls/${p.number}/files?per_page=100`);
-  assert.ok(files.length > 0 && files.length <= ALLOWED.length);
-  for (const f of files) { assert.ok(ALLOWED.includes(f.filename), `unexpected PR file ${f.filename}`); assert.notEqual(f.status, "removed"); }
   git("fetch", "origin", p.head.sha);
   assert.equal(git("rev-parse", "FETCH_HEAD"), p.head.sha);
   const lock = lockAt("FETCH_HEAD"); validateReady(lock);
+  const allowed = allowedFiles(lock);
+  assert.ok(files.length > 0 && files.length <= allowed.length);
+  for (const f of files) { assert.ok(allowed.includes(f.filename), `unexpected PR file ${f.filename}`); assert.notEqual(f.status, "removed"); }
   assert.equal(lock.event_id, m.event_id, "PR marker and committed lock disagree");
   assert.equal(lock.release_version, m.release_version);
   verifyManifest(lock, Buffer.from(execFileSync("git", ["show", "FETCH_HEAD:release-manifest.json"])));
@@ -212,6 +215,7 @@ export async function receive() {
   write(".release-ci/release-target.json", incoming);
   const manifest = downloadManifest(incoming);
   await verifyArtifacts(incoming, manifest);
+  const parityUpdate = await prepareParityUpdate(incoming, manifest);
   git("fetch", "origin", "main", "--tags");
   const current = lockAt("origin/main");
   const prs = prList();
@@ -230,13 +234,15 @@ export async function receive() {
   // Replays never reset an existing branch or overwrite a maintainer's edits.
   assert.equal(git("ls-remote", "--heads", "origin", `refs/heads/${branch}`), "", "existing branch without open PR requires repair; history preserved");
   git("checkout", "-b", branch, "origin/main");
+  installParityUpdate(parityUpdate);
   writeFileSync("VERSION", `${next}\n`);
   write("release-lock.json", incoming);
   writeFileSync("release-manifest.json", manifest);
   execFileSync("node", ["scripts/sync-version.mjs"], { stdio: "inherit" });
   if (rerelease) identicalRelease();
-  git("add", ...ALLOWED);
-  for (const f of git("diff", "--cached", "--name-only").split("\n")) assert.ok(ALLOWED.includes(f), `unexpected staged release file ${f}`);
+  const allowed = allowedFiles(incoming);
+  git("add", ...allowed);
+  for (const f of git("diff", "--cached", "--name-only").split("\n")) assert.ok(allowed.includes(f), `unexpected staged release file ${f}`);
   git("commit", "-m", `chore(release): ${next} on PineForge ${incoming.release_version}`);
   git("push", "origin", `HEAD:refs/heads/${branch}`);
   const body = `Consume PineForge ${incoming.release_version} with immutable image, package and facts identities.\n\n` +

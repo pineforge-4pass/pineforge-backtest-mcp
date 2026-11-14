@@ -81,34 +81,61 @@ timeout).
 
 ## Vendored files
 
-`vendor/verify_corpus.py` and `vendor/derive_corpus_feeds.py` are byte-identical
-to pineforge-engine v1.2.0 (commit 792a6b5b09be0608e616acdc3bb5f64f551e8163)
-`scripts/` files. `vendor/run_strategy.py` is byte-identical to the same path
-at engine commit b3192bfc2f5a24bf4efd6d1d01e01e8fe619dfed. These are unchanged
-upstream copies; `vendor/SHA256SUMS` lists their per-file provenance and hashes:
+The `pineforge-release` dispatch calls `scripts/release-consumer.mjs receive`.
+For releases with the engine parity contract (1.11.0 onward), that receiver
+downloads the hub manifest, verifies the artifacts and engine tag/commit, then
+fetches `scripts/<name>` from that immutable engine commit on GitHub. It checks
+each byte against `versions.engine.parity.payload_sha256` in the verified
+release manifest. It never fetches engine main.
 
-| file | sha256 |
-|---|---|
-| verify_corpus.py | 431452ecddc8184937951ddf9a4c5f29029731237301967b5b480800be6fd1a6 |
-| run_strategy.py | 36f7cf77e0b6355ce03f5d251c7c414f22be7da81ae4743a769f0527f06904d0 |
-| derive_corpus_feeds.py | d2d848d4e8c11f5fa6cc387dc150ab5a2e67ea800a702db4e6a7c1666539d99a |
+The six-file contract is `derive_corpus_feeds.py`, `parity_paths.py`,
+`pf_release_run.py`, `run_parity_jailed.py`, `run_strategy.py`, and
+`verify_corpus.py`. All six must verify before any vendor file is written.
+The receiver also generates `vendor/SHA256SUMS`, this source statement, and
+the driver's grader hash/source. The local driver still imports the grader
+and harness from `parity/vendor`; the harness imports the feed derivation.
+The other three files travel with the release payload even though the offline
+driver does not directly invoke their entry points.
 
-run_strategy.py imports derive_corpus_feeds.py when it loads; its other
-import, pf_release_run.py, is only reached by `--runner docker`, which this
-driver does not use.
+<!-- parity-source:start -->
+Refresh pending: this checkout still has the historical three-file set.
+`verify_corpus.py` and `derive_corpus_feeds.py` came from engine v1.2.0 commit
+`792a6b5b09be0608e616acdc3bb5f64f551e8163`; `run_strategy.py` came from commit
+`b3192bfc2f5a24bf4efd6d1d01e01e8fe619dfed`. These bytes have not been
+verified as the 1.12.0 payload. `vendor/SHA256SUMS` records their exact hashes.
+<!-- parity-source:end -->
 
-To re-vendor for a new engine tag:
+The complete local `vendor` inventory is exactly the six payload files plus
+`SHA256SUMS`; extra entries (including directories or symlinks) are rejected.
+The driver and this README remain outside `vendor`. Verification compares the
+installed driver's grader hash/source assignments and the exact README source
+block with values derived from the validated release lock, including the engine
+tag/commit and release manifest hash. The committed release lock/manifest bind
+the payload hashes to the engine release. This receiver reproduces
+the engine descriptor and engine sums hashes through `validateReady`; no offline
+consumer requires a local `PARITY-MANIFEST.json`, so no duplicate is installed.
+
+Missing bytes fail with `PARITY_PAYLOAD_MISSING`; changed bytes fail with
+`PARITY_DIGEST_MISMATCH`. Fetch failures, malformed manifests (including missing
+hashes), inconsistent manifest/sums, and invalid provenance fail with
+`PARITY_FETCH_FAILED`, `PARITY_MANIFEST_INVALID`,
+`PARITY_MANIFEST_SUMS_MISMATCH`, and `PARITY_PROVENANCE_INVALID`.
+Extra or non-file vendor entries fail with `PARITY_INVENTORY_INVALID`;
+missing inventory members fail with `PARITY_PAYLOAD_MISSING`.
+Altered installed provenance fails with `PARITY_PROVENANCE_INVALID`.
+Every failure exits nonzero; previous bytes never authorize the failed update.
+Both the source-artifact release check and runtime E2E verify the local inventory
+before they proceed. Historical events before 1.11.0 retain their existing path.
+
+For a proof checkout with its ready lock and matching manifest already pinned:
 
 ```
-for f in verify_corpus.py run_strategy.py derive_corpus_feeds.py; do
-  git -C <pineforge-engine> show <tag>:scripts/$f > parity/vendor/$f
-done
-(cd parity/vendor && shasum -a 256 verify_corpus.py run_strategy.py derive_corpus_feeds.py)
+node scripts/release-parity.mjs update
+node scripts/release-parity.mjs verify
 ```
 
-then update `vendor/SHA256SUMS`, `GRADER_SHA256` in `pf_parity.py`, the
-pinned hash in `test/parity-core.test.ts`, and re-run the corpus check
-(`scripts/parity-corpus/run.py`).
+These invoke the same updater used by the receiver, without creating a release
+PR. Run the tests and release-image corpus checks on the designated proof host.
 
 ## Tests
 

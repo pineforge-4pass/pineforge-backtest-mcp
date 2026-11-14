@@ -4,12 +4,15 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-// The grading core under parity/ calls pineforge-engine v1.2.0's own harness
-// and grader. These tests pin those vendored files to the bytes of that tag.
+// Modern pins bind the grader to the release payload. Historical pins retain
+// the original v1.2.0 digest until a verified payload update replaces it.
 
 const VENDOR = fileURLToPath(new URL("../parity/vendor/", import.meta.url));
 const DRIVER = fileURLToPath(new URL("../parity/pf_parity.py", import.meta.url));
-const GRADER_SHA256 = "431452ecddc8184937951ddf9a4c5f29029731237301967b5b480800be6fd1a6";
+const lock = JSON.parse(readFileSync(new URL("../release-lock.json", import.meta.url), "utf8"));
+const parity = lock.versions?.engine?.parity;
+const GRADER_SHA256 = parity?.payload_sha256["verify_corpus.py"] ??
+  "431452ecddc8184937951ddf9a4c5f29029731237301967b5b480800be6fd1a6";
 
 function sha256(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
@@ -40,11 +43,14 @@ test("vendor/ holds nothing SHA256SUMS does not list", () => {
   assert.deepEqual(present.sort(), [...listed.keys()].sort());
 });
 
-test("the grader is pineforge-engine v1.2.0 verify_corpus.py", () => {
+test("the grader matches its pinned engine source", () => {
   assert.equal(sums().get("verify_corpus.py"), GRADER_SHA256);
   assert.equal(sha256(VENDOR + "verify_corpus.py"), GRADER_SHA256);
-  assert.match(readFileSync(VENDOR + "SHA256SUMS", "utf8"),
-    /pineforge-engine v1\.2\.0 \(commit 792a6b5b09be0608e616acdc3bb5f64f551e8163\)/);
+  const provenance = readFileSync(VENDOR + "SHA256SUMS", "utf8");
+  if (parity) {
+    assert.ok(provenance.includes(`pineforge-engine ${lock.versions.engine.tag} commit ${lock.versions.engine.commit}`));
+    assert.deepEqual([...sums().keys()].sort(), Object.keys(parity.payload_sha256).sort());
+  } else assert.match(provenance, /pineforge-engine v1\.2\.0 \(commit 792a6b5b09be0608e616acdc3bb5f64f551e8163\)/);
 });
 
 test("the driver reports the grader hash it was vendored with", () => {

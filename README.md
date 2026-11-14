@@ -442,20 +442,18 @@ the top 10 in `top_results`, `results_truncated` and `report_path`.
 
 Give it a Pine v6 script and TradingView's own Strategy Tester export for it. It
 runs the script on the same market and window and grades the two trade lists
-trade by trade with `scripts/verify_corpus.py` of pineforge-engine v1.2.0 (sha256
-`431452ecddc8184937951ddf9a4c5f29029731237301967b5b480800be6fd1a6`), byte-identical
-in v1.3.0 and the frozen 1.4.0 candidate. The grader pin and scoring are unchanged.
+trade by trade with the engine's vendored `scripts/verify_corpus.py`.
+Release updates with an engine parity identity fetch the six-file payload from
+the pinned engine commit and verify every file against the release manifest's
+`engine.parity.payload_sha256` before replacing any vendor byte. Missing files,
+failed fetches, malformed manifests and digest disagreements fail closed.
+The offline driver continues to use the local grader, harness and feed derivation;
+all six release files are recorded in `parity/vendor/SHA256SUMS` after refresh.
+See [the source statement and update contract](parity/README.md#vendored-files)
+for this checkout's installed state and refresh status. Payload identity alone
+is not a native-engine parity proof.
 
-The separately vendored `scripts/run_strategy.py` execution harness is now copied
-byte-for-byte from the [frozen 1.4.0 engine candidate](https://github.com/pineforge-4pass/pineforge-engine/blob/b3192bfc2f5a24bf4efd6d1d01e01e8fe619dfed/scripts/run_strategy.py)
-(SHA-256 `36f7cf77e0b6355ce03f5d251c7c414f22be7da81ae4743a769f0527f06904d0`).
-Compared with the old v1.2.0/v1.3.0 vendor, it adds stable failure-code/argument
-handling, failed-status detection for empty error text, and Docker override
-string serialization. The grader and feed-derivation bytes stay unchanged in the
-[vendor hashes](parity/vendor/SHA256SUMS). Exact file identity and focused
-stand-in regression witnesses are not a fresh native-engine corpus parity proof.
-
-The harness CLI prints the engine failure code, but the parity tool does not yet return that code; this is a known limitation in 1.4.0.
+The harness CLI prints the engine failure code, but the parity tool does not yet return that code.
 
 **Historical interface evidence, not a 1.4.0 corpus re-run:** checked against
 the open [`pineforge-corpus`](https://github.com/pineforge-4pass/pineforge-corpus)
