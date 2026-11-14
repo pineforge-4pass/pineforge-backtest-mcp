@@ -178,6 +178,25 @@ const unicodeBindings: Array<[string, (alias: string, value: string) => string]>
   ["formatted string named expression", (alias, value) => `f"{(${alias} := '${value}')}"`],
   ["raw triple formatted string named expression", (alias, value) => `RF"""{(${alias} := '${value}')}"""`],
 ];
+const formattedSpellings: Array<[string, Record<string, string>]> = [
+  ["ASCII", { GRADER_SHA256: "GRADER_SHA256", GRADER_SOURCE: "GRADER_SOURCE" }],
+  ...unicodeAliases,
+];
+const formattedBindings: Array<[string, (alias: string, value: string) => string]> = [
+  ["binding surrounded by literal text", (alias, value) => `f"prefix {(${alias} := '${value}')} suffix"`],
+  ["binding surrounded by escaped braces", (alias, value) => `f"{{literal}} {(${alias} := '${value}')} {{tail}}"`],
+  ["raw backslash before binding field", (alias, value) => `rf"\\{(${alias} := '${value}')}"`],
+  ["binding inside dictionary expression", (alias, value) => `f"""{ {'value': (${alias} := '${value}')} }"""`],
+  ["binding after ordinary string", (alias, value) => `f"""{('${alias} := documentation', (${alias} := '${value}'))}"""`],
+  ["binding inside nested formatted string", (alias, value) => `f"""{f'{(${alias} := "${value}")}'}"""`],
+  // Same-quote fields and comments exercise Python 3.12+ formatted syntax.
+  ["binding inside same-quote nested formatted string", (alias, value) => `f"{f"{(${alias} := '${value}')}"}"`],
+  ["binding inside nested format field", (alias, value) => `f"{1:>{len((${alias} := '${value}'))}}"`],
+  ["binding inside nested format dictionary", (alias, value) =>
+    `f"""{type('LiteralFormat', (), {'__format__': lambda self, spec: spec})():{{'value': (${alias} := '${value}')}}}"""`],
+  ["binding after format field", (alias, value) => `f"{1:>2}{(${alias} := '${value}')}"`],
+  ["binding after expression comment", (alias, value) => `f"""{(${alias} # target\n := '${value}')}"""`],
+];
 const assignmentMutations: Array<[string, (text: string, key: string, line: string) => string]> = [
   ["second single-quoted assignment", (text, key, line) =>
     text.replace(line, `${line}\n${key} = '${priorDriverValue(key)}'`)],
@@ -225,6 +244,11 @@ const assignmentMutations: Array<[string, (text: string, key: string, line: stri
       `${style} ${syntax}`,
       (text, key, _line) => `${text}\n${binding(aliases[key]!, priorDriverValue(key))}\n`,
     ])),
+  ...formattedSpellings.flatMap(([style, aliases]) =>
+    formattedBindings.map(([syntax, binding]): [string, (text: string, key: string, line: string) => string] => [
+      `${style} ${syntax}`,
+      (text, key, _line) => `${text}\n${binding(aliases[key]!, priorDriverValue(key))}\n`,
+    ])),
   // Already refused by the old strict canonical check; these rows are controls,
   // not evidence of newly red duplicate-alias discovery.
   ...unicodeAliases.map(([style, aliases]): [string, (text: string, key: string, line: string) => string] => [
@@ -266,6 +290,84 @@ for (const key of ["GRADER_SHA256", "GRADER_SOURCE"]) {
           verifyParityVendor(incoming.lock, root);
         } finally { rmSync(root, { recursive: true, force: true }); }
       });
+    }
+  }
+}
+const formattedLiterals: Array<[string, (alias: string) => string]> = [
+  ["ordinary literal", (alias) => `f"${alias} := documentation"`],
+  ["escaped-brace literal", (alias) => `f"{{${alias} := documentation}}"`],
+  ["literal before evaluated read", (alias) => `f"${alias} := documentation {${alias}}"`],
+  ["literal after evaluated read", (alias) => `f"{${alias}} ${alias} := documentation"`],
+  ["raw literal and escaped braces", (alias) => `fr"\\path ${alias} := documentation {{literal}} {1}"`],
+  ["uppercase reverse raw prefix", (alias) => `RF'{{${alias} := documentation}} {1}'`],
+  ["triple double-quoted literal", (alias) => `f"""\n${alias} := documentation\n{1}\n"""`],
+  ["raw triple single-quoted literal", (alias) => `rf'''\n{{${alias} := documentation}}\n{1}\n'''`],
+  ["escaped quote in literal", (alias) => `f"quoted \\"${alias} := documentation\\" {1}"`],
+  ["Unicode name escape in literal", (alias) => `f"\\N{LATIN CAPITAL LETTER A} ${alias} := documentation"`],
+  ["ordinary string inside field", (alias) => `f"""{'${alias} := documentation'}"""`],
+  ["raw string inside field", (alias) => `f"""{r'${alias} := documentation'}"""`],
+  ["triple string inside field", (alias) => `f"""{'''${alias} := documentation'''}"""`],
+  ["dictionary string and subscript boundary", (alias) => `f"""{ {'note': '${alias} := documentation'}['note'] }"""`],
+  ["nested formatted literal", (alias) => `f"""{f'${alias} := documentation'}"""`],
+  ["same-quote string inside field", (alias) => `f"{"${alias} := documentation"}"`],
+  ["same-quote nested formatted literal", (alias) => `f"{f"${alias} := documentation"}"`],
+  ["expression comment", (alias) => `f"""{(\n# ${alias} := documentation\n1\n)}"""`],
+  ["string inside nested format field", (alias) => `f"{1:>{len('${alias} := documentation')}}"`],
+  // A real __format__ consumer makes arbitrary format text valid at evaluation.
+  ["format specification literal", (alias) =>
+    `f"""{type('LiteralFormat', (), {'__format__': lambda self, spec: spec})():${alias} := documentation}"""`],
+  ["colon-equals format specification literal", (alias) =>
+    `f"""{type('LiteralFormat', (), {'__format__': lambda self, spec: spec})():=${alias} := documentation}"""`],
+  ["dictionary inside nested format field", (alias) =>
+    `f"""{type('LiteralFormat', (), {'__format__': lambda self, spec: spec})():{{'note': '${alias} := documentation'}}}"""`],
+];
+for (const [style, aliases] of formattedSpellings) {
+  for (const key of ["GRADER_SHA256", "GRADER_SOURCE"]) {
+    for (const [label, literal] of formattedLiterals) {
+      for (const operation of ["install", "verify"]) {
+        test(`${operation} accepts ${key} ${style} ${label} and preserves literal bytes through updates`, async () => {
+          const root = checkout();
+          try {
+            const current = wire(), incoming = wire("b".repeat(40));
+            const currentPlan = await prepare(current), incomingPlan = await prepare(incoming);
+            installParityUpdate(currentPlan, root);
+            verifyParityVendor(current.lock, root);
+            const target = join(root, "parity/pf_parity.py"), original = readFileSync(target, "utf8");
+            const decorated = original.replace("GRADER_SHA256 = ", "# \u{1D406} offset control\nGRADER_SHA256 = ") +
+              `\n${literal(aliases[key]!)}\n`;
+            assert.notEqual(decorated, original, "literal case must change actual installed input");
+            writeFileSync(target, decorated);
+            const installed = installedSnapshot(root);
+            // Parent-red proof must fail this named behavioral assertion, after
+            // successful setup, with only this test file overlaid on 32b0fca.
+            assert.doesNotThrow(() => operation === "install"
+              ? installParityUpdate(currentPlan, root) : verifyParityVendor(current.lock, root),
+            `ACCEPT formatted literal: ${operation} ${key} ${style} ${label}`);
+            assert.deepEqual(installedSnapshot(root), installed, "acceptance must leave all installed bytes unchanged");
+            assert.doesNotThrow(() => verifyParityVendor(current.lock, root), "accepted literal must verify");
+            assert.doesNotThrow(() => installParityUpdate(currentPlan, root), "accepted literal must reinstall");
+            assert.deepEqual(installedSnapshot(root), installed, "literal installation must be idempotent");
+            for (const name of names) assert.notDeepEqual(incoming.files[name], current.files[name]);
+            assert.doesNotThrow(() => installParityUpdate(incomingPlan, root), "literal must permit later canonical updates");
+            assert.doesNotThrow(() => verifyParityVendor(incoming.lock, root), "updated literal input must verify");
+            let expected = decorated;
+            for (const [name, value] of expectedDriverValues(incoming)) {
+              const prior = expectedDriverValues(current).find(([field]) => field === name)![1];
+              expected = expected.replace(`${name} = "${prior}"`, `${name} = "${value}"`);
+            }
+            assert.equal(readFileSync(target, "utf8"), expected, "update must replace only the canonical ASCII values");
+            for (const name of names) {
+              assert.deepEqual(readFileSync(join(root, "parity/vendor", name)), incoming.files[name],
+                "update must install the actual incoming payload bytes");
+            }
+            assert.ok(readFileSync(join(root, "parity/README.md"), "utf8").includes(incoming.lock.manifest.sha256));
+            const updated = installedSnapshot(root);
+            assert.doesNotThrow(() => installParityUpdate(incomingPlan, root), "updated literal must reinstall");
+            assert.doesNotThrow(() => verifyParityVendor(incoming.lock, root), "reinstalled update must verify");
+            assert.deepEqual(installedSnapshot(root), updated, "updated installation must be idempotent");
+          } finally { rmSync(root, { recursive: true, force: true }); }
+        });
+      }
     }
   }
 }
