@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 // @ts-ignore workflow module.
 import { validateChannelState } from "../scripts/distribution.mjs";
 // @ts-ignore CI fixture module.
@@ -23,6 +24,8 @@ const legacyPrevious = {
   image_revision: "f05d2565985710f72f56008dd12eaa013ca8a0eb",
   identity: legacy,
 };
+const npmRegistry = "https://registry.npmjs.org/@pineforge%2fbacktest-mcp";
+const imageRepository = "ghcr.io/pineforge-4pass/pineforge-backtest-mcp";
 function mockEnv(bin: string, file: string) {
   const env = { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}`, PF_MOCK_STATE: file,
     NODE_OPTIONS: `--import=${new URL("./fixtures/release/mock-registry.mjs", import.meta.url).href}`,
@@ -32,10 +35,13 @@ function mockEnv(bin: string, file: string) {
   delete (env as Record<string, string | undefined>).NPM_TOKEN;
   return env;
 }
-function distribute(action: "prepare" | "promote", options: Record<string, unknown>) {
+function distribute(action: "prepare" | "promote", options: Record<string, unknown>,
+  overrides: Record<string, unknown> = {}, expectedStatus: 0 | 1 = 0) {
   const root = mkdtempSync(join(tmpdir(), "pf-distribute-test-"));
   const bin = join(root, "bin"); mkdirSync(bin);
-  const state = distributionState(root, action, options);
+  const fixture = distributionState(root, action, options);
+  const state = { ...fixture, ...overrides,
+    responses: { ...fixture.responses, ...(overrides.responses as Record<string, unknown> | undefined) } };
   const file = join(root, "mock.json");
   writeFileSync(file, JSON.stringify(state));
   const fake = readFileSync(new URL("./fixtures/release/mock-cli.mjs", import.meta.url));
@@ -45,9 +51,11 @@ function distribute(action: "prepare" | "promote", options: Record<string, unkno
   const result = spawnSync(process.execPath, [fileURLToPath(new URL("../scripts/distribution.mjs", import.meta.url)), action], {
     cwd: root, env, encoding: "utf8",
   });
-  assert.equal(result.status, 0, result.stderr);
-  const output = JSON.parse(readFileSync(join(root, ".release-ci", action === "prepare" ? "channel-state.json" : "distribution-evidence.json"), "utf8"));
-  return { output, state };
+  if (expectedStatus === 1) assert.equal(result.status, 1, result.stderr);
+  else assert.equal(result.status, 0, result.stderr);
+  const evidence = join(root, ".release-ci", action === "prepare" ? "channel-state.json" : "distribution-evidence.json");
+  const output = expectedStatus === 0 ? JSON.parse(readFileSync(evidence, "utf8")) : null;
+  return { output, state, result, mock: JSON.parse(readFileSync(file, "utf8")), evidence };
 }
 function restore(overrides: Record<string, unknown> = {}, channelState = original) {
   const root = mkdtempSync(join(tmpdir(), "pf-restore-test-"));
@@ -92,6 +100,106 @@ test("a missing npm trusted-publisher dist-tag permission fails and never report
   assert.equal(state.npm_version, "0.9.41");
   assert.ok(!existsSync(receipt));
 });
+test("channel split: an npm dist-tag that does not take effect never retags GHCR", () => {
+  const { result, mock, evidence } = distribute("promote", { previous: original.previous }, {
+    npm_tags: { latest: original.previous.npm_version },
+    responses: { [npmRegistry]: { npm_tags: true } },
+    dist_tag_add_noop: "latest",
+  }, 1);
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(mock.npm_tags.latest, original.previous.npm_version);
+  assert.deepEqual(mock.calls.filter((c: any) => c.tool === "npm" && c.args[0] === "dist-tag"), [
+    { tool: "npm", args: ["dist-tag", "add", "@pineforge/backtest-mcp@0.9.41", "latest"] },
+  ]);
+  assert.ok(!mock.calls.some((c: any) => c.tool === "docker"
+    && c.args.slice(0, 5).join(" ") === `buildx imagetools create --tag ${imageRepository}:latest`));
+  assert.match(result.stderr, /npm channel not activated/);
+  assert.ok(!existsSync(evidence));
+});
+
+test("channel split: a failed npm restore still retags GHCR to the previous digest and exits non-zero", () => {
+  for (const failure of [
+    { deny_dist_tag: true },
+    { dist_tag_add_noop: "latest" },
+    { deny_dist_tag: true, image_inspect_stdout: `Digest: sha256:${"c".repeat(64)}` },
+  ]) {
+    const { result, state, receipt } = restore({
+      ...failure, events: [], npm_tags: { latest: original.version },
+      responses: { [npmRegistry]: { npm_tags: true } },
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.deepEqual(state.calls.filter((c: any) => c.tool === "docker" && c.args[2] === "create"), [
+      { tool: "docker", args: ["buildx", "imagetools", "create", "--tag", `${imageRepository}:latest`,
+        `${imageRepository}@${original.previous.image_digest}`] },
+    ]);
+    assert.equal(state.image_digest, original.previous.image_digest);
+    assert.equal(state.npm_tags.latest, original.version);
+    assert.equal(state.events.filter((e: any) => e.kind === "fetch" && e.url === npmRegistry).length, 2);
+    assert.equal(state.calls.at(-1).args.join(" "), `buildx imagetools inspect ${imageRepository}:latest`);
+    assert.match(result.stderr, /npm latest restoration failed:/);
+    if ("image_inspect_stdout" in failure) {
+      assert.match(result.stderr, /GHCR latest restoration failed:/);
+      assert.match(result.stderr, /Error: channel restoration failed:[\s\S]*GHCR latest restoration failed:/);
+    } else assert.match(result.stderr, /GHCR latest restoration succeeded/);
+    assert.match(result.stderr, /Error: channel restoration failed: npm latest restoration failed:/);
+    assert.ok(!existsSync(receipt));
+  }
+});
+
+test("channel split: promote and restore happy paths are unchanged", () => {
+  const promoted = distribute("promote", { previous: original.previous }, {
+    events: [], npm_tags: { latest: original.previous.npm_version },
+    responses: { [npmRegistry]: { npm_tags: true } },
+  });
+  const events = promoted.mock.events;
+  const npmWrite = events.findIndex((e: any) => e.kind === "npm" && e.args[0] === "dist-tag");
+  const npmRead = events.findIndex((e: any, i: number) => i > npmWrite
+    && e.kind === "fetch" && e.url === npmRegistry && e.json["dist-tags"].latest === original.version);
+  const imageWrite = events.findIndex((e: any) => e.kind === "docker" && e.args[2] === "create");
+  assert.ok(npmWrite >= 0);
+  assert.ok(npmRead > npmWrite);
+  assert.ok(npmRead < imageWrite, "npm channel read-back must precede the GHCR retag");
+  assert.equal(promoted.mock.npm_tags.latest, original.version);
+  const mutations = (state: any) => state.calls.filter((c: any) =>
+    (c.tool === "npm" && c.args[0] === "dist-tag") || (c.tool === "docker" && c.args[2] === "create")
+    || (c.tool === "gh" && c.args.slice(0, 2).join(" ") === "release edit"));
+  const publishedDigest = `sha256:${"c".repeat(64)}`;
+  assert.deepEqual(mutations(promoted.mock), [
+    { tool: "npm", args: ["dist-tag", "add", "@pineforge/backtest-mcp@0.9.41", "latest"] },
+    { tool: "docker", args: ["buildx", "imagetools", "create", "--tag", `${imageRepository}:latest`,
+      `${imageRepository}@${publishedDigest}`] },
+    { tool: "gh", args: ["release", "edit", "v0.9.41", "--repo", "pineforge-4pass/pineforge-backtest-mcp", "--latest"] },
+  ]);
+  assert.equal(promoted.mock.image_digest, publishedDigest);
+  const packageIntegrity = `sha512-${createHash("sha512").update("candidate packed package fixture\n").digest("base64")}`;
+  const deployment = JSON.stringify({ channel: "latest", image: publishedDigest, integrity: packageIntegrity, version: "0.9.41" }) + "\n";
+  assert.deepEqual(promoted.output, {
+    event_id: "sha256:04fe43bf37933ae1061fe8a5235bb147a7b5b7eca15c0dde1ea55d62bd009a38",
+    run_id: 77, run_attempt: 1, source: original.source_sha,
+    deployed: { ...original.previous.identity, source: original.source_sha,
+      deployment_id_sha256: createHash("sha256").update(deployment).digest("hex") },
+    previous: original.previous.identity,
+  });
+
+  const restored = restore();
+  assert.equal(restored.result.status, 0, restored.result.stderr);
+  assert.equal(restored.state.npm_version, original.previous.npm_version);
+  assert.equal(restored.state.image_digest, original.previous.image_digest);
+  assert.deepEqual(mutations(restored.state), [
+    { tool: "npm", args: ["dist-tag", "add", "@pineforge/backtest-mcp@0.9.40", "latest"] },
+    { tool: "docker", args: ["buildx", "imagetools", "create", "--tag", `${imageRepository}:latest`,
+      `${imageRepository}@${original.previous.image_digest}`] },
+    { tool: "gh", args: ["release", "edit", "v0.9.40", "--repo", "pineforge-4pass/pineforge-backtest-mcp", "--latest"] },
+  ]);
+  const { completed_at, ...receipt } = JSON.parse(readFileSync(restored.receipt, "utf8"));
+  assert.match(completed_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  assert.deepEqual(receipt, {
+    ...original, state: "failed", recovery: "channels_restored", restored: original.previous,
+    cli: "11.21.0", authentication: "github-oidc",
+    ...(process.env.GITHUB_RUN_ATTEMPT === undefined ? {} : { attempt: process.env.GITHUB_RUN_ATTEMPT }),
+  });
+});
+
 test("a prior channel state cannot downgrade latest to a prerelease", () => {
   assert.doesNotThrow(() => validateChannelState(original));
   assert.throws(() => validateChannelState({ ...original, previous: { ...original.previous, npm_version: "0.9.40-rc.1" } }));

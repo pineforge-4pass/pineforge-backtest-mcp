@@ -380,12 +380,12 @@ async function promote() {
   if (state.channel === "latest") assert.ok([state.previous.image_digest, image.digest].includes(imageDigest(`${OCI}:latest`)), "image channel moved since preparation");
   oidc(); desired(lock);
   cmd("npm", "dist-tag", "add", `${NPM}@${state.version}`, state.channel);
+  assert.equal((await npmMetadata())["dist-tags"][state.channel], state.version, "npm channel not activated");
   if (state.channel === "latest") {
     assert.ok([state.previous.image_digest, image.digest].includes(imageDigest(`${OCI}:latest`)), "image channel moved since preparation");
     docker("buildx", "imagetools", "create", "--tag", `${OCI}:latest`, `${OCI}@${image.digest}`);
     assert.equal(imageDigest(`${OCI}:latest`), image.digest, "latest image not activated");
   }
-  assert.equal((await npmMetadata())["dist-tags"][state.channel], state.version, "npm channel not activated");
   if (state.channel === "latest") gh("release", "edit", `v${state.version}`, "--repo", REPO, "--latest");
   // Internal observations, not a consumer receipt. The trusted coordinator
   // waits for this entire publisher run to finish before producing contract v1.
@@ -415,13 +415,29 @@ async function restore() {
     assert.ok([state.previous.image_digest, image?.digest].includes(digest), "newer image channel must not be rolled back");
   }
   oidc();
-  cmd("npm", "dist-tag", "add", `${NPM}@${state.previous.npm_version}`, state.channel);
-  assert.equal((await npmMetadata())["dist-tags"][state.channel], state.previous.npm_version, "OIDC channel restoration failed");
+  const outcomes = [];
+  let failed = false;
+  const attemptRestoration = async (name, write, readBack) => {
+    const errors = [];
+    try { write(); } catch (error) { errors.push(`command: ${error.message}`); }
+    // Verify the pointer even when the CLI failed; neither failure may prevent
+    // attempting the other channel's restoration.
+    try { await readBack(); } catch (error) { errors.push(`read-back: ${error.message}`); }
+    failed ||= errors.length > 0;
+    const outcome = `${name} restoration ${errors.length ? `failed: ${errors.join("; ")}` : "succeeded"}`;
+    outcomes.push(outcome);
+    console.error(outcome);
+  };
+  await attemptRestoration(`npm ${state.channel}`,
+    () => cmd("npm", "dist-tag", "add", `${NPM}@${state.previous.npm_version}`, state.channel),
+    async () => assert.equal((await npmMetadata())["dist-tags"][state.channel], state.previous.npm_version, "OIDC channel restoration failed"));
   if (state.channel === "latest") {
-    docker("buildx", "imagetools", "create", "--tag", `${OCI}:latest`, `${OCI}@${state.previous.image_digest}`);
-    assert.equal(imageDigest(`${OCI}:latest`), state.previous.image_digest, "image channel restoration failed");
-    gh("release", "edit", `v${state.previous.npm_version}`, "--repo", REPO, "--latest");
+    await attemptRestoration("GHCR latest",
+      () => docker("buildx", "imagetools", "create", "--tag", `${OCI}:latest`, `${OCI}@${state.previous.image_digest}`),
+      () => assert.equal(imageDigest(`${OCI}:latest`), state.previous.image_digest, "image channel restoration failed"));
   }
+  if (failed) throw new Error(`channel restoration failed: ${outcomes.join("; ")}`);
+  if (state.channel === "latest") gh("release", "edit", `v${state.previous.npm_version}`, "--repo", REPO, "--latest");
   save(`${dir}/restoration-receipt.json`, { ...state, state: "failed", recovery: "channels_restored", restored: state.previous,
     cli: "11.21.0", authentication: "github-oidc", attempt: process.env.GITHUB_RUN_ATTEMPT, completed_at: new Date().toISOString() });
 }

@@ -49,6 +49,8 @@ if (tool === "git" && s.git) {
   if (args[1] === "create") console.log(s.incident_url);
 } else if (tool === "npm" && args[0] === "--version") console.log(s.cli ?? "11.21.0");
 else if (tool === "npm" && args[0] === "dist-tag" && args[1] === "add") {
+  // Model an acknowledged write that leaves only the selected tag unchanged.
+  if (typeof s.dist_tag_add_noop === "string" && s.dist_tag_add_noop === args[3]) process.exit(0);
   if (s.npm_tags) {
     const version = args[2].split("@").at(-1);
     const tag = args[3];
