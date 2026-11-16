@@ -60,6 +60,12 @@ else if (tool === "npm" && args[0] === "dist-tag" && args[1] === "add") {
     }
     if (s.dist_tag_add_stderr) { console.error(s.dist_tag_add_stderr); process.exit(1); }
     if (s.deny_dist_tag) { console.error("trusted publisher cannot manage dist-tags"); process.exit(1); }
+    // Opt-in packument lag starts only after a successful dist-tag mutation.
+    if (Number.isSafeInteger(s.dist_tag_lag_reads) && s.dist_tag_lag_reads > 0) {
+      (s.npm_tag_visibility ??= {})[tag] = {
+        previous: s.npm_tags[tag], remaining: s.dist_tag_lag_reads, reads: 0,
+      };
+    }
     s.npm_tags[tag] = version;
     (s.npm_writes ??= []).push({ operation: "add", tag, version });
     writeFileSync(file, JSON.stringify(s));

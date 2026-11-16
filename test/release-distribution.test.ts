@@ -35,6 +35,12 @@ function mockEnv(bin: string, file: string) {
   delete (env as Record<string, string | undefined>).NPM_TOKEN;
   return env;
 }
+function distributionArgs(action: "prepare" | "promote" | "restore") {
+  // The fixture injects a virtual clock into the exported helpers. It falls back
+  // to the real CLI on main/r1 so RED runs exercise their actual read-back.
+  const entry = action === "prepare" ? "../scripts/distribution.mjs" : "./fixtures/release/mock-registry.mjs";
+  return [fileURLToPath(new URL(entry, import.meta.url)), action];
+}
 function distribute(action: "prepare" | "promote", options: Record<string, unknown>,
   overrides: Record<string, unknown> = {}, expectedStatus: 0 | 1 = 0) {
   const root = mkdtempSync(join(tmpdir(), "pf-distribute-test-"));
@@ -48,9 +54,10 @@ function distribute(action: "prepare" | "promote", options: Record<string, unkno
   for (const tool of ["gh", "npm", "docker"]) writeFileSync(join(bin, tool), fake, { mode: 0o755 });
   const env = { ...mockEnv(bin, file), GITHUB_REF: "refs/tags/v0.9.41",
     GITHUB_SHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", GITHUB_RUN_ID: "77", GITHUB_RUN_ATTEMPT: "1" };
-  const result = spawnSync(process.execPath, [fileURLToPath(new URL("../scripts/distribution.mjs", import.meta.url)), action], {
-    cwd: root, env, encoding: "utf8",
+  const result = spawnSync(process.execPath, distributionArgs(action), {
+    cwd: root, env, encoding: "utf8", timeout: 15_000,
   });
+  assert.ifError(result.error);
   if (expectedStatus === 1) assert.equal(result.status, 1, result.stderr);
   else assert.equal(result.status, 0, result.stderr);
   const evidence = join(root, ".release-ci", action === "prepare" ? "channel-state.json" : "distribution-evidence.json");
@@ -69,7 +76,8 @@ function restore(overrides: Record<string, unknown> = {}, channelState = origina
   const fake = readFileSync(new URL("./fixtures/release/mock-cli.mjs", import.meta.url));
   for (const tool of ["gh", "npm", "docker"]) writeFileSync(join(bin, tool), fake, { mode: 0o755 });
   const env = mockEnv(bin, file);
-  const result = spawnSync(process.execPath, [fileURLToPath(new URL("../scripts/distribution.mjs", import.meta.url)), "restore"], { cwd: root, env, encoding: "utf8" });
+  const result = spawnSync(process.execPath, distributionArgs("restore"), { cwd: root, env, encoding: "utf8", timeout: 15_000 });
+  assert.ifError(result.error);
   return { result, state: JSON.parse(readFileSync(file, "utf8")), receipt: join(ci, "restoration-receipt.json") };
 }
 test("restoration executes the OIDC dist-tag operation and restores both recorded pointers", () => {
@@ -114,6 +122,8 @@ test("channel split: an npm dist-tag that does not take effect never retags GHCR
   assert.ok(!mock.calls.some((c: any) => c.tool === "docker"
     && c.args.slice(0, 5).join(" ") === `buildx imagetools create --tag ${imageRepository}:latest`));
   assert.match(result.stderr, /npm channel not activated/);
+  assert.equal(mock.elapsed, 600_000);
+  assert.deepEqual(mock.sleeps, Array(60).fill(10_000));
   assert.ok(!existsSync(evidence));
 });
 
@@ -134,7 +144,10 @@ test("channel split: a failed npm restore still retags GHCR to the previous dige
     ]);
     assert.equal(state.image_digest, original.previous.image_digest);
     assert.equal(state.npm_tags.latest, original.version);
-    assert.equal(state.events.filter((e: any) => e.kind === "fetch" && e.url === npmRegistry).length, 2);
+    // One preflight plus 61 poll reads, including the read at the deadline.
+    assert.equal(state.events.filter((e: any) => e.kind === "fetch" && e.url === npmRegistry).length, 62);
+    assert.equal(state.elapsed, 600_000);
+    assert.deepEqual(state.sleeps, Array(60).fill(10_000));
     assert.equal(state.calls.at(-1).args.join(" "), `buildx imagetools inspect ${imageRepository}:latest`);
     assert.match(result.stderr, /npm latest restoration failed:/);
     if ("image_inspect_stdout" in failure) {
@@ -194,6 +207,88 @@ test("channel split: promote and restore happy paths are unchanged", () => {
   const { completed_at, ...receipt } = JSON.parse(readFileSync(restored.receipt, "utf8"));
   assert.match(completed_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
   assert.deepEqual(receipt, {
+    ...original, state: "failed", recovery: "channels_restored", restored: original.previous,
+    cli: "11.21.0", authentication: "github-oidc",
+    ...(process.env.GITHUB_RUN_ATTEMPT === undefined ? {} : { attempt: process.env.GITHUB_RUN_ATTEMPT }),
+  });
+});
+
+test("channel split: a delayed npm channel becomes visible within the poll, then GHCR moves", () => {
+  const { result, mock, output, evidence } = distribute("promote", { previous: original.previous }, {
+    events: [], npm_tags: { latest: original.previous.npm_version }, dist_tag_lag_reads: 2,
+    responses: { [npmRegistry]: { npm_tags: true } },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const events = mock.events;
+  const npmWrite = events.findIndex((e: any) => e.kind === "npm" && e.args[0] === "dist-tag");
+  const reads = events.flatMap((e: any, i: number) => i > npmWrite && e.kind === "fetch" && e.url === npmRegistry
+    ? [{ index: i, version: e.json["dist-tags"].latest }] : []);
+  const imageWrites = events.flatMap((e: any, i: number) => e.kind === "docker" && e.args[2] === "create" ? [i] : []);
+  assert.ok(npmWrite >= 0);
+  assert.deepEqual(reads.map((r: any) => r.version), [
+    original.previous.npm_version, original.previous.npm_version, original.version,
+  ]);
+  assert.equal(imageWrites.length, 1);
+  assert.ok(reads.every((r: any) => r.index > npmWrite && r.index < imageWrites[0]),
+    "every npm read-back must precede the single GHCR retag");
+  assert.deepEqual(mock.npm_tag_visibility.latest, {
+    previous: original.previous.npm_version, remaining: 0, reads: 3,
+  });
+  assert.deepEqual(mock.sleeps, [10_000, 10_000]);
+  assert.equal(mock.elapsed, 20_000);
+  assert.equal(mock.npm_tags.latest, original.version);
+  const publishedDigest = `sha256:${"c".repeat(64)}`;
+  assert.equal(mock.image_digest, publishedDigest);
+  assert.deepEqual(mock.calls.filter((c: any) =>
+    (c.tool === "npm" && c.args[0] === "dist-tag") || (c.tool === "docker" && c.args[2] === "create")
+    || (c.tool === "gh" && c.args.slice(0, 2).join(" ") === "release edit")), [
+    { tool: "npm", args: ["dist-tag", "add", "@pineforge/backtest-mcp@0.9.41", "latest"] },
+    { tool: "docker", args: ["buildx", "imagetools", "create", "--tag", `${imageRepository}:latest`,
+      `${imageRepository}@${publishedDigest}`] },
+    { tool: "gh", args: ["release", "edit", "v0.9.41", "--repo", "pineforge-4pass/pineforge-backtest-mcp", "--latest"] },
+  ]);
+  assert.ok(existsSync(evidence));
+  const packageIntegrity = `sha512-${createHash("sha512").update("candidate packed package fixture\n").digest("base64")}`;
+  const deployment = JSON.stringify({ channel: "latest", image: publishedDigest, integrity: packageIntegrity, version: "0.9.41" }) + "\n";
+  assert.deepEqual(output, {
+    event_id: "sha256:04fe43bf37933ae1061fe8a5235bb147a7b5b7eca15c0dde1ea55d62bd009a38",
+    run_id: 77, run_attempt: 1, source: original.source_sha,
+    deployed: { ...original.previous.identity, source: original.source_sha,
+      deployment_id_sha256: createHash("sha256").update(deployment).digest("hex") },
+    previous: original.previous.identity,
+  });
+});
+
+test("channel split: a delayed npm restore read-back is not reported as a failure", () => {
+  const { result, state, receipt } = restore({
+    events: [], npm_tags: { latest: original.version }, dist_tag_lag_reads: 2,
+    responses: { [npmRegistry]: { npm_tags: true } },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "npm latest restoration succeeded\nGHCR latest restoration succeeded\n");
+  assert.equal(state.npm_tags.latest, original.previous.npm_version);
+  assert.equal(state.image_digest, original.previous.image_digest);
+  const npmWrite = state.events.findIndex((e: any) => e.kind === "npm" && e.args[0] === "dist-tag");
+  assert.ok(npmWrite >= 0);
+  const reads = state.events.filter((e: any, i: number) => i > npmWrite && e.kind === "fetch" && e.url === npmRegistry);
+  assert.deepEqual(reads.map((e: any) => e.json["dist-tags"].latest), [
+    original.version, original.version, original.previous.npm_version,
+  ]);
+  assert.deepEqual(state.npm_tag_visibility.latest, { previous: original.version, remaining: 0, reads: 3 });
+  assert.deepEqual(state.sleeps, [10_000, 10_000]);
+  assert.equal(state.elapsed, 20_000);
+  assert.deepEqual(state.calls.filter((c: any) =>
+    (c.tool === "npm" && c.args[0] === "dist-tag") || (c.tool === "docker" && c.args[2] === "create")
+    || (c.tool === "gh" && c.args.slice(0, 2).join(" ") === "release edit")), [
+    { tool: "npm", args: ["dist-tag", "add", "@pineforge/backtest-mcp@0.9.40", "latest"] },
+    { tool: "docker", args: ["buildx", "imagetools", "create", "--tag", `${imageRepository}:latest`,
+      `${imageRepository}@${original.previous.image_digest}`] },
+    { tool: "gh", args: ["release", "edit", "v0.9.40", "--repo", "pineforge-4pass/pineforge-backtest-mcp", "--latest"] },
+  ]);
+  assert.ok(existsSync(receipt));
+  const { completed_at, ...recovery } = JSON.parse(readFileSync(receipt, "utf8"));
+  assert.match(completed_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  assert.deepEqual(recovery, {
     ...original, state: "failed", recovery: "channels_restored", restored: original.previous,
     cli: "11.21.0", authentication: "github-oidc",
     ...(process.env.GITHUB_RUN_ATTEMPT === undefined ? {} : { attempt: process.env.GITHUB_RUN_ATTEMPT }),

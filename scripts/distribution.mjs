@@ -367,7 +367,7 @@ async function githubRelease() {
     verifyManifest(lock, readFileSync(join(temp, "release-manifest.json")));
   } else gh("release", "upload", tag, "release-manifest.json", "--repo", REPO);
 }
-async function promote() {
+export async function promote(timing = {}) {
   const lock = readLock("release-lock.json", { ready: true }); desired(lock);
   const state = validateChannelState(json(`${dir}/offline-channels/channel-state.json`));
   const image = json(`${dir}/offline-image-publication/image-publication.json`);
@@ -380,7 +380,8 @@ async function promote() {
   if (state.channel === "latest") assert.ok([state.previous.image_digest, image.digest].includes(imageDigest(`${OCI}:latest`)), "image channel moved since preparation");
   oidc(); desired(lock);
   cmd("npm", "dist-tag", "add", `${NPM}@${state.version}`, state.channel);
-  assert.equal((await npmMetadata())["dist-tags"][state.channel], state.version, "npm channel not activated");
+  await pollNpmMetadata("", (m) => m?.["dist-tags"]?.[state.channel] === state.version,
+    `npm channel not activated: ${state.channel} -> ${state.version}`, timing);
   if (state.channel === "latest") {
     assert.ok([state.previous.image_digest, image.digest].includes(imageDigest(`${OCI}:latest`)), "image channel moved since preparation");
     docker("buildx", "imagetools", "create", "--tag", `${OCI}:latest`, `${OCI}@${image.digest}`);
@@ -398,7 +399,7 @@ async function promote() {
     ...(state.previous.identity.legacy === true ? { image_revision: state.previous.image_revision } : {}) });
   await alert("verified", `Verified npm ${state.channel} and the immutable multi-architecture image. External hosts are not part of this distribution evidence.`);
 }
-async function restore() {
+export async function restore(timing = {}) {
   const state = validateChannelState(json(`${dir}/offline-channels/channel-state.json`));
   // For manual restoration, only artifacts from this repository's real
   // publisher are accepted, never PR workflow artifacts or caller payloads.
@@ -430,7 +431,8 @@ async function restore() {
   };
   await attemptRestoration(`npm ${state.channel}`,
     () => cmd("npm", "dist-tag", "add", `${NPM}@${state.previous.npm_version}`, state.channel),
-    async () => assert.equal((await npmMetadata())["dist-tags"][state.channel], state.previous.npm_version, "OIDC channel restoration failed"));
+    () => pollNpmMetadata("", (m) => m?.["dist-tags"]?.[state.channel] === state.previous.npm_version,
+      `OIDC channel restoration failed: ${state.channel} -> ${state.previous.npm_version}`, timing));
   if (state.channel === "latest") {
     await attemptRestoration("GHCR latest",
       () => docker("buildx", "imagetools", "create", "--tag", `${OCI}:latest`, `${OCI}@${state.previous.image_digest}`),
