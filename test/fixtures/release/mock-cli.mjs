@@ -49,6 +49,8 @@ if (tool === "git" && s.git) {
   if (args[1] === "create") console.log(s.incident_url);
 } else if (tool === "npm" && args[0] === "--version") console.log(s.cli ?? "11.21.0");
 else if (tool === "npm" && args[0] === "dist-tag" && args[1] === "add") {
+  // Model an acknowledged write that leaves only the selected tag unchanged.
+  if (typeof s.dist_tag_add_noop === "string" && s.dist_tag_add_noop === args[3]) process.exit(0);
   if (s.npm_tags) {
     const version = args[2].split("@").at(-1);
     const tag = args[3];
@@ -58,6 +60,12 @@ else if (tool === "npm" && args[0] === "dist-tag" && args[1] === "add") {
     }
     if (s.dist_tag_add_stderr) { console.error(s.dist_tag_add_stderr); process.exit(1); }
     if (s.deny_dist_tag) { console.error("trusted publisher cannot manage dist-tags"); process.exit(1); }
+    // Opt-in packument lag starts only after a successful dist-tag mutation.
+    if (Number.isSafeInteger(s.dist_tag_lag_reads) && s.dist_tag_lag_reads > 0) {
+      (s.npm_tag_visibility ??= {})[tag] = {
+        previous: s.npm_tags[tag], remaining: s.dist_tag_lag_reads, reads: 0,
+      };
+    }
     s.npm_tags[tag] = version;
     (s.npm_writes ??= []).push({ operation: "add", tag, version });
     writeFileSync(file, JSON.stringify(s));
