@@ -4,6 +4,7 @@
 // against a fake prefix whose entrypoint reports what it sees.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync,
 } from "node:fs";
@@ -108,15 +109,24 @@ test("overlayEnv points the entrypoint at the overlay and the shim at the real p
 
 // ─── docker arguments ─────────────────────────────────────────────────────
 
-const base = { image: "img:1", cppPath: "/t/strategy.cpp", csvPath: "/t/bars.csv" };
+const base = {
+  image: "img:1",
+  cppPath: join(PREFIX, "bin", "entrypoint.sh"),
+  csvPath: join(PREFIX, "instrument.json"),
+};
+const sha256 = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
+const cppMountSource = (args: string[]) =>
+  args.find((arg) => arg.endsWith(":/in/strategy.cpp:ro"))!.slice(0, -":/in/strategy.cpp:ro".length);
+const cppVouches = (args: string[]) => args.filter((arg) => arg.startsWith("PINEFORGE_STRATEGY_CPP_SHA256="));
 
 test("docker arguments without an instrument are the ones they always were", () => {
   assert.deepEqual(dockerBacktestArgs({ ...base, inputs: { a: 1 }, runtime: { input_tf: "240" } }), [
     "run", "--rm", "--network=none",
     "-e", 'PINEFORGE_INPUTS={"a":"1"}',
     "-e", "PINEFORGE_INPUT_TF=240",
-    "-v", "/t/strategy.cpp:/in/strategy.cpp:ro",
-    "-v", "/t/bars.csv:/in/ohlcv.csv:ro",
+    "-e", `PINEFORGE_STRATEGY_CPP_SHA256=${sha256(readFileSync(base.cppPath))}`,
+    "-v", `${base.cppPath}:/in/strategy.cpp:ro`,
+    "-v", `${base.csvPath}:/in/ohlcv.csv:ro`,
     "img:1",
   ]);
 });
@@ -129,11 +139,26 @@ test("docker arguments with an overlay mount it read-only and point the entrypoi
     `-e PINEFORGE_PREFIX=${OVERLAY_MOUNT}`,
     `-e PINEFORGE_SYMINFO=${OVERLAY_MOUNT}/instrument.json`,
     "-e REAL_PREFIX=/opt/pineforge",
-    "-v /t/strategy.cpp:/in/strategy.cpp:ro",
-    "-v /t/bars.csv:/in/ohlcv.csv:ro",
+    `-e PINEFORGE_STRATEGY_CPP_SHA256=${sha256(readFileSync(base.cppPath))}`,
+    `-v ${base.cppPath}:/in/strategy.cpp:ro`,
+    `-v ${base.csvPath}:/in/ohlcv.csv:ro`,
   ]);
   assert.equal(args.at(-1), "img:1");
   assert.ok(args.includes("--network=none"));
+});
+
+test("the Docker vouch matches the independently hashed strategy.cpp mount", () => {
+  const first = mkdtempSync(join(workRoot, "cpp-first-"));
+  const second = mkdtempSync(join(workRoot, "cpp-second-"));
+  writeFileSync(join(first, "strategy.cpp"), "int main() { return 1; }\n");
+  writeFileSync(join(second, "strategy.cpp"), "int main() { return 2; }\n");
+  const firstArgs = dockerBacktestArgs({ ...base, cppPath: join(first, "strategy.cpp") });
+  const secondArgs = dockerBacktestArgs({ ...base, cppPath: join(second, "strategy.cpp") });
+  assert.equal(cppVouches(firstArgs).length, 1);
+  assert.equal(cppVouches(secondArgs).length, 1);
+  assert.equal(cppVouches(firstArgs)[0], `PINEFORGE_STRATEGY_CPP_SHA256=${sha256(readFileSync(cppMountSource(firstArgs)))}`);
+  assert.equal(cppVouches(secondArgs)[0], `PINEFORGE_STRATEGY_CPP_SHA256=${sha256(readFileSync(cppMountSource(secondArgs)))}`);
+  assert.notEqual(cppVouches(firstArgs)[0], cppVouches(secondArgs)[0]);
 });
 
 // ─── DockerRunner against a fake docker ───────────────────────────────────
@@ -225,6 +250,53 @@ async function localRun(call: { instrument?: Instrument; inputs?: Record<string,
   writeFileSync(join(dir, "bars.csv"), "timestamp,open,high,low,close,volume\n");
   return await new LocalRunner(prefix).backtest({ cppPath: join(dir, "strategy.cpp"), csvPath: join(dir, "bars.csv"), ...call }) as Seen;
 }
+
+test("LocalRunner vouches the final private strategy.cpp bytes over inherited input", async () => {
+  const prefix = mkdtempSync(join(workRoot, "digest-prefix-"));
+  mkdirSync(join(prefix, "bin"));
+  const entrypoint = join(prefix, "bin", "entrypoint.sh");
+  writeFileSync(entrypoint, '#!/usr/bin/env bash\nprintf \'{"digest":"%s"}\\n\' "$PINEFORGE_STRATEGY_CPP_SHA256"\n');
+  chmodSync(entrypoint, 0o755);
+  const dir = mkdtempSync(join(workRoot, "digest-input-"));
+  const cppPath = join(dir, "strategy.cpp");
+  const csvPath = join(dir, "bars.csv");
+  const firstBytes = "int main() { return 1; }\n";
+  const secondBytes = "int main() { return 2; }\n";
+  writeFileSync(csvPath, "timestamp,open,high,low,close,volume\n");
+  const inherited = process.env.PINEFORGE_STRATEGY_CPP_SHA256;
+  try {
+    process.env.PINEFORGE_STRATEGY_CPP_SHA256 = "0".repeat(64);
+    writeFileSync(cppPath, firstBytes);
+    const first = await new LocalRunner(prefix).backtest({ cppPath, csvPath }) as { digest: string };
+    process.env.PINEFORGE_STRATEGY_CPP_SHA256 = "f".repeat(64);
+    writeFileSync(cppPath, secondBytes);
+    const second = await new LocalRunner(prefix).backtest({ cppPath, csvPath }) as { digest: string };
+    assert.equal(first.digest, sha256(firstBytes));
+    assert.equal(second.digest, sha256(secondBytes));
+    assert.notEqual(first.digest, second.digest);
+  } finally {
+    if (inherited === undefined) delete process.env.PINEFORGE_STRATEGY_CPP_SHA256;
+    else process.env.PINEFORGE_STRATEGY_CPP_SHA256 = inherited;
+  }
+});
+
+test("a missing C++ source fails hashing before Docker can spawn", async () => {
+  const log = join(workRoot, "missing-cpp-docker.log");
+  fakeDocker('echo spawned >> "$MISSING_CPP_DOCKER_LOG"');
+  process.env.MISSING_CPP_DOCKER_LOG = log;
+  try {
+    await assert.rejects(
+      new DockerRunner("img:9").backtest({
+        cppPath: join(workRoot, "does-not-exist.cpp"),
+        csvPath: join(workRoot, "does-not-exist.csv"),
+      }),
+      /ENOENT/,
+    );
+    assert.equal(existsSync(log), false);
+  } finally {
+    delete process.env.MISSING_CPP_DOCKER_LOG;
+  }
+});
 
 test("LocalRunner.backtest with an instrument runs the entrypoint on an overlay of its prefix", async () => {
   const seen = await localRun({ instrument: BTC, inputs: { "Fast Length": "8" } });
@@ -437,6 +509,11 @@ test("a run that fails naming the overlay is run once more without it, and says 
   assert.deepEqual(out, { ok: true, without_overlay: true });
   const log = dockerLog();
   assert.equal(log.length, 2, "exactly one retry");
+  const firstArgv = log[0]!.split(" ");
+  const secondArgv = log[1]!.split(" ");
+  assert.equal(cppVouches(firstArgv).length, 1);
+  assert.deepEqual(cppVouches(firstArgv), cppVouches(secondArgv));
+  assert.equal(cppVouches(firstArgv)[0], `PINEFORGE_STRATEGY_CPP_SHA256=${sha256(readFileSync(cppMountSource(firstArgv)))}`);
   assert.ok(log[0]!.includes(":/opt/pineforge-overlay:ro") && log[0]!.includes("PINEFORGE_PREFIX=/opt/pineforge-overlay"));
   assert.ok(!log[1]!.includes("pineforge-overlay") && !log[1]!.includes("PINEFORGE_PREFIX"), log[1]);
   assert.deepEqual(notices, [RUN_NOTICE]);

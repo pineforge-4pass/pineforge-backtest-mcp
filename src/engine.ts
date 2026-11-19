@@ -7,8 +7,9 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, writeFile, rm, readFile, readdir, readlink, realpath } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -232,12 +233,28 @@ export interface DockerBacktestArgs {
   notices?: string[];
 }
 
+function sha256(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function strategyCppSha256(cppPath: string): string {
+  return sha256(readFileSync(cppPath));
+}
+
 /**
  * The `docker run` arguments of one backtest. `overlayDir` is the instrument's
  * prefix overlay on the host (see overlay.ts): mounted read-only, with the
  * entrypoint pointed at it.
  */
 export function dockerBacktestArgs(args: DockerBacktestArgs, overlayDir?: string): string[] {
+  return dockerBacktestArgsWithDigest(args, overlayDir, strategyCppSha256(args.cppPath));
+}
+
+function dockerBacktestArgsWithDigest(
+  args: DockerBacktestArgs,
+  overlayDir: string | undefined,
+  strategyCppSha256: string,
+): string[] {
   const dockerArgs: string[] = [
     "run", "--rm",
     "--network=none",
@@ -271,6 +288,7 @@ export function dockerBacktestArgs(args: DockerBacktestArgs, overlayDir?: string
     for (const [k, v] of Object.entries(overlayEnv(OVERLAY_MOUNT, IMAGE_PREFIX))) dockerArgs.push("-e", `${k}=${v}`);
   }
   dockerArgs.push(
+    "-e", `PINEFORGE_STRATEGY_CPP_SHA256=${strategyCppSha256}`,
     "-v", `${args.cppPath}:/in/strategy.cpp:ro`,
     "-v", `${args.csvPath}:/in/ohlcv.csv:ro`,
     args.image,
@@ -286,10 +304,15 @@ export function dockerBacktestArgs(args: DockerBacktestArgs, overlayDir?: string
  * cannot mount) is run once more without it. A failure that does not name the overlay is the run's own.
  */
 export async function dockerBacktest(args: DockerBacktestArgs): Promise<unknown> {
+  const cppSha256 = await strategyCppSha256(args.cppPath);
   let overlay: Overlay | undefined = await tryOverlay(args.instrument, IMAGE_PREFIX, IMAGE_LAYOUT, args.notices);
   try {
     for (let attempt = 0; ; attempt++) {
-      const child = spawn("docker", dockerBacktestArgs(args, overlay?.dir), { stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(
+        "docker",
+        dockerBacktestArgsWithDigest(args, overlay?.dir, cppSha256),
+        { stdio: ["ignore", "pipe", "pipe"] },
+      );
       const { stdout, stderr, code } = await collectChild(child, DOCKER_TIMEOUT_MS);
       if (code !== 0) {
         if (overlay && attempt === 0 && mentionsOverlay(stderr, overlay.dir)) {
@@ -487,10 +510,13 @@ export class LocalRunner implements EngineRunner {
     let overlay: Overlay | undefined;
     try {
       const cpp = await readFile(call.cppPath, "utf8");
-      await writeFile(join(dir, "strategy.cpp"), cpp, "utf8");
+      const strategyPath = join(dir, "strategy.cpp");
+      await writeFile(strategyPath, cpp, "utf8");
+      const cppSha256 = strategyCppSha256(strategyPath);
       const csv = await readFile(call.csvPath, "utf8");
       await writeFile(join(dir, "ohlcv.csv"), csv, "utf8");
       const env = engineEnv(call);
+      env.PINEFORGE_STRATEGY_CPP_SHA256 = cppSha256;
       // No overlay when there is nothing to apply or none can be built: the run is then the image's own.
       const real = resolve(this.prefix);
       overlay = await tryOverlay(call.instrument, real, () => layoutOf(real), call.notices);

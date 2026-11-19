@@ -9,6 +9,11 @@ import { pathToFileURL } from "node:url";
 import { readLock, sha256 } from "./release-contract.mjs";
 import { integrity } from "./release-evidence.mjs";
 import { verifyParityVendor } from "./release-parity.mjs";
+import { compareVersions } from "./release-version.mjs";
+
+const VOUCH_FILE = "strategy-cpp-vouch.e2e.ts";
+const VOUCH_LEGACY_RELEASE = "1.9.1";
+const VOUCH_LEGACY_SKIP = "legacy release before 1.9.1: pinned image predates strategy.cpp vouch enforcement";
 
 export function verifyTap(tap, expected) {
   assert.ok(Number.isInteger(expected) && expected > 0, "nonzero expected tests required");
@@ -16,6 +21,22 @@ export function verifyTap(tap, expected) {
   assert.equal(n("tests"), expected, "suite inventory changed");
   assert.equal(n("pass"), expected, "incomplete suite");
   for (const key of ["fail", "cancelled", "skipped", "todo"]) assert.equal(n(key), 0, `${key} tests cannot authorize release`);
+}
+function verifyVouchTap(tap, legacy) {
+  const n = (key) => { const m = tap.match(new RegExp(`^# ${key} (\\d+)$`, "m")); assert.ok(m, `missing vouch ${key} count`); return Number(m[1]); };
+  assert.equal(n("tests"), 1, "vouch control inventory changed");
+  assert.equal(n("fail"), 0, "vouch control failed");
+  assert.equal(n("cancelled"), 0, "vouch control cancelled");
+  assert.equal(n("todo"), 0, "vouch control todo");
+  if (legacy) {
+    assert.equal(n("pass"), 0, "legacy vouch skip must not count as pass");
+    assert.equal(n("skipped"), 1, "legacy vouch control must skip exactly once");
+    assert.match(tap, new RegExp(`# SKIP ${VOUCH_LEGACY_SKIP.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  } else {
+    assert.equal(n("pass"), 1, "vouch control must pass exactly once");
+    assert.equal(n("skipped"), 0, "current vouch control cannot skip");
+    assert.doesNotMatch(tap, /# SKIP/);
+  }
 }
 async function run() {
   const lock = readLock();
@@ -67,6 +88,17 @@ async function run() {
   delete env.PF_E2E_PROBES;
   const suites = [];
   try {
+    const vouchChunks = [];
+    const vouchCode = await new Promise((done, reject) => {
+      const child = spawn("node", ["--import", "tsx", "--test", "--test-reporter=tap", `test/e2e/${VOUCH_FILE}`], { env, cwd: root, stdio: ["ignore", "pipe", "inherit"] });
+      child.stdout.on("data", (b) => { process.stdout.write(b); vouchChunks.push(b); });
+      child.on("error", reject);
+      child.on("exit", done);
+    });
+    const vouchTap = Buffer.concat(vouchChunks).toString();
+    writeFileSync(`.release-ci/${mode}-${VOUCH_FILE}.tap`, vouchTap);
+    assert.equal(vouchCode, 0, `${mode} ${VOUCH_FILE} failed`);
+    verifyVouchTap(vouchTap, compareVersions(lock.release_version, VOUCH_LEGACY_RELEASE) < 0);
     for (const [file, count] of Object.entries(inventory.suites)) {
       const chunks = [];
       const code = await new Promise((done, reject) => {
