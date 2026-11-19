@@ -98,11 +98,7 @@ The other three files travel with the release payload even though the offline
 driver does not directly invoke their entry points.
 
 <!-- parity-source:start -->
-Refresh pending: this checkout still has the historical three-file set.
-`verify_corpus.py` and `derive_corpus_feeds.py` came from engine v1.2.0 commit
-`792a6b5b09be0608e616acdc3bb5f64f551e8163`; `run_strategy.py` came from commit
-`b3192bfc2f5a24bf4efd6d1d01e01e8fe619dfed`. These bytes have not been
-verified as the 1.12.0 payload. `vendor/SHA256SUMS` records their exact hashes.
+Installed payload: pineforge-engine `v1.13.0`, commit `438924f9b799f19eaee943ec68c2fd2879e899b7`, verified against release manifest SHA-256 `1f37c85fdd5a7781ca4ab6a835a0c7bfa51f1b3cbcdd9da0e40dcde7f1f7cea5`.
 <!-- parity-source:end -->
 
 The complete local `vendor` inventory is exactly the six payload files plus
