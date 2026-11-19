@@ -1,6 +1,7 @@
-# verify_corpus.py: pineforge-engine v1.2.0 (commit 792a6b5b09be0608e616acdc3bb5f64f551e8163), scripts/verify_corpus.py, byte-identical
-431452ecddc8184937951ddf9a4c5f29029731237301967b5b480800be6fd1a6  verify_corpus.py
-# run_strategy.py: pineforge-engine commit b3192bfc2f5a24bf4efd6d1d01e01e8fe619dfed, scripts/run_strategy.py, byte-identical
-36f7cf77e0b6355ce03f5d251c7c414f22be7da81ae4743a769f0527f06904d0  run_strategy.py
-# derive_corpus_feeds.py: pineforge-engine v1.2.0 (commit 792a6b5b09be0608e616acdc3bb5f64f551e8163), scripts/derive_corpus_feeds.py, byte-identical
-d2d848d4e8c11f5fa6cc387dc150ab5a2e67ea800a702db4e6a7c1666539d99a  derive_corpus_feeds.py
+# pineforge-engine v1.13.0 commit 438924f9b799f19eaee943ec68c2fd2879e899b7; scripts/ payload verified against release-manifest.json
+4e611e68553affd9a777eccb5f66eda46019d4de46a8f1d108732958f499eae6  derive_corpus_feeds.py
+34f03af021990245187283230ba72bdfaa1f5618ff156b526cbd1468aa30f3e0  parity_paths.py
+c49c87e35c421b90cc7e67e34589ffb5ddce0700e19718665737a038d13777b2  pf_release_run.py
+afbb79772f6694a1b886a681cf2284f997a52416b551116949a30152a139fc28  run_parity_jailed.py
+315532a4a689dbef23686e6e5500ca6407427a52bfa6307393701b5d2514db47  run_strategy.py
+e4ef1c9f48585d5461301e9d49afcdb629b7f39379c4dcb44eb83f252b99d636  verify_corpus.py

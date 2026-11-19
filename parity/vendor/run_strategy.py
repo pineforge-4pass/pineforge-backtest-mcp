@@ -27,6 +27,22 @@ Usage examples
     # Don't overwrite engine_trades.csv if it already exists
     python scripts/run_strategy.py corpus/basic/greedy --no-overwrite
 
+    # Read trades from a verified v1 report sink; keep the same CSV bytes.
+    # Every probe prints one machine-greppable canary line,
+    #   sink_canary: probe=<id> bytes=<n> records=<n> trades=<n> equity=<n> ok
+    # (probe id = the strategy directory's basename); a sink that is absent,
+    # empty or short prints the same fields with "FAIL <reason>" and fails
+    # the probe.
+    PINEFORGE_REPORT_SINK=1 python scripts/run_strategy.py corpus/basic/greedy
+
+    # Test-only: keep the sink file of chosen probes as a sweep artifact.
+    # The value is "all" or comma-separated probe ids; a sweep that wants five
+    # artifacts names the first five probes of its own order. Each kept file
+    # is announced as "sink_kept: probe=<id> path=<file>" and lives in
+    # $TMPDIR; without the variable every sink file is unlinked at close.
+    PINEFORGE_REPORT_SINK=1 PINEFORGE_KEEP_REPORT_SINK=greedy \\
+        python scripts/run_strategy.py corpus/basic/greedy
+
     # All strategies (matches `bash scripts/run_corpus.sh`)
     for d in corpus/*/*/; do python scripts/run_strategy.py "$d"; done
 
@@ -43,6 +59,9 @@ bar (the bar the first entry was placed on) -- or, on a run whose feed
 starts on TradingView's first computed bar, before that bar -- and the
 trades written are those entered inside the tape's span —
 _tv_entry_emit_window states the exact rule.
+
+PINEFORGE_RUN_JSON_PROFILE=jailed excludes this driver before any run or
+output staging: run_request_invalid, strategy_driver_no_jailed_route.
 """
 from __future__ import annotations
 
@@ -58,28 +77,80 @@ import os
 import re
 import struct
 import sys
+import tempfile
 import time
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+from parity_paths import (
+    CORPUS_ENV,
+    DERIVED_ENV,
+    HARNESS_ENV,
+    resolve_paths,
+)
+
+
+_PARITY_PATHS = resolve_paths()
+REPO_ROOT = _PARITY_PATHS.repo_root
+HARNESS_DIR = _PARITY_PATHS.harness_dir
 # The corpus ships a single committed feed (full-history 1m, Git LFS);
 # the 15m chart feeds are derived from it locally. main() calls
 # ensure_derived() only for a run that reads a derived feed
 # (_reads_derived_feed): importing this module stays side-effect free for
 # consumers that only want the ABI mirrors, and a run on its own feed
 # (every benchmark slot) needs no corpus checkout.
+import derive_corpus_feeds as _derive_corpus_feeds  # noqa: E402
 from derive_corpus_feeds import (  # noqa: E402
     DERIVED_15M, DERIVED_15M_WINDOW, DERIVED_DIR, ensure_derived)
 REFERENCE_OHLCV = DERIVED_15M_WINDOW
 WARMUP_OHLCV = DERIVED_15M
 DEFAULT_OHLCV = WARMUP_OHLCV
 
-# Keys in inputs.json that are validator/harness metadata, not Pine input()
-# values. Mirrors the canonical validator's VALIDATION_INPUT_META_KEYS so
-# they are not forwarded to ``strategy_set_input`` (which would either
-# silently no-op or pollute the strategy's input table).
+
+def _apply_parity_paths(paths) -> None:
+    global _PARITY_PATHS, REPO_ROOT, HARNESS_DIR
+    global DERIVED_DIR, DERIVED_15M, DERIVED_15M_WINDOW
+    global REFERENCE_OHLCV, WARMUP_OHLCV, DEFAULT_OHLCV
+
+    _PARITY_PATHS = paths
+    REPO_ROOT = paths.repo_root
+    HARNESS_DIR = paths.harness_dir
+    DERIVED_DIR = paths.derived_workspace
+    DERIVED_15M = DERIVED_DIR / "ohlcv_ETH-USDT-USDT_15m.csv"
+    DERIVED_15M_WINDOW = (
+        DERIVED_DIR / "ohlcv_ETH-USDT-USDT_15m_window.csv")
+    REFERENCE_OHLCV = DERIVED_15M_WINDOW
+    WARMUP_OHLCV = DERIVED_15M
+    DEFAULT_OHLCV = WARMUP_OHLCV
+    _derive_corpus_feeds.REPO_ROOT = paths.repo_root
+    _derive_corpus_feeds.SOURCE_1M = (
+        paths.corpus_root / "data" / "ohlcv_ETH-USDT-USDT_1m.csv")
+    _derive_corpus_feeds.DERIVED_DIR = DERIVED_DIR
+    _derive_corpus_feeds.DERIVED_15M = DERIVED_15M
+    _derive_corpus_feeds.DERIVED_15M_WINDOW = DERIVED_15M_WINDOW
+    _derive_corpus_feeds.DERIVATION_STAMP = (
+        DERIVED_DIR / ".derive_corpus_feeds.version")
+
+
+def _ensure_derived() -> None:
+    ensure_derived()
+
+
+def _path_selection_requested(args) -> bool:
+    return (
+        args.corpus_root is not None
+        or args.derived_workspace is not None
+        or args.harness_dir is not None
+        or any(os.environ.get(name)
+               for name in (CORPUS_ENV, DERIVED_ENV, HARNESS_ENV))
+    )
+
+
+# This exported set is also used by unbound jailed/stream consumers. Keep its
+# historical membership: only the receipt-bound classifier may drop new keys.
+_CORPUS_ARTIFACT_META_KEYS = frozenset({"expected_tier", "notes", "_comment"})
 _VALIDATION_META_KEYS = frozenset({
     "tv_trades_csv_tz",
     "tv_trades_csv",
@@ -95,6 +166,77 @@ _VALIDATION_META_KEYS = frozenset({
     "input_tf",
     "chart_timezone",
 })
+
+
+def _is_corpus_metadata_key(key) -> bool:
+    key = str(key)
+    return (key.startswith("tv_") or key in _VALIDATION_META_KEYS
+            or key in _CORPUS_ARTIFACT_META_KEYS)
+
+
+def corpus_input_values(params, *, declared_input_names=None) -> dict[str, str]:
+    """Separate explicit metadata from Pine settings without dropping unknowns.
+
+    Names are the literal ``inputs[].name`` values in the module's effective
+    settings receipt, not Pine variable aliases. Without a binding, a
+    metadata-spelled key might be a real input and cannot safely be discarded.
+    Every other key reaches the native setter, including unrecognized keys.
+    """
+    if declared_input_names is None:
+        if any(_is_corpus_metadata_key(key) for key in params):
+            raise RuntimeError(
+                "NEEDS declared Pine input binding from "
+                "strategy_get_effective_settings before classifying corpus metadata")
+        declared_input_names = ()
+    declared = frozenset(declared_input_names)
+    return {
+        str(key): str(value) for key, value in params.items()
+        if str(key) in declared or not _is_corpus_metadata_key(key)
+    }
+
+
+def declared_pine_input_names(lib, state) -> frozenset[str]:
+    """Read the existing v1 settings receipt; a missing binding is never empty."""
+    version = getattr(lib, "strategy_settings_api_version", None)
+    getter = getattr(lib, "strategy_get_effective_settings", None)
+    if version is None or getter is None:
+        raise RuntimeError(
+            "NEEDS strategy_get_effective_settings and "
+            "strategy_settings_api_version for declared Pine input binding")
+    version.argtypes = []
+    version.restype = ctypes.c_uint32
+    if version() != 1:
+        raise RuntimeError("NEEDS settings API v1 for declared Pine input binding")
+    getter.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t,
+    ]
+    getter.restype = ctypes.c_int
+    required = ctypes.c_size_t()
+    error = ctypes.create_string_buffer(1024)
+    # PF_SETTINGS_BUFFER_TOO_SMALL=4 and PF_SETTINGS_OK=0, pineforge.h.
+    status = getter(state, None, 0, ctypes.byref(required), error, len(error))
+    if status != 4 or required.value == 0:
+        raise RuntimeError(
+            f"NEEDS declared Pine input receipt: size query returned {status}: "
+            + error.value.decode("utf-8", "replace"))
+    capacity = required.value
+    receipt = ctypes.create_string_buffer(capacity)
+    status = getter(state, receipt, capacity, ctypes.byref(required), error, len(error))
+    if (status != 0 or required.value > capacity
+            or required.value != len(receipt.value) + 1):
+        raise RuntimeError(
+            f"NEEDS declared Pine input receipt: read returned {status}: "
+            + error.value.decode("utf-8", "replace"))
+    try:
+        rows = json.loads(receipt.value.decode("utf-8"))["inputs"]
+        if (not isinstance(rows, list)
+                or any(not isinstance(row, dict)
+                       or not isinstance(row.get("name"), str) for row in rows)):
+            raise ValueError("inputs must list literal descriptor names")
+        return frozenset(row["name"] for row in rows)
+    except (ValueError, TypeError, KeyError) as error:
+        raise RuntimeError("NEEDS valid declared Pine input receipt") from error
 
 # >>> fingerprint helpers (DUPLICATED verbatim in scripts/run_strategy.py;
 #     scripts/ is .dockerignore'd so this cannot be a shared module.
@@ -722,6 +864,54 @@ def _session_calendar_provenance(metadata) -> dict | None:
 # offsetof checks in src/c_abi.cpp; if any of these structs drift, the
 # library fails to compile.
 
+class CachePolicyEntryC(ctypes.Structure):
+    """Native C alignment; mirrors pf_cache_policy_entry_v1."""
+    _fields_ = [("kind", ctypes.c_uint32),
+                ("reserved", ctypes.c_uint32),
+                ("capacity_bytes", ctypes.c_uint64)]
+
+
+class CachePolicyC(ctypes.Structure):
+    """Caller-owned entries are copied by strategy_set_cache_policy_v1."""
+    _fields_ = [("struct_size", ctypes.c_uint32),
+                ("version", ctypes.c_uint32),
+                ("entry_count", ctypes.c_uint64),
+                ("entries", ctypes.POINTER(CachePolicyEntryC)),
+                ("reserved", ctypes.c_uint32 * 2)]
+
+
+def apply_ledger_cache_policy(lib, state, capacity_bytes: int | None = None) -> None:
+    """Replace policy with omitted/AUTO ledger or explicit finite byte entry.
+
+    Other kinds use runtime defaults; no default-size literal is projected.
+    Every request requires the runtime setter, including omission/AUTO.
+    """
+    if capacity_bytes is not None:
+        if type(capacity_bytes) is not int:
+            raise TypeError("ledger cache capacity must be integer bytes or None")
+        if not 0 <= capacity_bytes <= (1 << 64) - 1:
+            raise ValueError("ledger cache capacity is outside uint64")
+    setter = getattr(lib, "strategy_set_cache_policy_v1", None)
+    if setter is None:
+        raise RuntimeError("ledger cache policy requires strategy_set_cache_policy_v1")
+    setter.argtypes = [ctypes.c_void_p, ctypes.POINTER(CachePolicyC)]
+    setter.restype = ctypes.c_int
+    entries = ((CachePolicyEntryC * 1)(CachePolicyEntryC(
+        kind=1, reserved=0, capacity_bytes=capacity_bytes))
+        if capacity_bytes is not None else None)
+    policy = CachePolicyC(struct_size=ctypes.sizeof(CachePolicyC), version=1,
+                          entry_count=1 if entries is not None else 0, entries=entries)
+    if setter(state, ctypes.byref(policy)) != 0:
+        details = []
+        for name in ("strategy_get_last_error_code", "strategy_get_last_error_args"):
+            getter = getattr(lib, name, None)
+            if getter is not None:
+                getter.argtypes = [ctypes.c_void_p]
+                getter.restype = ctypes.c_char_p
+                details.append((getter(state) or b"").decode("utf-8", errors="replace"))
+        raise RuntimeError("cache policy rejected: " + " ".join(details))
+
+
 class BarC(ctypes.Structure):
     _fields_ = [
         ("open", ctypes.c_double),
@@ -872,13 +1062,13 @@ class ReportC(ctypes.Structure):
 # pf_abi_version() export is asserted before any run. v3 appended
 # pf_trade_t::open_at_end (TradeC above); v4 appended the live-runtime
 # accessors and grew pf_report_t with the broker_state_hash array after
-# equity_curve_len (ReportC above already carries both fields).
+# equity_curve_len; v5 retains that layout and requires a 1.8.0 module rebuild.
 # test_run_strategy_range_end.py pins this constant to the header's
 # macro, because the campaign's verifier runs every probe through THIS
 # harness and a stale guard here is a run-error on every slug (the
 # f-1d spark pre-check of 2026-09-02 found exactly that: ".so reports
 # 3, harness expects 2" x64).
-EXPECTED_PF_ABI = 4
+EXPECTED_PF_ABI = 5
 
 
 def _check_abi(lib: ctypes.CDLL) -> None:
@@ -1348,7 +1538,7 @@ def inputs_run_kwargs(params, strategy_dir: Path, default_ohlcv: Path,
         syminfo_metadata["qty_step"] = qty_step
     # syminfo.mincontract: on every campaign symbol TradingView's smallest
     # contract IS its quantity step (tests/fixtures/syminfo_mincontract: 18
-    # lab tv read-outs, one per lane -- BINANCE:ETHUSDT.P 0.0001,
+    # reference read-outs, one per lane -- BINANCE:ETHUSDT.P 0.0001,
     # BINANCE:BTCUSDT 0.00001, OANDA:EURUSD / OANDA:XAUUSD 0.01, NASDAQ:AAPL,
     # NYSE:F, NSE:NIFTY, CME_MINI:ES1! and NQ1! 1). The fact is the lane
     # template's: its environment's PINEFORGE_VERIFY_QTY_STEP
@@ -1465,7 +1655,7 @@ def _reads_derived_feed(params, strategy_dir: Path, ohlcv: Path,
 # PINEFORGE_REQUESTS_ROOT=<dir>, holding <dir>/<slug>/requests.json
 # (pineforge-probe-requests/v1) and <dir>/<slug>/files/<sha256> -- workflow
 # docs/xsym-requests.md, "The environment contract". The frozen verifier
-# (pineforge-lab 3bac0b7b scripts/verify-engine-local.py) names each probe's
+# (the external verifier that defines this contract) names each probe's
 # build directory ``bd = BUILD / slug`` (:1695) and hands ``str(bd)`` to this
 # script (:1593-1596, :1614-1617) through ``_run_timed`` (:190-193), whose
 # subprocess.run passes no env=, so the variable reaches this process and the
@@ -1965,6 +2155,228 @@ def _with_run_failure_code(error: Exception, lib, state) -> Exception:
 # The text of a failed run that reported neither a text nor a code
 # (strategy_last_run_status 1 alone), as docker/run_json.py spells it.
 RUN_STATUS_FAILED_TEXT = "the run did not complete and the engine reported no error"
+REPORT_SINK_ENV = "PINEFORGE_REPORT_SINK"
+# Test-only artifact switch of sink mode (_keep_report_sink): the sink file is
+# otherwise unlinked at close.
+KEEP_REPORT_SINK_ENV = "PINEFORGE_KEEP_REPORT_SINK"
+
+
+def _new_harness_report_sink(lib, state, *, harness_dir=None):
+    """Reuse run_json's v1 bindings, temporary owner and receipt verification."""
+    selected_harness = resolve_paths(harness_dir=(
+        HARNESS_DIR if harness_dir is None else harness_dir)).harness_dir
+    if not selected_harness.is_dir():
+        raise RuntimeError(
+            f"report sink harness directory not found: {selected_harness}")
+    docker_dir = str(selected_harness)
+    if docker_dir not in sys.path:
+        sys.path.insert(0, docker_dir)
+    import run_json
+
+    required = ("pf_report_sink_version", "strategy_set_report_sink_v1",
+                "strategy_report_sink_receipt_v1")
+    if any(not hasattr(lib, name) for name in required):
+        raise RuntimeError(
+            f"{REPORT_SINK_ENV}=1 requires the report sink ABI; rebuild the strategy library")
+    run_json._bind_report_sink(lib)
+    if int(lib.pf_report_sink_version()) != 1:
+        raise RuntimeError("strategy library has an incompatible report sink ABI")
+    return run_json._ReportSink(lib, state)
+
+
+def _harness_sink_equity_count(lib, state) -> int:
+    """Save the engine's E count while its handle is live, not from the sink."""
+    from run_json import ReportSinkReceiptC
+
+    receipt = ReportSinkReceiptC()
+    receipt.struct_size, receipt.version = ctypes.sizeof(receipt), 1
+    if (lib.strategy_report_sink_receipt_v1(state, ctypes.byref(receipt)) != 0
+            or receipt.complete != 1 or receipt.count_e < 0):
+        raise RuntimeError("the engine's report sink equity receipt is incomplete")
+    return int(receipt.count_e)
+
+
+def _harness_sink_trade(record) -> dict:
+    trade = record.as_dict()
+    del trade["n"]
+    trade["is_long"] = trade.pop("side") == "long"
+    return trade
+
+
+class _SinkRows:
+    """Repeatable rows backed by the verified sink, with no retained history."""
+
+    def __init__(self, sink, tag, decode, window=None):
+        self.sink, self.tag, self.decode, self.window = sink, tag, decode, window
+        self._length = sink.counts.get(tag, 0) if window is None else None
+
+    def __iter__(self):
+        time_key = "timestamp" if self.tag == "X" else "entry_time"
+        count = 0
+        for record in self.sink.records(self.tag):
+            row = self.decode(record)
+            if (self.window is None
+                    or self.window[0] <= int(row[time_key]) <= self.window[1]):
+                count += 1
+                yield row
+        self._length = count
+
+    def __len__(self):
+        if self._length is None:
+            self._length = sum(1 for _ in self)
+        return self._length
+
+    def __getitem__(self, index):
+        if not isinstance(index, int):
+            raise TypeError("sink rows support integer indexing only")
+        if index < 0:
+            index += len(self)
+        for position, row in enumerate(self):
+            if position == index:
+                return row
+        raise IndexError("sink row index out of range")
+
+
+class _SinkReport(dict):
+    """A report whose row views remain valid until close(), or context exit."""
+
+    def __init__(self, values, sink, receipt_count_e: int):
+        super().__init__(values)
+        self.sink = sink
+        self.receipt_count_e = receipt_count_e
+
+    def close(self):
+        self.sink.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
+
+class _SinkTraceNames:
+    """First-use trace names, deduplicated on disk rather than in a set."""
+
+    def __init__(self, sink):
+        self.sink = sink
+
+    def __iter__(self):
+        with tempfile.TemporaryFile("w+", encoding="ascii", newline="\n") as names:
+            for record in self.sink.records("X"):
+                name = record.as_dict()["name"]
+                wire = json.dumps(name) + "\n"
+                names.seek(0)
+                if not any(line == wire for line in names):
+                    names.seek(0, os.SEEK_END)
+                    names.write(wire)
+                    yield name
+
+
+def _report_from_sink(report, sink, receipt_count_e: int) -> dict:
+    if any((report.trades, report.trades_len,
+            report.equity_curve, report.equity_curve_len,
+            report.trace, report.trace_len,
+            report.broker_state_hash, report.broker_state_hash_len)):
+        raise RuntimeError("a report with a sink must contain summary scalars only")
+    # This reads scalars and any remaining native trace-name table only.
+    result = _SinkReport(_report_to_dict(report), sink, receipt_count_e)
+    count = 0
+    for record in sink.records("T"):
+        count += 1
+        trade = record.as_dict()
+        if trade["n"] != count:
+            raise RuntimeError("the report sink trade rows are out of report order")
+        for field in ("entry_price", "exit_price", "qty", "pnl", "pnl_pct",
+                      "max_runup", "max_drawdown", "commission"):
+            if trade[field] is None:
+                raise RuntimeError(f"non-finite report sink trade field: {field}")
+    result["trades"] = _SinkRows(sink, "T", _harness_sink_trade)
+    result["trace"] = _SinkRows(sink, "X", lambda record: record.as_dict())
+    if not result["trace_names"] and sink.counts.get("X", 0):
+        # X carries the name itself. Preserve first-use order when the native
+        # summary omits the trace-name table along with its trace array.
+        result["trace_names"] = _SinkTraceNames(sink)
+    result["broker_state_hash"] = _SinkRows(
+        sink, "H", lambda record: int(record.values[0], 16))
+    result["equity_curve_time_ms"] = _SinkRows(
+        sink, "E", lambda record: record.values[0])
+    return result
+
+
+def _probe_id(strategy_dir: Path) -> str:
+    """The name a probe goes by in the sweep's lines: its directory's
+    basename (the slug PINEFORGE_REQUESTS_ROOT uses), without whitespace so
+    the canary line splits on spaces."""
+    return "_".join(strategy_dir.name.split()) or "-"
+
+
+def _keep_report_sink(probe: str, environ=None) -> bool:
+    """Test-only artifact switch: does this probe keep its sink file at close?
+
+    ``PINEFORGE_KEEP_REPORT_SINK=all`` keeps every probe's file; any other
+    non-empty value is a comma-separated list of probe ids (_probe_id) and
+    keeps exactly those probes' files. Probes run as separate processes and
+    nothing is counted across them, so a sweep that wants five artifacts
+    names the first five probes of its own order. Unset or empty: no file is
+    kept, and close() unlinks every sink as it always does.
+    """
+    value = (os.environ if environ is None else environ).get(
+        KEEP_REPORT_SINK_ENV, "").strip()
+    return bool(value) and (
+        value == "all" or probe in {part.strip() for part in value.split(",")})
+
+
+def _sink_canary(probe: str, report: _SinkReport) -> None:
+    """Prove this probe read a real, non-empty, complete sink, in one line.
+
+    Prints ``sink_canary: probe=<id> bytes=<n> records=<n> trades=<n>
+    equity=<n> ok`` on stdout. ``bytes`` is the sink's size now; ``records``
+    and ``equity`` are the T and E rows a fresh strict reader (own offset,
+    whole-file SHA-256 check) decodes now. T must equal ReportC.total_trades;
+    E must equal receipt.count_e saved from the live engine, independently
+    of the sink. Summary-only ReportC.equity_curve_len is zero with a sink.
+    No E == script_bars_processed relation is asserted.
+
+    This is Strategy.run's ordinary/observed sink path. Native selected
+    windows have an anchor and separate E publication rules; Strategy.run
+    does not admit them, and their E-to-bars relation is deliberately
+    skipped here. CSV emit-window filtering leaves the full sink intact.
+    A missing, non-regular, empty, unreadable or short sink prints these
+    same fields with ``FAIL <reason>`` and raises RuntimeError. A run that
+    never installed a sink prints no canary, so the sweep must match exactly
+    one successful line to each probe it ran. Call before close() unlinks.
+    """
+    sink, trades = report.sink, int(report["total_trades"])
+    size = records = equity = 0
+    reason = None
+    try:
+        size = os.stat(sink.path).st_size
+        if not os.path.isfile(sink.path):
+            reason = "the sink path is not a regular file"
+        elif size <= 0:
+            reason = "the sink file is empty"
+        else:
+            counts = {"T": 0, "E": 0}
+            for record in sink.records():
+                if record.tag in counts:
+                    counts[record.tag] += 1
+            # Publish counts only after the strict pass checked its trailer.
+            records, equity = counts["T"], counts["E"]
+            if records != trades:
+                reason = f"{records} T records decoded for {trades} trades"
+            elif equity != report.receipt_count_e:
+                reason = (f"{equity} E records decoded for "
+                          f"{report.receipt_count_e} engine equity points")
+    except Exception as error:
+        reason = f"the sink cannot be read back: {error}"
+    verdict = "ok" if reason is None else "FAIL " + " ".join(str(reason).split())
+    print(f"sink_canary: probe={probe} bytes={size} records={records} "
+          f"trades={trades} equity={equity} {verdict}")
+    if sink.keep:
+        print(f"sink_kept: probe={probe} path={sink.path}")
+    if reason is not None:
+        raise RuntimeError(f"sink canary failed for probe {probe}: {reason}")
 
 
 def _run_failure_text(lib, state) -> str | None:
@@ -1988,6 +2400,36 @@ def _run_failure_text(lib, state) -> str | None:
     return text if (text or code) else RUN_STATUS_FAILED_TEXT
 
 
+def _engine_warnings(raw) -> list:
+    """Read warning objects, preserving future codes and their argument objects."""
+    try:
+        doc = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+        if not isinstance(doc, list):
+            return []
+        warnings = [
+            {"args": item["args"], "code": item["code"]}
+            for item in doc
+            if isinstance(item, dict) and isinstance(item.get("code"), str)
+            and isinstance(item.get("args"), dict)
+        ]
+        # Non-finite numbers or excessive nesting must not break report encoding.
+        json.dumps(warnings, allow_nan=False)
+    except (TypeError, ValueError, AttributeError, RecursionError):
+        return []
+    return warnings
+
+
+def _add_run_warnings(lib, state, diagnostics):
+    # Read after report assembly, while the strategy still owns the text.
+    # Warnings belong only to diagnostics, outside sink records and fingerprints.
+    getter = getattr(lib, "strategy_get_run_warnings", None)
+    if getter is None:
+        return
+    warnings = _engine_warnings(getter(state))
+    if warnings:
+        diagnostics["warnings"] = warnings
+
+
 class Strategy:
     """Thin ctypes wrapper around one strategy.so."""
 
@@ -2008,6 +2450,21 @@ class Strategy:
         return (hasattr(self.lib, "strategy_declares_bar_magnifier")
                 and self.lib.strategy_declares_bar_magnifier() == 1)
 
+    def corpus_inputs(self, params, state=None) -> dict[str, str]:
+        """Bind metadata collisions to this module, optionally on its live state."""
+        if not any(_is_corpus_metadata_key(key) for key in params):
+            return corpus_input_values(params)
+        if state is not None:
+            return corpus_input_values(
+                params, declared_input_names=declared_pine_input_names(self.lib, state))
+        state = self.lib.strategy_create(b"{}")
+        if not state:
+            raise RuntimeError("NEEDS a strategy handle for declared Pine input binding")
+        try:
+            return self.corpus_inputs(params, state)
+        finally:
+            self.lib.strategy_free(state)
+
     def _setup_signatures(self) -> None:
         L = self.lib
         L.strategy_create.argtypes = [ctypes.c_char_p]
@@ -2024,6 +2481,10 @@ class Strategy:
 
         L.strategy_free.argtypes = [ctypes.c_void_p]
         L.report_free.argtypes = [ctypes.POINTER(ReportC)]
+        if hasattr(L, "strategy_set_cache_policy_v1"):
+            L.strategy_set_cache_policy_v1.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(CachePolicyC)]
+            L.strategy_set_cache_policy_v1.restype = ctypes.c_int
         if hasattr(L, "strategy_closed_trade_entry_incarnation"):
             L.strategy_closed_trade_entry_incarnation.argtypes = [
                 ctypes.c_void_p, ctypes.c_int]
@@ -2035,6 +2496,9 @@ class Strategy:
             if hasattr(L, name):
                 getattr(L, name).argtypes = [ctypes.c_void_p]
                 getattr(L, name).restype = ctypes.c_char_p
+        if hasattr(L, "strategy_get_run_warnings"):
+            L.strategy_get_run_warnings.argtypes = [ctypes.c_void_p]
+            L.strategy_get_run_warnings.restype = ctypes.c_char_p
         if hasattr(L, "strategy_last_run_status"):  # read by _run_failure_text
             L.strategy_last_run_status.argtypes = [ctypes.c_void_p]
             L.strategy_last_run_status.restype = ctypes.c_int
@@ -2159,6 +2623,9 @@ class Strategy:
         if hasattr(L, "strategy_current_equity"):
             L.strategy_current_equity.argtypes = [ctypes.c_void_p]
             L.strategy_current_equity.restype = ctypes.c_double
+        if hasattr(L, "strategy_initial_capital"):
+            L.strategy_initial_capital.argtypes = [ctypes.c_void_p]
+            L.strategy_initial_capital.restype = ctypes.c_double
         if hasattr(L, "strategy_script_bars_processed"):
             L.strategy_script_bars_processed.argtypes = [ctypes.c_void_p]
             L.strategy_script_bars_processed.restype = ctypes.c_int64
@@ -2484,6 +2951,16 @@ class Strategy:
         Read-only: the run itself is unchanged. Omitted (not an empty list)
         when the .so predates the exports; ``derived`` / ``position`` are
         omitted when it predates only the task-8 accessors.
+
+        With ``PINEFORGE_REPORT_SINK=1``, require the v1 sink ABI and return
+        a context-managed dict whose trades, trace, broker hashes and equity
+        timestamps are repeatable disk-backed views. Use ``with strat.run(...)
+        as report:`` or call ``report.close()`` after consuming these views.
+        The CLI closes each report, including a discarded emit-window rerun.
+        ``on_report`` still sees the native report, which has summary scalars
+        only in this mode. The sink is a named owner-only temporary file that
+        every view re-opens by its real path (own offset), the same on Linux
+        and macOS; close() unlinks it.
         """
         source_feed_sha256 = None
         if preloaded_bars is not None:
@@ -2557,7 +3034,12 @@ class Strategy:
 
         state = self.lib.strategy_create(params_json)
         report = ReportC()
+        sink = None
+        result_ready = False
         try:
+            inputs = self.corpus_inputs(params, state)
+            if os.environ.get(REPORT_SINK_ENV) == "1":
+                sink = _new_harness_report_sink(self.lib, state)
             # Strategy-property overrides (commission/slippage/pyramiding/...)
             # via the per-strategy ``strategy_set_override`` export. Keys and
             # value grammar: codegen emit_top.py set_strategy_override —
@@ -2662,16 +3144,14 @@ class Strategy:
                 self.lib.strategy_set_syminfo_mintick(state, float(syminfo_mintick))
             if syminfo_pointvalue is not None and hasattr(self.lib, "strategy_set_syminfo_pointvalue"):
                 self.lib.strategy_set_syminfo_pointvalue(state, float(syminfo_pointvalue))
+            if inputs and not hasattr(self.lib, "strategy_set_input"):
+                raise RuntimeError("NEEDS strategy_set_input for supplied Pine inputs")
             if hasattr(self.lib, "strategy_set_input"):
-                for key, value in params.items():
-                    if key.startswith("tv_"):
-                        continue
-                    if key in _VALIDATION_META_KEYS:
-                        continue
+                for key, value in inputs.items():
                     self.lib.strategy_set_input(
                         state,
-                        str(key).encode(),
-                        str(value).encode(),
+                        key.encode(),
+                        value.encode(),
                     )
             input_tf_b = (input_tf or "").encode()
             script_tf_b = (script_tf or "").encode()
@@ -2741,7 +3221,12 @@ class Strategy:
                 ), self.lib, state)
             if on_report is not None:
                 on_report(report)
-            result = _report_to_dict(report)
+            if sink is not None:
+                sink.verify(self.lib, state, report)
+                result = _report_from_sink(
+                    report, sink, _harness_sink_equity_count(self.lib, state))
+            else:
+                result = _report_to_dict(report)
             incarnation_accessor = getattr(
                 self.lib, "strategy_closed_trade_entry_incarnation", None)
             # ABI v4 (task 9): entry_id / exit_id / exit_comment / close_cause
@@ -2756,7 +3241,9 @@ class Strategy:
                 self.lib, "strategy_closed_trade_exit_comment", None)
             close_cause_accessor = getattr(
                 self.lib, "strategy_closed_trade_close_cause", None)
-            for i, trade in enumerate(result["trades"]):
+            # T already owns this metadata, including rows retired by the
+            # ledger. Accessors are only meaningful for the array path.
+            for i, trade in enumerate(result["trades"] if sink is None else ()):
                 trade["entry_incarnation"] = (
                     int(incarnation_accessor(state, i))
                     if incarnation_accessor is not None else 0
@@ -2813,19 +3300,43 @@ class Strategy:
                     "applied": _report_terminal_quote_applied(result, report_terminal_quote,
                                                                script_tf or input_tf or ""),
                 }
+            diagnostics = {}
+            _add_run_warnings(self.lib, state, diagnostics)
+            if diagnostics:
+                result["diagnostics"] = diagnostics
+            # Preserve the exact values sent on this live handle for provenance.
+            # Fingerprinting must not reclassify on a fresh strategy instance.
+            result["applied_inputs"] = dict(inputs)
+            result_ready = True
             return result
         finally:
-            self.lib.report_free(ctypes.byref(report))
-            self.lib.strategy_free(state)
+            cleanup_ok = False
+            try:
+                try:
+                    self.lib.report_free(ctypes.byref(report))
+                finally:
+                    self.lib.strategy_free(state)
+                cleanup_ok = True
+            finally:
+                # A successful result owns the file until its consumer
+                # finishes. On every failure, native cleanup precedes it.
+                if sink is not None and not (result_ready and cleanup_ok):
+                    sink.close()
 
 
 def _report_terminal_quote_applied(report: dict, quote: tuple, script_tf: str) -> bool:
-    rows = [row for row in report["trades"] if row.get("open_at_end")]
     times = report["equity_curve_time_ms"]
-    return bool(60 < _tf_seconds(script_tf) < 86400
-                and report["bar_magnifier_enabled"] and rows and times
-                and times[-1] == int(quote[0])
-                and all(row["exit_time"] == int(quote[0]) for row in rows))
+    if not (60 < _tf_seconds(script_tf) < 86400
+            and report["bar_magnifier_enabled"] and times
+            and times[-1] == int(quote[0])):
+        return False
+    found = False
+    for row in report["trades"]:
+        if row.get("open_at_end"):
+            found = True
+            if row["exit_time"] != int(quote[0]):
+                return False
+    return found
 
 
 def _with_tail_bar(bars, n: int, tail: tuple):
@@ -3085,7 +3596,8 @@ def _load_window_ms(csv_path: Path) -> tuple[int, int]:
     return first, last
 
 
-def _filter_trades_to_window(trades: list[dict], window: tuple[int, int] | None) -> list[dict]:
+def _filter_trades_to_window(trades: list[dict] | _SinkRows,
+                             window: tuple[int, int] | None) -> list[dict] | _SinkRows:
     """Keep trades whose entry (fill) time lies inside ``window`` (inclusive).
 
     main() hands it the REPORT window. With a TV tape in use that is
@@ -3101,6 +3613,8 @@ def _filter_trades_to_window(trades: list[dict], window: tuple[int, int] | None)
     gates."""
     if window is None:
         return trades
+    if isinstance(trades, _SinkRows):
+        return _SinkRows(trades.sink, trades.tag, trades.decode, window)
     start_ms, end_ms = window
     return [
         t for t in trades
@@ -3108,7 +3622,7 @@ def _filter_trades_to_window(trades: list[dict], window: tuple[int, int] | None)
     ]
 
 
-def _entered_before_tv(trades: list[dict], report_start_ms: int) -> int | None:
+def _entered_before_tv(trades: list[dict] | _SinkRows, report_start_ms: int) -> int | None:
     """The earliest entry the engine filled before ``report_start_ms`` (TV's
     first entry less one bar interval), or None when it filled none.
 
@@ -3120,13 +3634,16 @@ def _entered_before_tv(trades: list[dict], report_start_ms: int) -> int | None:
     differently) -- and its position and P&L would carry into the trades
     that are reported, so main() runs such a probe again from the signal
     bar, as before. Reported rows start at ``report_start_ms`` either way."""
-    early = [int(t["entry_time"]) for t in trades if int(t["entry_time"]) < report_start_ms]
-    return min(early) if early else None
+    return min((int(t["entry_time"]) for t in trades
+                if int(t["entry_time"]) < report_start_ms), default=None)
 
 
-def _filter_trace_to_window(trace: list[dict], window: tuple[int, int] | None) -> list[dict]:
+def _filter_trace_to_window(trace: list[dict] | _SinkRows,
+                            window: tuple[int, int] | None) -> list[dict] | _SinkRows:
     if window is None:
         return trace
+    if isinstance(trace, _SinkRows):
+        return _SinkRows(trace.sink, trace.tag, trace.decode, window)
     start_ms, end_ms = window
     return [
         e for e in trace
@@ -3137,14 +3654,23 @@ def _filter_trace_to_window(trace: list[dict], window: tuple[int, int] | None) -
 def _tv_metrics_path(strategy_dir: Path, meta: dict, tv_path: Path) -> Path:
     """Where the tape's metrics.json lives: ``tv_metrics_json`` from the
     probe's inputs.json when set (relative to ``strategy_dir``), else the
-    ``metrics.json`` beside the tape — the scrapper's probe directory, the
-    case runner's ``data/<group>/<slug>/`` copy and ``lab tv``'s export all
-    write the four files (strategy.pine, tv_trades.csv, metrics.json,
-    meta.json) side by side."""
+    ``metrics.json`` beside the tape — every producer writes the four files
+    (strategy.pine, tv_trades.csv, metrics.json, meta.json) side by side."""
     name = str(meta.get("tv_metrics_json", "")).strip()
     if name:
         return strategy_dir / name
     return tv_path.parent / "metrics.json"
+
+
+def _metrics_range_provenance(metrics: dict) -> tuple[dict | None, str | None]:
+    """The rangeProvenance dict and its member name, or (None, None)."""
+    if not isinstance(metrics, dict):
+        return None, None
+    for member in ("rangeProvenance", "wsProvenance"):
+        provenance = metrics.get(member)
+        if isinstance(provenance, dict):
+            return provenance, member
+    return None, None
 
 
 def _tv_metrics_range_end(metrics: dict) -> tuple[int, str] | None:
@@ -3152,22 +3678,22 @@ def _tv_metrics_range_end(metrics: dict) -> tuple[int, str] | None:
     with the key it was read from: the ``to`` of the deep-backtest window,
     as 00:00 UTC of that date.
 
-    Two spellings carry it. The ws-report-v1 exporter records the exact
-    window it sent to TradingView as ``wsProvenance.requestedRange.to`` (ms
-    UTC), and every campaign tape's value is 1777593600000 = 2026-05-01
-    00:00 UTC for ``"to": "2026-05-01"``; the browser export (ETH, AAPL 15,
+    Two spellings carry it. One records the exact requested
+    window as ``rangeProvenance.requestedRange.to`` (ms
+    UTC), identifying the requested date's
+    00:00 UTC boundary; the other (ETH, AAPL 15,
     EURUSD) carries only the date. They agree wherever both exist, and the
     integer is what TradingView actually saw, so it wins. None without a
     range (a hand-made metrics.json, or none)."""
     if not isinstance(metrics, dict):
         return None
-    ws = metrics.get("wsProvenance")
-    if isinstance(ws, dict):
-        requested = ws.get("requestedRange")
+    provenance, member = _metrics_range_provenance(metrics)
+    if isinstance(provenance, dict):
+        requested = provenance.get("requestedRange")
         if isinstance(requested, dict):
             to_ms = requested.get("to")
             if isinstance(to_ms, int) and not isinstance(to_ms, bool):
-                return int(to_ms), "metrics.json wsProvenance.requestedRange.to"
+                return int(to_ms), f"metrics.json {member}.requestedRange.to"
     to_date = str(metrics.get("to", "") or "").strip()
     if to_date:
         try:
@@ -3205,18 +3731,18 @@ def _tv_tape_marks_open_rows(strategy_dir: Path, meta: dict) -> bool:
     """True when the tape MARKS a position still open at the range's end:
     any row whose ``Signal`` is ``open`` (case- and space-insensitive).
 
-    Two exporters write the campaign's tapes, and they print the range-end
-    position differently. The ws-report-v1 exporter (286 of the 305 ETH
+    Two tape shapes appear in the campaign's tapes, and they print the range-end
+    position differently. One shape (286 of the 305 ETH
     tapes; no marker in metrics.json beyond ``tapeChannel``) reports it as
     an ordinary closed trade — exit row on the last bar at its close, EMPTY
     Signal, counted in closedTrades — which is the shape the engine's
-    ``open_at_end`` row emulates. The browser export (the scrapper's
-    3commas grid-bot tapes among them, 22/22/28 open lots each at
-    2026-05-01 08:00 +8; metrics.json without ``tapeChannel``) writes the
+    ``open_at_end`` row emulates. The other shape (the
+    grid-bot probes among them, with open lots at the range end;
+    metrics.json without ``tapeChannel``) writes the
     same row with Signal "Open". TV nets commission on BOTH legs of that row
-    exactly as it does on a close (3commas-xlm-grid-bot #615: qty 0.0912,
-    entry 2189.13, mark 2261.44 -> 6.3511 = TV's 6.35 = the engine's
-    6.351137), so per-lot P&L is not the difference; the difference is
+    exactly as it does on a close (synthetic XLM book: qty 0.1,
+    entry 102.61, mark 166.39, 0.1% per leg: 6.378 - 0.0269 = 6.3511
+    -> 6.35 at cents), so per-lot P&L is not the difference; the difference is
     only how the tape spells the row. Both shapes are measured the same
     way (_apply_range_end_regime); the marker is read for the run's log
     line, because the grader's pairing of the engine's marked rows
@@ -3244,62 +3770,62 @@ def _load_tv_range_end(strategy_dir: Path, meta: dict) -> tuple[int, str] | None
     (_apply_range_end_regime), whichever way the tape spells its range-end
     row.
 
-    The rule is TradingView's own, read off the ws-report-v1 tapes'
+    The rule is TradingView's own, read off the reference tapes'
     ``returnedRange.to`` (the open of the last bar TV reported) against the
-    ``requestedRange.to`` = 2026-05-01 00:00 UTC every campaign tape asked
-    for, and off where each lane's open-position row sits:
+    ``requestedRange.to`` at a requested UTC midnight, denoted T here,
+    and off where each symbol's open-position row sits:
 
       BINANCE:BTCUSDT / CME_MINI:ES1! / NQ1! / OANDA:XAUUSD 15
-                             returned.to = 05-01 00:00 UTC   (== to: the bar
-                             OPENING at ``to`` is inside; 00:15 is not — on
+                             returned.to = T (== to: the bar
+                             OPENING at ``to`` is inside; T + 15m is not — on
                              CME's America/Chicago chart too, so ``to`` is
                              UTC midnight, not the chart tz's);
-      NYSE:F 1D              returned.to = 04-30 13:30 UTC   (the 05-01 13:30
-                             session bar exists on TV and is excluded);
-      CME_MINI:ES1!/NQ1! 1D  returned.to = 04-30 22:00 UTC;
-      NSE:NIFTY 15 / 1D      returned.to = 04-30 09:45 / 03:45 UTC;
-      OANDA:XAUUSD 1D        returned.to = 04-30 21:00 UTC;
-      NYSE:F 15              returned.to = 04-30 19:45 UTC;
+      NYSE:F 1D              returned.to = the last daily open before T
+                             (the next session's open is excluded);
+      CME_MINI:ES1!/NQ1! 1D  returned.to = the last daily open before T;
+      NSE:NIFTY 15 / 1D      the last intraday / daily open before T;
+      OANDA:XAUUSD 1D        the last daily open before T;
+      NYSE:F 15              the last 15-minute open before T;
 
-    and every open-position row (browser "Open" rows and ws rows with an
+    and every open-position row (date-only "Open" rows and unmarked rows with an
     empty Signal alike) sits on exactly that bar: BTC/ES/NQ/XAU/EURUSD 15
-    and BINANCE:ETHUSDT.P 15 at 05-01 00:00 UTC (ETH: 228 of 397 scrapper
-    tapes, @ 2261.44 = that bar's close), F 1D at 04-30 13:30 (@ 12.08),
-    ES/NQ 1D at 04-30 22:00, XAU 1D at 04-30 21:00, NIFTY 1D at 04-30
-    03:45, AAPL 15 at 04-30 19:45. Survey of 2026-09-02 over the scrapper's
-    17 lane directories (1,356 tapes; every one ``to: 2026-05-01``).
+    and BINANCE:ETHUSDT.P 15 at T; synthetic closes of 2000.00 for ETH
+    and 25.00 for NYSE:F daily illustrate the mark, without quoting tapes.
+    ES/NQ, XAU and NIFTY daily rows likewise use their final daily bars;
+    AAPL 15 uses its final intraday bar. The survey covers
+    17 datasets (1,356 tapes sharing the same requested end).
 
     This bounds the feed the engine measures. The engine books a position
     still open after its FINAL bar as TradingView's range-end close
     (record_range_end_close_trades, engine_orders.cpp), so that final bar
-    must be TV's last bar, not the feed's: the ETH chart feed runs on to
-    2026-05-04 15:00 UTC, and unbounded the row would be booked on 05-04
-    15:00 @ 2365.09 — a different bar, ~4.6% off TV's row — and fail
+    must be TV's last bar, not the feed's: a synthetic ETH feed continuing
+    to a later session could end at 2200.00 rather than 2000.00;
+    that is a different bar and a 10% price difference, and would fail
     exit/pnl against TV's Open row (review finding on the first cut of this
     change, 2026-09-02).
 
     The bound is the RANGE end, never the tape's last trade row. A first
     cut bounded the feed at the tape's latest stamp, and the full-population
-    gate (gate-cand-range-end-close-20260902) failed hard.regression on
-    scrapper:data/standard/waranyutrkm-asian-box-breakout-eda-tuned (ETH
-    15): 110 -> 109 trades. Its last trade closes 04-29 18:00 UTC, so the
+    gate found a regression on a
+    third-party ETH 15-minute strategy: cutting at its last closed trade
+    removed a later entry. If the last close is inside a daily bar, the
     feed was cut mid-day, and the strategy gates entries on
     request.security(.., "D", close / ta.ema(close, 50), lookahead_on) —
-    under the historical lookahead projection every 04-29 chart bar reads
-    the 04-29 daily bar's FINAL value. Cut at 18:00 the partial day gave
-    d_close 2240.35 < d_ema 2241.85 and no long; the complete day (as TV
-    sees it, its range running to 05-01) gives 2251.52 > 2242.29 and TV's
-    trade 110 at 09:45. Any probe with a lookahead_on HTF projection and a
+    under the historical lookahead projection every chart bar in that day reads
+    the daily bar's FINAL value. A synthetic partial day can give
+    d_close 2000.00 < d_ema 2001.00 and no long; the complete day can
+    instead give 2010.00 > 2002.00, admitting the entry that a full
+    daily projection should see. Any probe with a lookahead_on HTF projection and a
     closed last trade inside the final HTF period is exposed the same way,
     and the four other near-range-end closed probes in that shard were
-    byte-identical either way (spark smoke-asianbox, 2026-09-02). Trades
+    byte-identical either way. Trades
     ENTERED after TV's last entry are still dropped by
     _filter_trades_to_window; the range end only decides which bars the
     strategy computes on and where a position still open at the end is
     marked.
 
     Source: the tape's metrics.json (_tv_metrics_path) —
-    ``wsProvenance.requestedRange.to`` (ms) when present, else ``to``
+    ``rangeProvenance.requestedRange.to`` (ms) when present, else ``to``
     (YYYY-MM-DD, UTC midnight). A metrics.json without a range (or none at
     all) falls back to the tape's latest row (_tv_tape_last_row_ms), which
     is right whenever that row is the range-end row and merely early
@@ -3340,7 +3866,7 @@ def _apply_range_end_regime(strategy_dir: Path, meta: dict, run_kwargs: dict) ->
     logs. One regime for every tape (v5, 2026-09-03):
 
       -> bound the feed at TradingView's range end (_load_tv_range_end:
-         metrics.json ``wsProvenance.requestedRange.to`` / ``to`` as 00:00
+         metrics.json ``rangeProvenance.requestedRange.to`` / ``to`` as 00:00
          UTC inclusive, the tape's last row as the fallback) so the engine's
          final bar is TV's last bar, and WRITE the range-end close rows,
          each marked in the CSV's ``Engine range-end`` column
@@ -3349,10 +3875,10 @@ def _apply_range_end_regime(strategy_dir: Path, meta: dict, run_kwargs: dict) ->
          rows leaves the feed as given.
 
     The tape's spelling of that row no longer picks a regime. The
-    ws-report-v1 exporter prints the range-end position as an ordinary
+    reference tape prints the range-end position as an ordinary
     closed trade (empty Signal, counted in closedTrades — the shape the
-    engine's ``open_at_end`` row emulates); the browser export prints the
-    same row with Signal "Open" (227 of the 396 scraped ETH tapes). Under
+    engine's ``open_at_end`` row emulates); the date-only tape prints the
+    same row with Signal "Open" (227 of the 396 reference ETH tapes). Under
     v4 a marked tape was measured as the baseline had measured it — feed
     unbounded three days past the range, the engine's marks withheld —
     because the canonical grader paired the baseline's post-range closes
@@ -3361,10 +3887,10 @@ def _apply_range_end_regime(strategy_dir: Path, meta: dict, run_kwargs: dict) ->
     marked rows with the tape's Open rows lot for lot, gates neither exit
     nor pnl on the pair and keeps both sides out of every aggregate
     (scripts/verify_corpus.py pair_range_end_marks), so the bounded run
-    grades a marked tape the way it grades an unmarked one: the 22/22/28
-    open lots of the three 3commas grid bots pair exactly (21 of 22 xlm
-    marks agree with TV to the cent, the 22nd is a FIFO lot-size split)
-    and alexgrover / aborkan89 (one Open row each) grade 100% at every
+    grades a marked tape the way it grades an unmarked one: the
+    open lots of the grid-bot probes pair exactly (the XLM probe's
+    marks agree with TV to the cent except for a FIFO lot-size split)
+    and single-open-row probes A / B (one Open row each) grade 100% at every
     p90 = 0 (spark diag/r4, 2026-09-02).
 
     Only called with a TV tape window in use; an explicit
@@ -3372,7 +3898,7 @@ def _apply_range_end_regime(strategy_dir: Path, meta: dict, run_kwargs: dict) ->
     given and writes every row."""
     marked = _tv_tape_marks_open_rows(strategy_dir, meta)
     spelling = ("tape marks its open rows (Signal 'Open')" if marked
-                else "tape unmarked (ws-report-v1 shape)")
+                else "tape unmarked (channel-v1 shape)")
     rows = ("range-end close rows written, marked in the "
             f"'{ENGINE_RANGE_END_COLUMN}' column for the grader to pair")
     if run_kwargs.get("ohlcv_end_ms") is not None:
@@ -3424,12 +3950,12 @@ def format_trade_qty(qty: float) -> str:
 
     The previous ``f"{qty:g}"`` kept only 6 significant digits, so any
     quantity with more digits than that was silently rewritten on the way
-    out: an OANDA:EURUSD all-in lot of 923941.16 units (TV export, 0.01 lot
-    step) printed as ``923941``, 897902.68 printed as ``897903`` (rounded UP),
-    92293.36 as ``92293.4``, and anything >= 1e6 as ``1e+06``. The ledger held
+    out: a synthetic OANDA:EURUSD lot of 654321.12 units (0.01 lot
+    step) prints as ``654321``, 654321.78 as ``654322`` (rounded UP),
+    54321.12 as ``54321.1``, and 1e6 as ``1e+06``. The ledger held
     the exact value; only the CSV lied, which put a spurious 0.01-0.5 unit
-    "qty miss" on 1933/2708 entries of the EURUSD KI-52 all-in probe and on
-    every giua64 entry while the fills themselves were exact.
+    "qty miss" on 1933/2708 entries of the EURUSD all-in probe and on
+    other third-party entries while the fills themselves were exact.
 
     Eight decimals cover every lot step in use (1 share, 0.01 unit, 0.0001
     contract, satoshi-scale 1e-8) and absorb binary noise from
@@ -3450,31 +3976,95 @@ def format_trade_qty(qty: float) -> str:
 # engine_orders.cpp record_range_end_close_trades) is
 # ENGINE_RANGE_END_OPEN; every other cell is empty. The grader
 # (scripts/verify_corpus.py ENGINE_RANGE_END_COLUMN) pairs such a row with
-# the tape's own mark of the same lot — the browser export's Signal "Open".
+# the tape's own mark of the same lot — the date-only tape's Signal "Open".
 ENGINE_RANGE_END_COLUMN = "Engine range-end"
 ENGINE_RANGE_END_OPEN = "open"
+_ENGINE_TRADES_HEADER = [
+    "Trade #", "Type", "Date and time", "Price", "Qty",
+    "Net PnL", "Net PnL %",
+    "Favorable excursion USD", "Adverse excursion USD",
+    "Cumulative PnL", "Engine entry incarnation",
+    ENGINE_RANGE_END_COLUMN,
+]
 
 
-def write_engine_trades_csv(trades: list[dict], path: Path) -> None:
+def _engine_trade_csv_rows(n, trade, cumulative):
+    direction = "long" if trade["is_long"] else "short"
+    # TV convention: adverse excursion is negative (or zero).
+    adverse = -trade["max_drawdown"] or 0.0
+    for side, time_key, price_key in (
+        (f"Exit {direction}", "exit_time", "exit_price"),
+        (f"Entry {direction}", "entry_time", "entry_price"),
+    ):
+        yield [
+            n, side,
+            _fmt_time_utc(trade[time_key]),
+            f"{trade[price_key]:.6f}",
+            format_trade_qty(float(trade["qty"])),
+            f"{trade['pnl']:.6f}",
+            f"{trade['pnl_pct']:.4f}",
+            f"{trade['max_runup']:.6f}",
+            f"{adverse:.6f}",
+            f"{cumulative:.6f}",
+            str(int(trade.get("entry_incarnation", 0)))
+            if (side.startswith("Entry")
+                and int(trade.get("entry_incarnation", 0)) > 0) else "",
+            ENGINE_RANGE_END_OPEN
+            if (side.startswith("Exit") and trade.get("open_at_end")) else "",
+        ]
+
+
+def _write_sink_engine_trades_csv(trades, path):
+    """Fold forward, then emit formatted trade pairs backward in O(1) RAM.
+
+    Store the *formatted* cumulative PnL of each kept trade. Subtracting PnL
+    while walking backward would change floating-point rounding. The fixed
+    width offset/length index and CSV pairs live only in temporary files.
+    Exhausting the verified reader and staging every row precedes opening
+    the destination, so a corrupt/truncated sink cannot publish a CSV.
+    """
+    index_record = struct.Struct("<QQ")
+    with tempfile.TemporaryFile("w+b") as rows, tempfile.TemporaryFile("w+b") as offsets:
+        running = 0.0
+        count = 0
+        for count, trade in enumerate(trades, 1):
+            running += trade["pnl"]
+            text = io.StringIO(newline="")
+            csv.writer(text).writerows(_engine_trade_csv_rows(count, trade, running))
+            pair = text.getvalue().encode("ascii")
+            offsets.write(index_record.pack(rows.tell(), len(pair)))
+            rows.write(pair)
+        rows.flush()
+        offsets.flush()
+        with path.open("w", newline="") as destination:
+            csv.writer(destination).writerow(_ENGINE_TRADES_HEADER)
+            for index in range(count - 1, -1, -1):
+                offsets.seek(index * index_record.size)
+                offset, size = index_record.unpack(offsets.read(index_record.size))
+                rows.seek(offset)
+                destination.write(rows.read(size).decode("ascii"))
+
+
+def write_engine_trades_csv(trades: list[dict] | _SinkRows, path: Path) -> None:
     """Emit one row per trade *side* (exit then entry) in reverse-chronological
     order — byte-for-byte alignable with TradingView's `trades.csv` export.
 
     Excursion columns use TradingView's export convention: favorable excursion
     is a non-negative total-USD run-up, adverse excursion is emitted as a
-    NEGATIVE total-USD drawdown (TV exports e.g. -8579.36). The engine ABI's
+    NEGATIVE total-USD drawdown (synthetic example: -250.00). The engine ABI's
     `max_drawdown` stays positive — that mirrors Pine's
     `strategy.*trades.max_drawdown` accessors — so the sign flip happens only
     here, in the TV-compatible export representation.
 
     A trade flagged ``open_at_end`` (the engine's range-end close of a
     position still open after the final bar) is written like any other
-    trade — TradingView's ws-report-v1 tape reports that position as an
+    trade — TradingView's reference tape reports that position as an
     ordinary closed trade whose exit row is the last bar at its close with
-    an EMPTY Signal (orb-lite NYSE:F 1D — Exit short 2026-04-30 @ 12.08),
+    an EMPTY Signal (synthetic NYSE:F daily example: Exit short @ 26.00),
     so the row must look like every other exit for the verifier to pair
     it — with one addition: its exit row says so in the trailing
     ``Engine range-end`` column (ENGINE_RANGE_END_OPEN, "open"), the
-    engine's counterpart of the browser export's Signal "Open". The grader
+    engine's counterpart of the date-only tape's Signal "Open". The grader
     pairs the two marks of one lot and gates neither exit nor pnl on them
     (verify_corpus.py pair_range_end_marks); every other cell of the column
     is empty, and readers keyed by column name (verify_corpus.parse_trades,
@@ -3485,6 +4075,9 @@ def write_engine_trades_csv(trades: list[dict], path: Path) -> None:
     engines before it wrote, project the cell as ``rangeEnd`` (blank ->
     null, "open" -> "open") and reject any other spelling, so the column
     is a bump of that contract on both sides, not a free addition."""
+    if isinstance(trades, _SinkRows):
+        _write_sink_engine_trades_csv(trades, path)
+        return
     cum_pnls: dict[int, float] = {}
     running = 0.0
     for n, t in enumerate(trades, 1):
@@ -3493,38 +4086,9 @@ def write_engine_trades_csv(trades: list[dict], path: Path) -> None:
 
     with path.open("w", newline="") as f:
         w = csv.writer(f)
-        w.writerow([
-            "Trade #", "Type", "Date and time", "Price", "Qty",
-            "Net PnL", "Net PnL %",
-            "Favorable excursion USD", "Adverse excursion USD",
-            "Cumulative PnL", "Engine entry incarnation",
-            ENGINE_RANGE_END_COLUMN,
-        ])
+        w.writerow(_ENGINE_TRADES_HEADER)
         for n, t in reversed(list(enumerate(trades, 1))):
-            direction = "long" if t["is_long"] else "short"
-            cum = cum_pnls[n]
-            # TV convention: adverse excursion is negative (or zero).
-            adverse = -t["max_drawdown"] or 0.0
-            for side, time_key, price_key in (
-                (f"Exit {direction}", "exit_time", "exit_price"),
-                (f"Entry {direction}", "entry_time", "entry_price"),
-            ):
-                w.writerow([
-                    n, side,
-                    _fmt_time_utc(t[time_key]),
-                    f"{t[price_key]:.6f}",
-                    format_trade_qty(float(t["qty"])),
-                    f"{t['pnl']:.6f}",
-                    f"{t['pnl_pct']:.4f}",
-                    f"{t['max_runup']:.6f}",
-                    f"{adverse:.6f}",
-                    f"{cum:.6f}",
-                    str(int(t.get("entry_incarnation", 0)))
-                    if (side.startswith("Entry")
-                        and int(t.get("entry_incarnation", 0)) > 0) else "",
-                    ENGINE_RANGE_END_OPEN
-                    if (side.startswith("Exit") and t.get("open_at_end")) else "",
-                ])
+            w.writerows(_engine_trade_csv_rows(n, t, cum_pnls[n]))
 
 
 
@@ -3612,22 +4176,22 @@ def _feed_timestamps(csv_path: Path, *, ohlcv_start_ms: int | None = None,
 
 def _tv_first_bar(strategy_dir: Path, meta: dict) -> tuple[int, str] | None:
     """TradingView's first computed chart bar for the tape (UTC ms), with
-    where it was read: metrics.json ``wsProvenance.returnedRange.from``.
+    where it was read: metrics.json ``rangeProvenance.returnedRange.from``.
 
-    TradingView's deep backtest over the ws report channel computes the
+    TradingView's deep backtest in a recorded reference run computes the
     script from the first chart bar at or after the requested ``from`` and
     from no earlier bar, and records that bar's open as
-    ``returnedRange.from``. Pinned by ``lab tv --no-note`` tapes
+    ``returnedRange.from``. Pinned by recorded reference tapes
     (tests/fixtures/run_harness_window): a script reads bar_index 0 on it
-    (rh-diag-firstbar, rh-diag-firstbar2 on BINANCE:ETHUSDT.P 15 over
-    2025-04-01 .. 2025-04-08 and .. 2026-05-01, OANDA:EURUSD / OANDA:XAUUSD /
-    CME_MINI:ES1! 15 at 00:00 UTC, NYSE:F 15 at 13:30, NSE:NIFTY 15 at
-    03:45, BINANCE:BTCUSDT 1D at 00:00, OANDA:XAUUSD 1D at 21:00 -- each
+    (diagnostic probes on BINANCE:ETHUSDT.P 15,
+    OANDA:EURUSD / OANDA:XAUUSD / CME_MINI:ES1! 15 at UTC midnight;
+    NYSE:F 15 and NSE:NIFTY 15 at their session opens;
+    BINANCE:BTCUSDT 1D and OANDA:XAUUSD 1D at their daily stamps -- each
     equal to its returnedRange.from), and a command on a bar before it never
-    runs: a stop, a limit and two market entries placed on 2025-03-31 bars
-    yield no trade (rh-prerange-stop, rh-prerange-limit, rh-prerange-fills).
+    runs: a stop, a limit and two market entries placed before the first bar
+    yield no trade (the controls exercise each order kind).
 
-    None for a tape without it: the browser export records no returned range
+    None for a tape without it: the date-only reference records no returned range
     (and its deep backtest computes bars before ``from``: an entry filled
     one bar before the range start is exported), a hand-made metrics.json,
     or none."""
@@ -3641,12 +4205,12 @@ def _tv_first_bar(strategy_dir: Path, meta: dict) -> tuple[int, str] | None:
             metrics = json.load(f)
     except (OSError, ValueError):
         return None
-    ws = metrics.get("wsProvenance") if isinstance(metrics, dict) else None
-    returned = ws.get("returnedRange") if isinstance(ws, dict) else None
+    provenance, member = _metrics_range_provenance(metrics)
+    returned = provenance.get("returnedRange") if isinstance(provenance, dict) else None
     first = returned.get("from") if isinstance(returned, dict) else None
     if isinstance(first, bool) or not isinstance(first, int) or first <= 0:
         return None
-    return int(first), "metrics.json wsProvenance.returnedRange.from"
+    return int(first), f"metrics.json {member}.returnedRange.from"
 
 
 class TvEntryWindow(NamedTuple):
@@ -3683,11 +4247,11 @@ def _tv_entry_emit_window(feed_ts: list[int], first_entry_ms: int, last_entry_ms
     strategy.entry TradingView filled on the next session's first bar —
     every ladder candidate produced 0 trades on six single-entry tapes
     (round 7, ledger log-20260905t054904z-a9baf07e; signal bar vs the old
-    gate): jos-protrader NQ1@1D 2025-06-26 22:00Z vs 06-27 22:00Z (fill
-    06-29 22:00Z), rakesh NIFTY@1D 11-14 03:45Z vs 11-15 03:45Z, vasanth
-    F@1D 10-03 13:30Z vs 10-04 13:30Z, stockhunter2025 XAUUSD@1D 2026-01-08
-    22:00Z vs 01-09 22:00Z, heneralmomo25 XAUUSD@1D 10-30 21:00Z vs 10-31
-    22:00Z (the DST shift), ayusattv AAPL@15 04-09 19:45Z vs 04-10 13:00Z.
+    gate): third-party NQ1@1D, NIFTY@1D and NYSE:F@1D strategies
+    placed the signal on the last daily bar before a session gap.
+    OANDA:XAUUSD@1D strategies also crossed overnight breaks and a DST
+    shift. A NASDAQ:AAPL@15 strategy crossed the break from one session's
+    final 15-minute bar to the next session's first bar.
     Walking the feed the engine is actually fed (after the probe's
     ohlcv_start_ms / range-end bounds) handles every gap shape by
     construction, no calendar arithmetic; on a gapless feed the preceding
@@ -4110,11 +4674,6 @@ def _run_via_docker(strategy_dir: Path, ohlcv_path: Path, params: dict,
     if dist.upper() == "VOLUME_WEIGHTED":
         dist = "ENDPOINTS"
 
-    # Inputs forwarded to the engine: same filter as Strategy.run (drop tv_*/meta).
-    inputs_for_image = {
-        str(k): str(v) for k, v in params.items()
-        if not str(k).startswith("tv_") and k not in _VALIDATION_META_KEYS
-    }
     # syminfo from runtime_overrides. apply_syminfo covers mintick/pointvalue/
     # timezone/session; syminfo_metadata (fundamentals, and the lane's
     # syminfo.mincontract) is NOT covered, nor is a declared bar magnifier (the
@@ -4140,7 +4699,6 @@ def _run_via_docker(strategy_dir: Path, ohlcv_path: Path, params: dict,
         str(k): str(v) for k, v in (run_kwargs.get("strategy_overrides") or {}).items()
     }
     kw = dict(
-        inputs=inputs_for_image,
         overrides=overrides_for_image,
         input_tf=run_kwargs.get("input_tf") or "",
         script_tf=run_kwargs.get("script_tf") or "",
@@ -4152,6 +4710,11 @@ def _run_via_docker(strategy_dir: Path, ohlcv_path: Path, params: dict,
         chart_tz=run_kwargs.get("chart_timezone") or "",
         syminfo=syminfo or None,
     )
+    if any(_is_corpus_metadata_key(key) for key in params):
+        # Classification waits for the selected image's actual compiled module.
+        kw["corpus_params"] = params
+    else:
+        kw["inputs"] = corpus_input_values(params)
     if image:
         kw["image"] = image
     try:
@@ -4159,7 +4722,7 @@ def _run_via_docker(strategy_dir: Path, ohlcv_path: Path, params: dict,
     finally:
         if tmp_ohlcv is not None:
             tmp_ohlcv.unlink(missing_ok=True)
-    return {
+    result = {
         "trades": _rel.report_trades_to_runstrategy_shape(raw),
         "net_profit": float(raw.get("summary", {}).get("net_pnl", 0.0)),
         "input_bars_processed": int(raw.get("diagnostics", {}).get("input_bars_processed", 0)),
@@ -4168,17 +4731,53 @@ def _run_via_docker(strategy_dir: Path, ohlcv_path: Path, params: dict,
         "broker_state_hash": [],
         "equity_curve_time_ms": [],
     }
+    warnings = _engine_warnings(json.dumps(raw.get("diagnostics", {}).get("warnings")))
+    if warnings:
+        result["diagnostics"] = {"warnings": warnings}
+    return result
 
 
 # --- CLI ---------------------------------------------------------------
 
+def _help_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def _refuse_jailed_profile() -> None:
+    """Read run_json's host selector once, before any driver side effects."""
+    profile = os.environ.get("PINEFORGE_RUN_JSON_PROFILE", "unjailed")
+    if profile == "jailed":
+        error = RuntimeError(
+            "jailed profile excludes scripts/run_strategy.py: "
+            "strategy_driver_no_jailed_route")
+    elif profile != "unjailed":
+        error = RuntimeError("PINEFORGE_RUN_JSON_PROFILE must be unjailed or jailed")
+    else:
+        return
+    # Preserve _with_run_failure_code's attributes and the CLI's reporting.
+    # Keep the named exclusion in the text: this code's args are closed.
+    error.run_failure_code = "run_request_invalid"
+    error.run_failure_args = '{"option":"arguments"}'
+    raise error
+
+
 def main() -> int:
+    _refuse_jailed_profile()
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("strategy_dir", type=Path,
                     help="Path to corpus/<cat>/<name>/ — must contain strategy.so")
-    ap.add_argument("--ohlcv", type=Path, default=DEFAULT_OHLCV,
-                    help=f"OHLCV CSV (default: {DEFAULT_OHLCV.relative_to(REPO_ROOT)})")
+    ap.add_argument("--corpus-root", type=Path, default=None,
+                    help="Mounted corpus root (default: checkout corpus/).")
+    ap.add_argument("--derived-workspace", type=Path, default=None,
+                    help="Writable derived-feed workspace.")
+    ap.add_argument("--harness-dir", type=Path, default=None,
+                    help="Directory containing the installed report-sink harness.")
+    ap.add_argument("--ohlcv", type=Path, default=None,
+                    help=f"OHLCV CSV (default: {_help_path(DEFAULT_OHLCV)})")
     ap.add_argument("--so-name", default="strategy.so",
                     help="Library filename inside strategy_dir (default: strategy.so)")
     ap.add_argument("-o", "--output", type=Path, default=None,
@@ -4265,6 +4864,20 @@ def main() -> int:
                          "$PINEFORGE_RELEASE_IMAGE or ghcr .../pineforge-release:latest).")
     args = ap.parse_args()
 
+    if _path_selection_requested(args):
+        _apply_parity_paths(resolve_paths(
+            corpus_root=args.corpus_root,
+            derived_workspace=args.derived_workspace,
+            harness_dir=args.harness_dir,
+        ))
+    if args.ohlcv is None:
+        args.ohlcv = DEFAULT_OHLCV
+
+    with ExitStack() as resources:
+        return _main_run(args, resources)
+
+
+def _main_run(args, resources) -> int:
     strategy_dir = args.strategy_dir.resolve()
     out_path = (args.output.resolve() if args.output
                 else strategy_dir / "engine_trades.csv")
@@ -4281,7 +4894,7 @@ def main() -> int:
         with inputs_path.open(encoding="utf-8") as f:
             params = json.load(f)
     if _reads_derived_feed(params, strategy_dir, args.ohlcv, args.emit_window_ohlcv):
-        ensure_derived()
+        _ensure_derived()
     # Per-probe inputs.json metadata (ohlcv_csv / chart_timezone /
     # input_tf / script_tf / ohlcv_start_ms / runtime_overrides) is
     # resolved by the shared helper — see inputs_run_kwargs docstring.
@@ -4316,7 +4929,7 @@ def main() -> int:
         tv_span = _load_tv_entry_span(strategy_dir, params)
         tv_window_used = tv_span is not None
         if tv_span is None:
-            ensure_derived()
+            _ensure_derived()
             emit_window = report_window = _load_window_ms(REFERENCE_OHLCV)
     # The measurement ENDS where TradingView's range ends
     # (_apply_range_end_regime): the feed is bounded at the bars opening at
@@ -4485,15 +5098,18 @@ def main() -> int:
             print(f"  magnifier: {plan.status}: {plan.detail}")
 
         def run_engine(start_ms):
-            return strat.run(run_ohlcv, params=params,
-                             trace_enabled=args.trace_json is not None,
-                             trade_start_time_ms=start_ms,
-                             realtime_tail_horizon=args.realtime_tail,
-                             probe_suppress_tail=args.probe_suppress_tail,
-                             path_order=args.path_order,
-                             broker_state_hash_recording=args.broker_state_hash,
-                             dump_book=args.dump_book is not None,
-                             **run_kwargs)
+            result = strat.run(run_ohlcv, params=params,
+                               trace_enabled=args.trace_json is not None,
+                               trade_start_time_ms=start_ms,
+                               realtime_tail_horizon=args.realtime_tail,
+                               probe_suppress_tail=args.probe_suppress_tail,
+                               path_order=args.path_order,
+                               broker_state_hash_recording=args.broker_state_hash,
+                               dump_book=args.dump_book is not None,
+                               **run_kwargs)
+            if isinstance(result, _SinkReport):
+                resources.callback(result.close)
+            return result
     report = run_engine(trade_start_ms)
     if (signal_start_ms is not None and trade_start_ms is not None
             and trade_start_ms < signal_start_ms and report_window is not None):
@@ -4508,6 +5124,11 @@ def main() -> int:
             trade_start_ms = signal_start_ms
             emit_window = (signal_start_ms, emit_window[1])
             report = run_engine(trade_start_ms)
+    if isinstance(report, _SinkReport):
+        # The final report only: a discarded rerun's sink is always unlinked.
+        # Set before the outputs, so a probe that fails after this point still
+        # leaves its file when the switch names it.
+        report.sink.keep = _keep_report_sink(_probe_id(strategy_dir))
     if run_kwargs.get("report_terminal_quote") is not None:
         quote_result = report.get("report_terminal_quote") or {}
         quote_status = "APPLIED" if quote_result.get("applied") else "INERT"
@@ -4520,18 +5141,29 @@ def main() -> int:
     # the range-end close rows among them.
     range_end_rows = sum(1 for t in trades_to_write if t.get("open_at_end"))
     write_engine_trades_csv(trades_to_write, out_path)
+    run_warnings = report.get("diagnostics", {}).get("warnings")
     if args.trace_json is not None:
         trace_to_write = _filter_trace_to_window(report["trace"], emit_window)
         args.trace_json.parent.mkdir(parents=True, exist_ok=True)
         with args.trace_json.open("w", encoding="utf-8") as f:
-            json.dump({
+            document = {
                 "strategy": str(strategy_dir),
                 "ohlcv": str(run_ohlcv),
                 "emit_window": None if emit_window is None else {"start_ms": emit_window[0], "end_ms": emit_window[1]},
                 "report_start_ms": None if report_window is None else report_window[0],
                 "trace_names": report["trace_names"],
                 "trace": trace_to_write,
-            }, f)
+            }
+            if run_warnings:
+                document["diagnostics"] = {"warnings": run_warnings}
+            if isinstance(trace_to_write, _SinkRows):
+                from run_json import _JSONRecordArray
+                document["trace"] = _JSONRecordArray(lambda: iter(trace_to_write))
+                document["trace_names"] = _JSONRecordArray(
+                    lambda: iter(report["trace_names"]))
+                _dump_harness_sink_json(document, f)
+            else:
+                json.dump(document, f)
     if args.realtime_tail is not None:
         # Receipt: a consumer (scripts/live_flags_lane.py) asserts this line
         # is present in a flagged run's stdout so a future regression that
@@ -4572,18 +5204,30 @@ def main() -> int:
         # JSON-Number, so no consumer can silently truncate a uint64 to
         # a JS-safe double). Invariant (Strategy.run/_report_to_dict):
         # len(bsh_values) == len(bsh_times) whenever recording was on.
-        entries = [
-            {"time_ms": bsh_times[i], "hash": format(bsh_values[i], "016x")}
-            for i in range(len(bsh_values))
-        ]
+        if len(bsh_times) != len(bsh_values):
+            raise RuntimeError("broker-state hashes and equity timestamps differ in length")
+        entry_count = len(bsh_values)
+        def entries_iter():
+            # With a sink, two readers are live here at once (E and H): each
+            # _SinkRows pass opens its own SinkReader on the sink's real path,
+            # so their offsets are independent on every platform.
+            return ({"time_ms": timestamp, "hash": format(value, "016x")}
+                    for timestamp, value in zip(bsh_times, bsh_values))
         with bsh_path.open("w", encoding="utf-8") as f:
-            json.dump({
+            document = {
                 "strategy": str(strategy_dir),
                 "ohlcv": str(run_ohlcv),
                 "script_bars_processed": report["script_bars_processed"],
-                "entries": entries,
-            }, f)
-        print(f"  broker-state-hash: wrote {len(entries)} entries to {bsh_path}")
+                "entries": None,
+            }
+            if isinstance(bsh_values, _SinkRows):
+                from run_json import _JSONRecordArray
+                document["entries"] = _JSONRecordArray(entries_iter)
+                _dump_harness_sink_json(document, f)
+            else:
+                document["entries"] = list(entries_iter())
+                json.dump(document, f)
+        print(f"  broker-state-hash: wrote {entry_count} entries to {bsh_path}")
     if args.dump_book is not None:
         # strat is None only under --runner docker, which sys.exit's above
         # when --dump-book is set. A .so predating the exports still runs
@@ -4616,13 +5260,13 @@ def main() -> int:
                 }, f)
             print(f"  dump-book: wrote {len(book)} resting order(s) to {args.dump_book}")
     if args.fingerprint_json is not None:
+        if strat is None:
+            raise RuntimeError("NEEDS native engine provenance for --fingerprint-json")
+        if "applied_inputs" not in report:
+            raise RuntimeError("NEEDS inputs applied by this run for --fingerprint-json")
+        inputs_applied = report["applied_inputs"]
         try:
             cpp_path = strategy_dir / "generated.cpp"
-            # Inputs actually forwarded to the engine (drop tv_*/validator meta keys).
-            inputs_applied = {
-                str(k): str(v) for k, v in params.items()
-                if not str(k).startswith("tv_") and k not in _VALIDATION_META_KEYS
-            }
             overrides_applied = {
                 str(k): str(v) for k, v in (run_kwargs.get("strategy_overrides") or {}).items()
             }
@@ -4651,7 +5295,13 @@ def main() -> int:
                 json.dump(fp, f, indent=2)
             print(f"  fingerprint -> {args.fingerprint_json} ({fp['digest']})")
         except Exception as e:
-            print(f"  fingerprint: skipped ({e})", file=sys.stderr)
+            raise RuntimeError(f"NEEDS requested fingerprint: {e}") from e
+    if isinstance(report, _SinkReport):
+        # Every output is written; the sink is still open (the ExitStack
+        # closes it after this function returns), so the canary can still
+        # stat and re-read the file. A failure here fails the probe before
+        # the summary line below can read like a success.
+        _sink_canary(_probe_id(strategy_dir), report)
     elapsed = time.time() - started
 
     try:
@@ -4667,7 +5317,31 @@ def main() -> int:
         f"bars={report['input_bars_processed']}, "
         f"{elapsed:.2f}s -> {out_path.name}"
     )
+    if run_warnings:
+        print("diagnostics.warnings: " + json.dumps(run_warnings, separators=(",", ":")))
     return 0
+
+
+def _dump_harness_sink_json(document, destination):
+    """Stream diagnostic arrays with json.dump's existing default whitespace."""
+    from run_json import _JSONRecordArray
+
+    destination.write("{")
+    for index, (key, value) in enumerate(document.items()):
+        if index:
+            destination.write(", ")
+        destination.write(json.dumps(key))
+        destination.write(": ")
+        if isinstance(value, _JSONRecordArray):
+            destination.write("[")
+            for row_index, row in enumerate(value.records()):
+                if row_index:
+                    destination.write(", ")
+                json.dump(row, destination)
+            destination.write("]")
+        else:
+            json.dump(value, destination)
+    destination.write("}")
 
 
 if __name__ == "__main__":
