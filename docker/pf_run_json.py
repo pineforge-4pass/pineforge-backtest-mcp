@@ -240,6 +240,9 @@ def load_real(path: str):
         sys.stderr.write(f"[pineforge] {path} not found; REAL_PREFIX must name the pineforge-release prefix\n")
         sys.exit(2)
     sys.dont_write_bytecode = True  # keep the image's prefix free of __pycache__
+    # Keep the image's bin directory first for sibling imports during load and main().
+    real_dir = os.path.dirname(os.path.realpath(path))
+    sys.path[:] = [real_dir, *(entry for entry in sys.path if entry != real_dir)]
     name = "pineforge_image_run_json"
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
