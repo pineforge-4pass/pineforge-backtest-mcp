@@ -6,6 +6,7 @@ Requires Python 3.12 plus cc, g++ and ar; missing tools are gate failures.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "test" / "fixtures" / "parity-release-boundary"
 DRIVER = ROOT / "parity" / "pf_parity.py"
+HARNESS = DRIVER.parent / "vendor" / "run_strategy.py"
 PINE = '//@version=6\nstrategy("REL140 boundary C ABI stand-in")\n'
 TAPE = (
     "Trade #,Type,Signal,Date and time,Price USDT,Position size (qty),Net PnL USDT\n"
@@ -48,7 +50,53 @@ def require_compilers() -> dict[str, str]:
     return tools
 
 
+def expected_pf_abi() -> int:
+    try:
+        source = HARNESS.read_text(encoding="utf-8")
+    except OSError as error:
+        raise RuntimeError(f"unable to read vendored parity harness {HARNESS}: {error}") from error
+    try:
+        tree = ast.parse(source, filename=str(HARNESS))
+    except SyntaxError as error:
+        raise RuntimeError(f"vendored parity harness is not valid Python: {HARNESS}: {error}") from error
+
+    bindings = []
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign):
+            targets = statement.targets
+        elif isinstance(statement, (ast.AnnAssign, ast.AugAssign)):
+            targets = [statement.target]
+        else:
+            continue
+        if any(isinstance(target, ast.Name) and target.id == "EXPECTED_PF_ABI"
+               for target in targets):
+            bindings.append(statement)
+
+    if not bindings:
+        raise RuntimeError(
+            f"vendored parity harness has no top-level EXPECTED_PF_ABI assignment: {HARNESS}")
+    if len(bindings) != 1:
+        raise RuntimeError(
+            f"vendored parity harness has ambiguous top-level EXPECTED_PF_ABI assignments "
+            f"({len(bindings)}): {HARNESS}")
+
+    binding = bindings[0]
+    if isinstance(binding, ast.AugAssign):
+        raise RuntimeError(
+            f"vendored parity harness EXPECTED_PF_ABI augmented write does not declare an ABI: "
+            f"{HARNESS}")
+
+    value = getattr(binding, "value", None)
+    if (not isinstance(value, ast.Constant) or isinstance(value.value, bool)
+            or not isinstance(value.value, int) or value.value < 0):
+        raise RuntimeError(
+            f"vendored parity harness EXPECTED_PF_ABI must be a non-negative literal integer: "
+            f"{HARNESS}")
+    return value.value
+
+
 def prepare(directory: Path) -> dict:
+    abi = expected_pf_abi()
     tools = require_compilers()
     directory = directory.resolve()
     prefix = directory / "prefix"
@@ -57,6 +105,7 @@ def prepare(directory: Path) -> dict:
     obj = directory / "abi_stand_in.o"
     commands = [
         [tools["cc"], "-std=c11", "-Wall", "-Wextra", "-Werror", "-fPIC", "-c",
+         f"-DPF_ABI_VERSION={abi}",
          str(FIXTURES / "abi_stand_in.c"), "-o", str(obj)],
         [tools["ar"], "rcs", str(prefix / "lib" / "libpineforge.a"), str(obj)],
     ]
