@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 // @ts-ignore workflow module.
 import { verifyEvidence } from "../scripts/release-evidence.mjs";
 // @ts-ignore workflow module.
-import { verifyTap } from "../scripts/runtime-e2e.mjs";
+import { verifyTap, verifyVouchTap } from "../scripts/runtime-e2e.mjs";
 const lock = JSON.parse(readFileSync(new URL("./fixtures/release/release-ready-v1.json", import.meta.url), "utf8"));
 const inventory = JSON.parse(readFileSync(new URL("./fixtures/release/runtime-inventory.json", import.meta.url), "utf8"));
 function evidence() {
@@ -42,6 +42,48 @@ test("an empty, skipped or failed runtime run can never pass by exit code alone"
   assert.throws(() => verifyTap(tap.replace("# fail 0", "# fail 1"), 1));
   assert.throws(() => verifyTap(tap, 2));
 });
+
+const vouchName = "the pinned release image accepts its generated C++ vouch and refuses changed mounted bytes";
+const legacyReason = "legacy release before 1.9.1: pinned image predates strategy.cpp vouch enforcement";
+const vouchPass = `ok 1 - ${vouchName}`;
+const vouchSkip = `${vouchPass} # SKIP ${legacyReason}`;
+const currentRelease = "1.13.0";
+const legacyRelease = "1.9.0";
+
+function vouchTap(result: string, skipped = false) {
+  return tap.replace("1..1\n", `${result}\n1..1\n`)
+    .replace("# pass 1", `# pass ${skipped ? 0 : 1}`)
+    .replace("# skipped 0", `# skipped ${skipped ? 1 : 0}`);
+}
+
+test("vouch TAP: accepts the named pass", () => {
+  assert.doesNotThrow(() => verifyVouchTap(vouchTap(vouchPass), currentRelease));
+});
+
+test("vouch TAP: accepts the named legacy skip", () => {
+  assert.doesNotThrow(() => verifyVouchTap(vouchTap(vouchSkip, true), legacyRelease));
+});
+
+test("vouch TAP: rejects a legacy skip with the wrong reason", () => {
+  assert.throws(() => verifyVouchTap(vouchTap(`${vouchPass} # SKIP not supported`, true), legacyRelease));
+});
+
+for (const [label, release, output, error] of [
+  ["a green file entry with no test", currentRelease, vouchTap("ok 1 - test/e2e/strategy-cpp-vouch.e2e.ts"), /unexpected named vouch result/],
+  ["an unrelated pass", currentRelease, vouchTap("ok 1 - a different control"), /unexpected named vouch result/],
+  ["a nested named pass", currentRelease, vouchTap(`    ${vouchPass}\nok 1 - a different control`), /unexpected named vouch result/],
+  ["a failed named result with green totals", currentRelease, vouchTap(`not ${vouchPass}`), /unexpected named vouch result/],
+  ["a canonical #67 skip", currentRelease, vouchTap(vouchSkip, true), /vouch control must pass exactly once/],
+  ["a #67 skip with green totals and a lowercase directive", currentRelease, vouchTap(`${vouchPass} # skip ${legacyReason}`), /unexpected named vouch result/],
+  ["a legacy skip whose reason appears only in a comment", legacyRelease, vouchTap(`${vouchPass} # SKIP\n# diagnostic: # SKIP ${legacyReason}`, true), /unexpected named vouch result/],
+  ["a decorated named pass", currentRelease, vouchTap(`${vouchPass} # TODO investigate`), /unexpected named vouch result/],
+  ["duplicate result rows", currentRelease, vouchTap(`${vouchPass}\nok 2 - ${vouchName}`), /expected exactly one top-level vouch result/],
+  ["a legacy skip with extra text in its reason", legacyRelease, vouchTap(`${vouchSkip} (unverified)`, true), /unexpected named vouch result/],
+] as const) {
+  test(`vouch TAP: rejects ${label}`, () => {
+    assert.throws(() => verifyVouchTap(output, release), error);
+  });
+}
 
 test("pinned suite counts cover the actual existing stdio tests", () => {
   for (const [suite, expected] of Object.entries(inventory.suites)) {

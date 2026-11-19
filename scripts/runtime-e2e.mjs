@@ -12,6 +12,7 @@ import { verifyParityVendor } from "./release-parity.mjs";
 import { compareVersions } from "./release-version.mjs";
 
 const VOUCH_FILE = "strategy-cpp-vouch.e2e.ts";
+const VOUCH_TEST_NAME = "the pinned release image accepts its generated C++ vouch and refuses changed mounted bytes";
 const VOUCH_LEGACY_RELEASE = "1.9.1";
 const VOUCH_LEGACY_SKIP = "legacy release before 1.9.1: pinned image predates strategy.cpp vouch enforcement";
 
@@ -22,7 +23,8 @@ export function verifyTap(tap, expected) {
   assert.equal(n("pass"), expected, "incomplete suite");
   for (const key of ["fail", "cancelled", "skipped", "todo"]) assert.equal(n(key), 0, `${key} tests cannot authorize release`);
 }
-function verifyVouchTap(tap, legacy) {
+export function verifyVouchTap(tap, releaseVersion) {
+  const legacy = compareVersions(releaseVersion, VOUCH_LEGACY_RELEASE) < 0;
   const n = (key) => { const m = tap.match(new RegExp(`^# ${key} (\\d+)$`, "m")); assert.ok(m, `missing vouch ${key} count`); return Number(m[1]); };
   assert.equal(n("tests"), 1, "vouch control inventory changed");
   assert.equal(n("fail"), 0, "vouch control failed");
@@ -31,12 +33,16 @@ function verifyVouchTap(tap, legacy) {
   if (legacy) {
     assert.equal(n("pass"), 0, "legacy vouch skip must not count as pass");
     assert.equal(n("skipped"), 1, "legacy vouch control must skip exactly once");
-    assert.match(tap, new RegExp(`# SKIP ${VOUCH_LEGACY_SKIP.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
   } else {
     assert.equal(n("pass"), 1, "vouch control must pass exactly once");
     assert.equal(n("skipped"), 0, "current vouch control cannot skip");
     assert.doesNotMatch(tap, /# SKIP/);
   }
+  // Node can count a successful file with no registered tests as one pass.
+  const results = tap.split(/\r?\n/).filter((line) => /^(?:not )?ok\b/.test(line));
+  assert.equal(results.length, 1, "expected exactly one top-level vouch result");
+  const expected = `ok 1 - ${VOUCH_TEST_NAME}${legacy ? ` # SKIP ${VOUCH_LEGACY_SKIP}` : ""}`;
+  assert.equal(results[0], expected, "unexpected named vouch result");
 }
 async function run() {
   const lock = readLock();
@@ -98,7 +104,7 @@ async function run() {
     const vouchTap = Buffer.concat(vouchChunks).toString();
     writeFileSync(`.release-ci/${mode}-${VOUCH_FILE}.tap`, vouchTap);
     assert.equal(vouchCode, 0, `${mode} ${VOUCH_FILE} failed`);
-    verifyVouchTap(vouchTap, compareVersions(lock.release_version, VOUCH_LEGACY_RELEASE) < 0);
+    verifyVouchTap(vouchTap, lock.release_version);
     for (const [file, count] of Object.entries(inventory.suites)) {
       const chunks = [];
       const code = await new Promise((done, reject) => {
