@@ -4,12 +4,12 @@
  * API), run the grading core through the runner, and shape the answer.
  */
 
-import { chmod, copyFile, mkdtemp, open, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inflateRawSync } from "node:zlib";
 import type { EngineRunner, ParamMap, RuntimeArgsLike } from "./engine.js";
-import { writeBindInput } from "./bind-input.js";
+import { copyBindInput, writeBindInput } from "./bind-input.js";
 import {
   NUMBER_KEYS,
   STRING_KEYS,
@@ -187,15 +187,13 @@ async function suppliedBars(
     // describes the original format, so authenticate the snapshot before
     // normalization, using the origin only to locate and name the sidecar.
     const input = docker ? join(work, `${kind}-input.csv`) : abs;
-    if (docker) await copyFile(abs, input);
+    // The new owner of the copy may lack owner-read on the inherited mode.
+    if (docker) await copyBindInput(abs, input);
     const head = await firstLine(input);
     const path = join(work, `${kind}.csv`);
     const identity = { origin: abs, ...(docker ? { snapshot: input } : {}) };
     if (barsFormat(head) === "engine") {
-      if (!head.startsWith("\uFEFF")) {
-        if (docker) await chmod(input, 0o644);
-        return { path: input, source: `your file ${abs}`, ...identity };
-      }
+      if (!head.startsWith("\uFEFF")) return { path: input, source: `your file ${abs}`, ...identity };
       // The grading core reads the header without a byte-order mark.
       await writeBars(path, (await readFile(input, "utf8")).replace(/^\uFEFF/, ""), docker);
       return { path, source: `your file ${abs}`, ...identity };

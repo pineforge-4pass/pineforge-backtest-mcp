@@ -7,7 +7,7 @@ import {
   realpathSync, rmSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -72,10 +72,10 @@ const instrument = { schema: "pineforge-instrument/v1", resolved: true, qty_step
 function snapshot(path: string) {
   const s = lstatSync(path);
   assert.ok(s.isFile());
-  return { path, ino: s.ino, dev: s.dev, uid: s.uid, gid: s.gid, mode: s.mode & 0o777, sha256: digest(readFileSync(path)) };
+  return { path, ino: s.ino, dev: s.dev, uid: s.uid, gid: s.gid, mode: s.mode & 0o7777, sha256: digest(readFileSync(path)) };
 }
 
-function setup(name: string, withPrivacyControl = false) {
+function setup(name: string, withPrivacyControl = false, serverCwd?: string) {
   const dir = join(root, name);
   const work = join(dir, "caller");
   const staging = join(dir, "tmp");
@@ -114,7 +114,7 @@ function setup(name: string, withPrivacyControl = false) {
   };
   // Pass the chosen mask into the server process; leave this test process alone.
   const launch = (mask: string, env: Record<string, string> = {}, [node, entrypoint, ...args] = server) => connect({
-    cwd: work,
+    cwd: serverCwd ?? work,
     argv: [node, withUmask, mask, entrypoint, ...args],
     env: {
       PATH: `${bin}:${process.env.PATH}`, TMPDIR: staging, PINEFORGE_IMAGE: image,
@@ -426,6 +426,68 @@ for (const kind of ["caller", "inline", "converted", "bad-pine"] as const) {
         }
       }
       const events = c.observe();
+      assert.equal(events.length, 1);
+      assert.deepEqual(assertParityBinds(c, events[0], chartPath, finePath), [digest(chart), digest(fine)]);
+    });
+  });
+}
+
+for (const [label, fineName, fineMode, blockedSnapshot] of [
+  ["parity-foreign-chart", "fine-readable.csv", 0o644, "ohlcv-input.csv"],
+  // The server stages magnifier first. With both restricted, this isolates its first read.
+  ["parity-foreign-magnifier", "fine.csv", 0o044, "magnifier_ohlcv-input.csv"],
+] as const) {
+  test(label, async () => {
+    const cwd = realpathSync(required("PF_BIND_FOREIGN_FIXTURES"));
+    const c = setup(label, false, cwd);
+    const chartPath = join(cwd, "chart.csv");
+    const finePath = join(cwd, fineName);
+
+    // The direct Node child inherits this account. Prove its UID can open the
+    // real originals without capabilities, even though it does not own them.
+    const credentials = readFileSync("/proc/self/status", "utf8").split("\n")
+      .filter((line) => /^(Uid|Gid|Groups|CapEff|CapPrm|CapAmb):/.test(line));
+    const uids = credentials.find((line) => line.startsWith("Uid:"))?.slice(4).trim().split(/\s+/).map(Number);
+    assert.deepEqual(uids, Array(4).fill(host.uid));
+    for (const cap of ["CapEff", "CapPrm", "CapAmb"]) {
+      assert.ok(credentials.some((line) => new RegExp(`^${cap}:\\s+0+$`).test(line)), `${cap} must be zero`);
+    }
+    for (const [path, mode, bytes] of [[chartPath, 0o044, chart], [finePath, fineMode, tvFine]] as const) {
+      const original = snapshot(path); // lstat plus a real read under the MCP UID
+      assert.equal(original.uid, otherUid, path);
+      assert.equal(original.mode, mode, path);
+      assert.equal(original.sha256, digest(bytes), path);
+      c.originals.push(original);
+    }
+    save(join(c.traces, "original-read.json"), { credentials, originals: c.originals });
+
+    const client = await c.launch("077");
+    await use(c, client, async () => {
+      const result = await callParity(client, { ...parity, ohlcv_csv_path: chartPath, magnifier_ohlcv_csv_path: finePath });
+      save(join(c.traces, "mcp.json"), result);
+      const events = c.observe();
+      if (result.isError) {
+        assert.deepEqual([result.data?.ok, result.data?.error], [false, "internal"], result.text);
+        const denied = /^EACCES: permission denied, open '([^']+)'$/.exec(String(result.data?.message));
+        assert.ok(denied?.[1], result.text);
+        const path = denied[1];
+        assert.equal(basename(path), blockedSnapshot);
+        assert.match(basename(dirname(path)), /^pineforge-pt-/);
+        assert.equal(dirname(dirname(path)), c.staging);
+        assert.deepEqual(events, [], "a first-read failure must precede Docker");
+        save(join(c.traces, "snapshot-first-read.json"), { errno: "EACCES", path, dockerInvocations: events.length });
+      }
+      assert.equal(result.isError, false, result.text);
+      assert.deepEqual([result.data?.ok, result.data?.tier, result.data?.matched], [true, "excellent", 1], result.text);
+      assert.equal(result.data?.bars_source, `your file ${chartPath}`);
+      assert.equal(result.data?.magnifier_bars_source, `your file ${finePath} (TradingView chart export, converted)`);
+      const window = result.data?.window as { range_start?: string; report_window?: string[]; harness_log?: string[] } | undefined;
+      const utcMinute = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace("T", " ");
+      assert.equal(window?.range_start, utcMinute(start));
+      // The report starts one chart interval before TradingView's first entry.
+      assert.deepEqual(window?.report_window, [utcMinute(start), utcMinute(start + 900_000)]);
+      assert.match(window?.harness_log?.join("\n") ?? "",
+        new RegExp(`magnifier: declared:.*sha256 ${digest(fine)}.*input_tf=1 script_tf=15, magnifier on`));
       assert.equal(events.length, 1);
       assert.deepEqual(assertParityBinds(c, events[0], chartPath, finePath), [digest(chart), digest(fine)]);
     });
