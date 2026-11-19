@@ -133,8 +133,9 @@ jobs:
           path: |
             .release-ci/runtime-${{ matrix.arch }}-npm.json
             .release-ci/npm-*.tap
+            .release-ci/syminfo-row-2-stderr.txt
           if-no-files-found: error
-          retention-days: 90
+          retention-days: 1
 
   runtime-image:
     name: runtime-image (${{ matrix.arch }})

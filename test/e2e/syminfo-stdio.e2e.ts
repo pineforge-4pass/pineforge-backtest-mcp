@@ -29,9 +29,10 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { connect, pathMapper } from "./client.js";
@@ -163,15 +164,45 @@ after(async () => {
   rmSync(WORKDIR, { recursive: true, force: true });
 });
 
-async function tool(name: string, args: Record<string, unknown>, c: Client = client) {
+// TAP is also uploaded. Mask sensitive fragments in both copies of the error,
+// preserving the rest of each line and all of the traceback.
+function redactToolError(text: string): string {
+  const workspace = process.cwd();
+  const home = homedir();
+  if (workspace !== "/") text = text.replaceAll(`${workspace}/`, "<workspace>/");
+  if (home && home !== "/") text = text.replaceAll(home, "<home>");
+  return text
+    .replace(/\/(?:(?:var\/)?home\/[\w.-]+|Users\/[\w.-]+|root)(?=$|[\/\s"'`:,;)\]}])/g, "<home>")
+    .replace(/(\b[a-z][a-z\d+.-]*:\/\/)[^/\s@]+@/gi, "$1[redacted]@")
+    .replace(/(\b(?:Bearer|Authorization["']?[ \t]*:[ \t]*["']?Basic)[ \t]+)[A-Za-z0-9._~+/=-]+/gi, "$1[redacted]")
+    .replace(/(\b(?:[\w-]+[_-])?(?:token|secret|password|passwd|api[-_]?key|private[-_]?key|credentials?)["']?[ \t]*[:=][ \t]*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s"',;&}\]]+)/gi, "$1[redacted]")
+    .replace(/\b(?:gh[pousr]_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+|(?:AKIA|ASIA)[A-Z0-9]{16})\b/g, "[redacted]")
+    .replace(/-----BEGIN [^\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^\r\n]*PRIVATE KEY-----/g, "[redacted private key]");
+}
+
+function writeRow2Diagnostic(text: string): void {
+  if (process.env.PF_RELEASE_GATE !== "1" || process.env.PF_E2E_MODE !== "npm") return;
+  try {
+    // The runtime runner starts this suite at the repo root, with .release-ci already present.
+    writeFileSync(".release-ci/syminfo-row-2-stderr.txt", text, { flag: "wx", mode: 0o600 });
+  } catch {
+    console.error("Could not write the row 2 diagnostic; the tool error follows in TAP.");
+  }
+}
+
+async function tool(
+  name: string, args: Record<string, unknown>, c: Client = client, onError?: (text: string) => void,
+) {
   const r = await c.callTool({ name, arguments: args }, undefined, { timeout: 600_000 });
   const text = ((r.content ?? []) as Array<{ type: string; text?: string }>).map((x) => x.text ?? "").join("\n");
-  assert.notEqual(r.isError, true, `${name} failed: ${text.slice(0, 600)}`);
+  const failureText = r.isError === true ? redactToolError(text) : "";
+  if (r.isError === true) onError?.(failureText);
+  assert.notEqual(r.isError, true, `${name} failed: ${failureText}`);
   return JSON.parse(text) as Record<string, any>;
 }
 
-const backtest = (extra: Record<string, unknown> = {}, path = CSV_PATH!) =>
-  tool("backtest_pine", { source: pine, ohlcv_csv_path: map(path), ...extra });
+const backtest = (extra: Record<string, unknown> = {}, path = CSV_PATH!, onError?: (text: string) => void) =>
+  tool("backtest_pine", { source: pine, ohlcv_csv_path: map(path), ...extra }, client, onError);
 
 const summarize = (rows: Row[]) =>
   `${rows.length} rows, ${rows.filter((r) => (r.qty as number) < DUST).length} below ${DUST}` +
@@ -193,7 +224,7 @@ test("BEFORE: no instrument given: the run is the image's own, gridless (27 rows
 });
 
 test("AFTER: syminfo given: the lot grid is applied (22 rows, 0 dust), as the engine harness books it", async () => {
-  const r = await backtest({ syminfo: INSTRUMENT });
+  const r = await backtest({ syminfo: INSTRUMENT }, undefined, writeRow2Diagnostic);
   const rows = rowsOf(r.trades);
   assert.equal(rows.length, 22, `expected 22 rows, got ${summarize(rows)}`);
   assert.equal(rows.filter((x) => (x.qty as number) < DUST).length, 0, `dust rows remain: ${summarize(rows)}`);

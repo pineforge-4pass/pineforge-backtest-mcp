@@ -323,7 +323,7 @@ export async function dockerBacktest(args: DockerBacktestArgs): Promise<unknown>
         }
         throw new Error(
           `docker exited ${code}\n` +
-          `stderr (last 2KB):\n${stderr.slice(-2048)}`
+          `stderr:\n${stderr}`
         );
       }
       try {
