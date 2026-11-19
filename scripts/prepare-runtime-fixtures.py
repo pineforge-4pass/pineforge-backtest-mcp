@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 root = Path.cwd()
 inventory = json.loads((root / "test/fixtures/release/runtime-inventory.json").read_text())
@@ -25,6 +26,8 @@ if hashlib.sha256(data).hexdigest() != inventory["syminfo_feed_sha256"]:
     raise ValueError("wrong frozen syminfo feed bytes")
 if len(data.splitlines()) - 1 != inventory["syminfo_bars"]:
     raise ValueError("wrong syminfo bar count")
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(root / "parity" / "vendor"))
 spec = importlib.util.spec_from_file_location("derive", root / "parity/vendor/derive_corpus_feeds.py")
 derive = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(derive)
