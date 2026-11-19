@@ -68,9 +68,25 @@ def expected_pf_abi() -> int:
             targets = [statement.target]
         else:
             continue
-        if any(isinstance(target, ast.Name) and target.id == "EXPECTED_PF_ABI"
-               for target in targets):
-            bindings.append(statement)
+
+        direct_binding = False
+        destructuring_binding = False
+        pending = [(target, False) for target in targets]
+        while pending:
+            target, nested = pending.pop()
+            if isinstance(target, ast.Name):
+                if target.id == "EXPECTED_PF_ABI":
+                    if nested:
+                        destructuring_binding = True
+                    else:
+                        direct_binding = True
+            elif isinstance(target, (ast.Tuple, ast.List)):
+                pending.extend((element, True) for element in target.elts)
+            elif isinstance(target, ast.Starred):
+                pending.append((target.value, True))
+
+        if direct_binding or destructuring_binding:
+            bindings.append((statement, destructuring_binding))
 
     if not bindings:
         raise RuntimeError(
@@ -80,10 +96,14 @@ def expected_pf_abi() -> int:
             f"vendored parity harness has ambiguous top-level EXPECTED_PF_ABI assignments "
             f"({len(bindings)}): {HARNESS}")
 
-    binding = bindings[0]
+    binding, destructuring_binding = bindings[0]
     if isinstance(binding, ast.AugAssign):
         raise RuntimeError(
             f"vendored parity harness EXPECTED_PF_ABI augmented write does not declare an ABI: "
+            f"{HARNESS}")
+    if destructuring_binding:
+        raise RuntimeError(
+            f"vendored parity harness EXPECTED_PF_ABI destructuring write does not declare an ABI: "
             f"{HARNESS}")
 
     value = getattr(binding, "value", None)
