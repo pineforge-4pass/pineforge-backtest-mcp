@@ -310,6 +310,18 @@ test("a sidecar is ignored when the CSV changed though its first and last bar di
   assert.match(read.ignored!, /written for a different CSV \(the bars' range is the same, the content differs\)/);
 });
 
+test("sidecar lookup uses the caller's filename but authenticates the snapshot", async () => {
+  const origin = csv(["1000,1,1,1,1,1", "2000,1,1,1,1,1", "3000,1,1,1,1,1"]);
+  const snapshot = csv(["1000,1,1,1,1,1", "2000,2,2,2,2,2", "3000,1,1,1,1,1"]);
+  await writeSidecar(origin, instrumentFromBinance(spot("BTCUSDT"), "spot"), FEED);
+  assert.ok((await readSidecar(origin)).instrument);
+  const wrongBytes = await readSidecar(origin, snapshot);
+  assert.equal(wrongBytes.instrument, undefined);
+  assert.match(wrongBytes.ignored!, /the bars' range is the same, the content differs/);
+  writeFileSync(snapshot, readFileSync(origin));
+  assert.deepEqual((await readSidecar(origin, snapshot)).instrument, (await readSidecar(origin)).instrument);
+});
+
 test("a sidecar with only a mincontract has that lot size, and the reverse", async () => {
   const path = csv();
   writeFileSync(sidecarPath(path), JSON.stringify({ schema: INSTRUMENT_SCHEMA, mincontract: 0.25 }));

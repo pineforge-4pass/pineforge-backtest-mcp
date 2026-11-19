@@ -510,8 +510,8 @@ async function readSmallFile(path: string): Promise<{ text?: string; missing?: b
   }
 }
 
-/** The instrument recorded next to `csvPath`, if there is one and the CSV does not contradict it. */
-export async function readSidecar(csvPath: string): Promise<SidecarRead> {
+/** Locate the sidecar beside the caller's file and verify it against the input snapshot. */
+export async function readSidecar(csvPath: string, inputPath: string = csvPath): Promise<SidecarRead> {
   const path = sidecarPath(csvPath);
   const name = basename(path);
   const file = await readSmallFile(path);
@@ -530,7 +530,7 @@ export async function readSidecar(csvPath: string): Promise<SidecarRead> {
   const rec = raw as Record<string, unknown>;
   const csv = rec.csv as (Partial<SidecarFeed> & { sha256?: unknown }) | undefined;
   if (csv && typeof csv === "object") {
-    const range = await csvBarRange(csvPath).catch(() => undefined);
+    const range = await csvBarRange(inputPath).catch(() => undefined);
     if (!range || range.first !== csv.first_open_time || range.last !== csv.last_open_time) {
       // The sidecar is a file anyone may have written: only numbers go into text the model reads.
       const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? String(v) : "?");
@@ -541,7 +541,7 @@ export async function readSidecar(csvPath: string): Promise<SidecarRead> {
         ),
       };
     }
-    if (typeof csv.sha256 === "string" && csv.sha256 !== (await sha256Of(csvPath).catch(() => ""))) {
+    if (typeof csv.sha256 === "string" && csv.sha256 !== (await sha256Of(inputPath).catch(() => ""))) {
       return { ignored: `${name} was written for a different CSV (the bars' range is the same, the content differs)` };
     }
   }
@@ -622,6 +622,7 @@ export async function resolveInstrument(
   csvPath: string | undefined,
   lookup: (market: BinanceMarket, symbol: string) => Promise<BinanceSymbolInfo | undefined>,
   tv: (market: BinanceMarket, symbol: string) => number | undefined = tvLotStep,
+  inputPath: string | undefined = csvPath,
 ): Promise<Resolution> {
   const symbol = req.symbol?.trim().toUpperCase();
   const user = givenSyminfo(req.syminfo);
@@ -630,7 +631,7 @@ export async function resolveInstrument(
   let market: BinanceMarket = req.market ?? "spot";
   let marketKnown = req.market !== undefined;
   if (symbol && csvPath) {
-    const recorded = (await readSidecar(csvPath)).instrument?.source;
+    const recorded = (await readSidecar(csvPath, inputPath)).instrument?.source;
     if (recorded?.symbol === symbol && recorded.market) {
       if (req.market === undefined) {
         market = recorded.market;
@@ -681,7 +682,7 @@ export async function resolveInstrument(
     }
   } else {
     // The CSV's own instrument; the user's values, if any, go over it.
-    const read = csvPath ? await readSidecar(csvPath) : {};
+    const read = csvPath ? await readSidecar(csvPath, inputPath) : {};
     if (read.instrument) {
       base = read.instrument;
       const s = base.source;

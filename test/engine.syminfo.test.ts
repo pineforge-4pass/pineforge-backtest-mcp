@@ -9,7 +9,7 @@ import {
   chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { DockerRunner, LocalRunner, dockerBacktestArgs } from "../src/engine.js";
 import {
   IMAGE_LAYOUT, IMAGE_PREFIX, OVERLAY_MOUNT, SKIP_REASONS, createOverlay, layoutOf, mentionsOverlay, overlayEnv, overlayFs,
@@ -73,10 +73,11 @@ test("the overlay mirrors the prefix, except bin/run_json.py (the shim) and inst
     assert.equal(readFileSync(runJson, "utf8"), readFileSync(shimPath(), "utf8"));
     assert.deepEqual(JSON.parse(readFileSync(join(overlay.dir, "instrument.json"), "utf8")), BTC);
     // a container user other than the owner has to read it
-    assert.equal(lstatSync(overlay.dir).mode & 0o755, 0o755);
-    assert.equal(lstatSync(join(overlay.dir, "bin")).mode & 0o755, 0o755);
-    assert.equal(lstatSync(runJson).mode & 0o644, 0o644);
-    assert.equal(lstatSync(join(overlay.dir, "instrument.json")).mode & 0o644, 0o644);
+    assert.equal(lstatSync(dirname(overlay.dir)).mode & 0o777, 0o700);
+    assert.equal(lstatSync(overlay.dir).mode & 0o777, 0o755);
+    assert.equal(lstatSync(join(overlay.dir, "bin")).mode & 0o777, 0o755);
+    assert.equal(lstatSync(runJson).mode & 0o777, 0o644);
+    assert.equal(lstatSync(join(overlay.dir, "instrument.json")).mode & 0o777, 0o644);
   } finally {
     await overlay.cleanup();
   }
@@ -456,14 +457,17 @@ test("a host that cannot link the prefix (win32): both runners go ahead without 
   assert.deepEqual(overlays(), []);
 });
 
-test("an overlay that cannot be built (a failing symlink): both runners go ahead without the instrument and say so", async () => {
-  fakeDocker(DOCKER_REPORTS);
+test("a failed overlay build stops Docker before launch; the local runner keeps its fallback", async () => {
+  fakeDocker('touch "$FAKE_DOCKER_LOG"');
+  const log = join(workRoot, "failed-build-docker-log");
+  process.env.FAKE_DOCKER_LOG = log;
   await withFailingSymlink(async () => {
     const dockerNotices: string[] = [];
-    const out = await new DockerRunner("img:9").backtest({ ...dockerInputs(), instrument: BTC, notices: dockerNotices }) as { overlay_host: string | null; argv: string[] };
-    assert.equal(out.overlay_host, null);
-    assert.ok(!out.argv.some((a) => a.includes(OVERLAY_MOUNT)));
-    assert.deepEqual(dockerNotices, [BUILD_NOTICE]);
+    await assert.rejects(new DockerRunner("img:9").backtest({
+      ...dockerInputs(), instrument: BTC, notices: dockerNotices,
+    }), /EPERM: operation not permitted, symlink/);
+    assert.equal(existsSync(log), false);
+    assert.deepEqual(dockerNotices, []);
     const localNotices: string[] = [];
     const seen = await localRun({ instrument: BTC, notices: localNotices });
     assert.equal(seen.prefix, PREFIX);
