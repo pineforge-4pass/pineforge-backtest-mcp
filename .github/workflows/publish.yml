@@ -33,7 +33,7 @@ jobs:
 
   prepare:
     needs: gates
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       prerelease: ${{ steps.channel.outputs.prerelease }}
     steps:
@@ -63,7 +63,7 @@ jobs:
 
   image:
     needs: [gates, prepare]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       actions: read
@@ -97,7 +97,7 @@ jobs:
 
   publish:
     needs: [gates, prepare, image]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       actions: read
@@ -129,7 +129,7 @@ jobs:
   mcp-registry:
     needs: [publish, image, prepare]
     if: needs.prepare.outputs.prerelease == 'false'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       id-token: write
@@ -159,7 +159,7 @@ jobs:
       always() && needs.publish.result == 'success' && needs.image.result == 'success' &&
       (needs.mcp-registry.result == 'success' ||
       (needs.prepare.outputs.prerelease == 'true' && needs.mcp-registry.result == 'skipped'))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -179,7 +179,7 @@ jobs:
       needs.publish.result == 'success' && needs.image.result == 'success' && needs.release.result == 'success' &&
       (needs.mcp-registry.result == 'success' ||
       (needs.prepare.outputs.prerelease == 'true' && needs.mcp-registry.result == 'skipped'))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       actions: read
@@ -222,7 +222,7 @@ jobs:
     if: >-
       always() && (inputs.action == 'restore' ||
       (needs.prepare.result == 'success' && contains(fromJSON('["failure","cancelled"]'), needs.promote.result)))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       actions: read
@@ -275,7 +275,7 @@ jobs:
   report-failure:
     needs: [gates, prepare, image, publish, mcp-registry, release, promote, restore]
     if: always() && needs.promote.result != 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       issues: write

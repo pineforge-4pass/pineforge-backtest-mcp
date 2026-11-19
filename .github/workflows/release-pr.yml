@@ -29,7 +29,7 @@ jobs:
     # Automatic triggers (workflow_run, push, schedule) run only once the chain is
     # configured (RELEASE_CHAIN_OWNER set); a manual run without it still fails loudly.
     if: vars.RELEASE_CHAIN_OWNER != '' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Mint target-scoped App token
         id: app
