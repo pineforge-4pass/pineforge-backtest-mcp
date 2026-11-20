@@ -1,7 +1,7 @@
 /** Linux runner only. Setup and evidence contract: bind-inputs.md. */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
   realpathSync, rmSync, writeFileSync,
@@ -30,7 +30,7 @@ const server = serverArgv("PF_E2E_SERVER");
 const withUmask = fileURLToPath(new URL("./with-umask.mjs", import.meta.url));
 const lock = JSON.parse(readFileSync(new URL("../../release-lock.json", import.meta.url), "utf8"));
 const image = `${lock.image.repository}@${lock.image.digest}`;
-const evidence = resolve(required("PF_BIND_EVIDENCE"));
+const evidence = resolve(required("PF_BIND_EVIDENCE")), runId = process.env.PF_BIND_RUN || randomUUID(); // runId: the scheduled run (PF_BIND_RUN), or its own id for a run by hand; every custody.json carries it.
 mkdirSync(evidence, { mode: 0o700 }); // A new evidence directory for each run, never reuse traces.
 const host = { uid: process.getuid!(), gid: process.getgid!() };
 assert.notEqual(host.uid, 0, "the server must run as an ordinary host user");
@@ -125,7 +125,7 @@ function setup(name: string, withPrivacyControl = false, serverCwd?: string) {
   });
   const observe = () => readdirSync(traces).filter((p) => /^docker-.*\.json$/.test(p))
     .map((p) => JSON.parse(readFileSync(join(traces, p), "utf8")));
-  return { staging, traces, launch, observe, input, feed, originals,
+  return { name, staging, traces, launch, observe, input, feed, originals,
     controlPath: withPrivacyControl ? join(control, "sample.txt") : undefined };
 }
 
@@ -145,7 +145,7 @@ async function use(c: Case, client: Client, calls: () => Promise<void>) {
         remaining = listRemaining();
       }
       const after = c.originals.map(({ path }) => snapshot(path));
-      save(join(c.traces, "custody.json"), { before: c.originals, after, remaining });
+      save(join(c.traces, "custody.json"), { case: c.name, run: runId, staging: c.staging, before: c.originals, after, remaining });
       assert.deepEqual(after, c.originals, "caller files changed");
       assert.deepEqual(remaining, [], "per-run directories survived");
       for (const event of c.observe()) {
@@ -294,12 +294,26 @@ test("parallel grids have complete, distinct request inputs", async () => {
   const path = c.feed(0o600, true);
   const client = await c.launch("077");
   await use(c, client, async () => {
-    const requests = await Promise.allSettled([19, 20].map((length) => backtest(c, client, `mcp-${length}`, path,
-      { inputs: { "Fast Length": [length, length + 3] }, concurrency: 2, include_trades: true }, "backtest_pine_grid")));
+    // Each request is identified by its own label and submits its own two combinations.
+    const submitted = (length: number) => [length, length + 3];
+    const requests = await Promise.allSettled([19, 20].map(async (length) => ({
+      length,
+      call: await backtest(c, client, `mcp-${length}`, path,
+        { inputs: { "Fast Length": submitted(length) }, concurrency: 2, include_trades: true }, "backtest_pine_grid"),
+    })));
     for (const r of requests) {
       assert.equal(r.status, "fulfilled");
-      assert.notEqual(r.value.raw.isError, true, r.value.text);
-      const report = r.value.report;
+      const { length, call } = r.value;
+      assert.notEqual(call.raw.isError, true, call.text);
+      const report = call.report;
+      // First an actual array of exactly this request's two distinct rows: every() below is vacuous on an empty
+      // array and the counters are self-reported. The report spells each Fast Length as a string in row.inputs.
+      assert.ok(Array.isArray(report.results), `request ${length}: results is not an array`);
+      assert.equal(report.results.length, 2, `request ${length}: ${report.results.length} result rows`);
+      const returned = report.results.map((row: any) => row?.inputs?.["Fast Length"]);
+      assert.equal(new Set(returned).size, 2, `request ${length}: repeated rows ${JSON.stringify(returned)}`);
+      assert.deepEqual([...returned].sort(), submitted(length).map(String).sort(),
+        `request ${length}: rows are not its own two combinations`);
       assert.deepEqual([report.total_combinations, report.succeeded, report.failed], [2, 2, 0]);
       assert.deepEqual(report.instrument.source, { ...sourceOf, via: "sidecar" });
       assert.ok(report.results.every((row: any) => row.ok && row.trades.length > 0 &&
