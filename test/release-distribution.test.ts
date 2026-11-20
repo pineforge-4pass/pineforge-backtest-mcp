@@ -478,8 +478,10 @@ test("D2: restore uses legacy pointers from a snapshot with a recorded revision 
   const { result, state, receipt } = restore({}, channelState);
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(state.calls.filter((c: any) => c.tool === "npm" && c.args[0] === "dist-tag").map((c: any) => c.args), [
-    ["dist-tag", "add", "@pineforge/backtest-mcp@0.9.40", "latest"],
+    ["dist-tag", "add", `@pineforge/backtest-mcp@${legacyPrevious.npm_version}`, "latest"],
+    ["dist-tag", "add", `@pineforge/backtest-mcp@${legacyPrevious.npm_version}`, "next"],
   ]);
+  assert.equal(state.npm_tags.next, legacyPrevious.npm_version);
   assert.deepEqual(state.calls.filter((c: any) => c.tool === "docker" && c.args[2] === "create").map((c: any) => c.args), [
     ["buildx", "imagetools", "create", "--tag", "ghcr.io/pineforge-4pass/pineforge-backtest-mcp:latest",
       "ghcr.io/pineforge-4pass/pineforge-backtest-mcp@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],
