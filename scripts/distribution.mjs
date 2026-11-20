@@ -375,13 +375,25 @@ export async function promote(timing = {}) {
   assert.equal(imageDigest(`${OCI}:v${state.version}`), image.digest);
   assert.equal((await npmMetadata(state.version)).dist.integrity, state.package_integrity);
   // Stop a stale run from restoring or replacing a newer channel.
-  const current = (await npmMetadata())["dist-tags"][state.channel];
+  const tags = (await npmMetadata())["dist-tags"];
+  const current = tags[state.channel];
   assert.ok([state.previous.npm_version, state.version].includes(current), "npm channel moved since preparation");
+  if (state.channel === "latest" && tags.next !== undefined) {
+    assert.ok(compareVersions(tags.next, state.version) <= 0, "newer npm next channel moved since preparation");
+  }
   if (state.channel === "latest") assert.ok([state.previous.image_digest, image.digest].includes(imageDigest(`${OCI}:latest`)), "image channel moved since preparation");
   oidc(); desired(lock);
   cmd("npm", "dist-tag", "add", `${NPM}@${state.version}`, state.channel);
   await pollNpmMetadata("", (m) => m?.["dist-tags"]?.[state.channel] === state.version,
     `npm channel not activated: ${state.channel} -> ${state.version}`, timing);
+  if (state.channel === "latest") {
+    // The stable channel must be observed before next is moved. The final
+    // read-back binds both public tags to the exact promoted version.
+    cmd("npm", "dist-tag", "add", `${NPM}@${state.version}`, "next");
+    await pollNpmMetadata("", (m) => m?.["dist-tags"]?.latest === state.version
+      && m?.["dist-tags"]?.next === state.version,
+    `npm channels not activated: latest and next -> ${state.version}`, timing);
+  }
   if (state.channel === "latest") {
     assert.ok([state.previous.image_digest, image.digest].includes(imageDigest(`${OCI}:latest`)), "image channel moved since preparation");
     docker("buildx", "imagetools", "create", "--tag", `${OCI}:latest`, `${OCI}@${image.digest}`);
@@ -409,8 +421,12 @@ export async function restore(timing = {}) {
   assert.equal(run.head_sha, state.source_sha);
   assert.equal(String(state.run_id), process.env.RESTORE_SOURCE_RUN, "restoration artifact/run mismatch");
   const image = existsSync(`${dir}/offline-image-publication/image-publication.json`) ? json(`${dir}/offline-image-publication/image-publication.json`) : null;
-  const current = (await npmMetadata())["dist-tags"][state.channel];
+  const tags = (await npmMetadata())["dist-tags"];
+  const current = tags[state.channel];
   assert.ok([state.version, state.previous.npm_version].includes(current), "newer npm channel must not be rolled back");
+  if (state.channel === "latest" && tags.next !== undefined) {
+    assert.ok(compareVersions(tags.next, state.version) <= 0, "newer npm next channel must not be rolled back");
+  }
   if (state.channel === "latest") {
     const digest = imageDigest(`${OCI}:latest`);
     assert.ok([state.previous.image_digest, image?.digest].includes(digest), "newer image channel must not be rolled back");
@@ -433,6 +449,12 @@ export async function restore(timing = {}) {
     () => cmd("npm", "dist-tag", "add", `${NPM}@${state.previous.npm_version}`, state.channel),
     () => pollNpmMetadata("", (m) => m?.["dist-tags"]?.[state.channel] === state.previous.npm_version,
       `OIDC channel restoration failed: ${state.channel} -> ${state.previous.npm_version}`, timing));
+  if (state.channel === "latest") {
+    await attemptRestoration("npm next",
+      () => cmd("npm", "dist-tag", "add", `${NPM}@${state.previous.npm_version}`, "next"),
+      () => pollNpmMetadata("", (m) => m?.["dist-tags"]?.next === state.previous.npm_version,
+        `OIDC channel restoration failed: next -> ${state.previous.npm_version}`, timing));
+  }
   if (state.channel === "latest") {
     await attemptRestoration("GHCR latest",
       () => docker("buildx", "imagetools", "create", "--tag", `${OCI}:latest`, `${OCI}@${state.previous.image_digest}`),
