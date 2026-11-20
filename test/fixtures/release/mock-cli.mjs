@@ -67,6 +67,7 @@ else if (tool === "npm" && args[0] === "dist-tag" && args[1] === "add") {
       };
     }
     s.npm_tags[tag] = version;
+    if (tag === "latest") s.npm_version = version;
     (s.npm_writes ??= []).push({ operation: "add", tag, version });
     writeFileSync(file, JSON.stringify(s));
     process.exit(0);
