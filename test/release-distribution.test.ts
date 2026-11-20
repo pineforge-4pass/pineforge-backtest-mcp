@@ -120,13 +120,13 @@ test("a missing npm trusted-publisher dist-tag permission fails and never report
 });
 test("channel split: an npm dist-tag that does not take effect never retags GHCR", () => {
   const { result, mock, evidence } = distribute("promote", { previous: original.previous }, {
-    npm_tags: { latest: original.previous.npm_version },
+    npm_tags: { latest: original.previous.npm_version, next: original.previous.npm_version },
     responses: { [npmRegistry]: { npm_tags: true } },
     dist_tag_add_noop: "latest",
   }, 1);
   assert.equal(result.status, 1, result.stderr);
   assert.equal(mock.npm_tags.latest, original.previous.npm_version);
-  assert.equal(mock.npm_tags.next, undefined);
+  assert.equal(mock.npm_tags.next, original.previous.npm_version);
   assert.deepEqual(mock.calls.filter((c: any) => c.tool === "npm" && c.args[0] === "dist-tag"), [
     { tool: "npm", args: ["dist-tag", "add", "@pineforge/backtest-mcp@0.9.41", "latest"] },
   ]);
@@ -179,7 +179,7 @@ test("channel split: a failed npm restore still retags GHCR to the previous dige
 
 test("channel split: promote and restore happy paths are unchanged", () => {
   const promoted = distribute("promote", { previous: original.previous }, {
-    events: [], npm_tags: { latest: original.previous.npm_version },
+    events: [], npm_tags: { latest: original.previous.npm_version, next: original.previous.npm_version },
     responses: { [npmRegistry]: { npm_tags: true } },
   });
   const events = promoted.mock.events;
@@ -191,10 +191,10 @@ test("channel split: promote and restore happy paths are unchanged", () => {
   assert.deepEqual(events.filter((e: any) => e.kind === "npm" || (e.kind === "fetch" && e.url === npmRegistry)).map((e: any) =>
     e.kind === "fetch" ? ["read", e.json["dist-tags"]]
       : e.args[0] === "dist-tag" ? ["write", e.args[3]] : ["npm", ...e.args]), [
-    ["read", { latest: original.previous.npm_version }],
+    ["read", { latest: original.previous.npm_version, next: original.previous.npm_version }],
     ["npm", "--version"],
     ["write", "latest"],
-    ["read", { latest: original.version }],
+    ["read", { latest: original.version, next: original.previous.npm_version }],
     ["write", "next"],
     ["read", { latest: original.version, next: original.version }],
   ]);
@@ -305,7 +305,7 @@ test("channel split: a delayed npm channel becomes visible within the poll, then
 
 test("channel split: a mismatched next read-back never retags GHCR or emits evidence", () => {
   const { result, mock, evidence } = distribute("promote", { previous: original.previous }, {
-    events: [], npm_tags: { latest: original.previous.npm_version },
+    events: [], npm_tags: { latest: original.previous.npm_version, next: original.previous.npm_version },
     responses: { [npmRegistry]: { npm_tags: true } },
     dist_tag_add_noop: "next",
   }, 1);
@@ -317,13 +317,13 @@ test("channel split: a mismatched next read-back never retags GHCR or emits evid
   const reads = mock.events.filter((e: any) => e.kind === "fetch" && e.url === npmRegistry)
     .map((e: any) => e.json["dist-tags"]);
   assert.deepEqual(reads.slice(0, 2), [
-    { latest: original.previous.npm_version },
-    { latest: original.version },
+    { latest: original.previous.npm_version, next: original.previous.npm_version },
+    { latest: original.version, next: original.previous.npm_version },
   ]);
   assert.equal(reads.length, 63);
-  assert.deepEqual(reads.at(-1), { latest: original.version });
+  assert.deepEqual(reads.at(-1), { latest: original.version, next: original.previous.npm_version });
   assert.equal(mock.npm_tags.latest, original.version);
-  assert.equal(mock.npm_tags.next, undefined);
+  assert.equal(mock.npm_tags.next, original.previous.npm_version);
   assert.ok(!mock.calls.some((c: any) => c.tool === "docker" && c.args[2] === "create"));
   assert.ok(!existsSync(evidence));
 });
@@ -536,7 +536,10 @@ for (const [label, revision] of [
   ["40-hex", "f05d2565985710f72f56008dd12eaa013ca8a0eb"], ["null", null],
 ] as Array<[string, string | null]>) {
   test(`D2: promotion evidence carries a ${label} legacy revision beside the five-key identity`, () => {
-    const { output } = distribute("promote", { previous: { ...legacyPrevious, image_revision: revision } });
+    const { output } = distribute("promote", { previous: { ...legacyPrevious, image_revision: revision } }, {
+      npm_tags: { latest: legacyPrevious.npm_version, next: legacyPrevious.npm_version },
+      responses: { [npmRegistry]: { npm_tags: true } },
+    });
     assert.deepEqual(output.previous, legacy);
     assert.equal(output.image_revision, revision);
     assert.deepEqual(Object.keys(output).sort(), ["deployed", "event_id", "image_revision", "previous", "run_attempt", "run_id", "source"]);
@@ -544,7 +547,10 @@ for (const [label, revision] of [
 }
 
 test("D2: promotion evidence leaves image_revision absent for a post-lock previous", () => {
-  const { output } = distribute("promote", { previous: original.previous });
+  const { output } = distribute("promote", { previous: original.previous }, {
+    npm_tags: { latest: original.previous.npm_version, next: original.previous.npm_version },
+    responses: { [npmRegistry]: { npm_tags: true } },
+  });
   assert.deepEqual(output.previous, original.previous.identity);
   assert.deepEqual(Object.keys(output).sort(), ["deployed", "event_id", "previous", "run_attempt", "run_id", "source"]);
 });
