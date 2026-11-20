@@ -189,8 +189,10 @@ test("channel split: promote and restore happy paths are unchanged", () => {
   const imageWrite = events.findIndex((e: any) => e.kind === "docker" && e.args[2] === "create");
   assert.ok(npmWrite >= 0);
   assert.deepEqual(events.filter((e: any) => e.kind === "npm" || (e.kind === "fetch" && e.url === npmRegistry)).map((e: any) =>
-    e.kind === "npm" ? ["write", e.args[3]] : ["read", e.json["dist-tags"]]), [
+    e.kind === "fetch" ? ["read", e.json["dist-tags"]]
+      : e.args[0] === "dist-tag" ? ["write", e.args[3]] : ["npm", ...e.args]), [
     ["read", { latest: original.previous.npm_version }],
+    ["npm", "--version"],
     ["write", "latest"],
     ["read", { latest: original.version }],
     ["write", "next"],
@@ -242,8 +244,9 @@ test("channel split: promote and restore happy paths are unchanged", () => {
 });
 
 test("channel split: a delayed npm channel becomes visible within the poll, then GHCR moves", () => {
+  const lagReads = 2;
   const { result, mock, output, evidence } = distribute("promote", { previous: original.previous }, {
-    events: [], npm_tags: { latest: original.previous.npm_version, next: original.previous.npm_version }, dist_tag_lag_reads: 2,
+    events: [], npm_tags: { latest: original.previous.npm_version, next: original.previous.npm_version }, dist_tag_lag_reads: lagReads,
     responses: { [npmRegistry]: { npm_tags: true } },
   });
   assert.equal(result.status, 0, result.stderr);
@@ -254,9 +257,9 @@ test("channel split: a delayed npm channel becomes visible within the poll, then
   const imageWrites = events.flatMap((e: any, i: number) => e.kind === "docker" && e.args[2] === "create" ? [i] : []);
   assert.ok(npmWrite >= 0);
   assert.deepEqual(reads.map((r: any) => r.tags), [
-    { latest: original.previous.npm_version },
-    { latest: original.previous.npm_version },
-    { latest: original.version },
+    { latest: original.previous.npm_version, next: original.previous.npm_version },
+    { latest: original.previous.npm_version, next: original.previous.npm_version },
+    { latest: original.version, next: original.previous.npm_version },
     { latest: original.version, next: original.previous.npm_version },
     { latest: original.version, next: original.previous.npm_version },
     { latest: original.version, next: original.version },
@@ -264,11 +267,14 @@ test("channel split: a delayed npm channel becomes visible within the poll, then
   assert.equal(imageWrites.length, 1);
   assert.ok(reads.every((r: any) => r.index > npmWrite && r.index < imageWrites[0]),
     "every npm read-back must precede the single GHCR retag");
+  // Each poll sees the stale reads and one fresh read. Once a write starts
+  // tracking a tag, every later packument increments its counter.
+  const readsPerPoll = lagReads + 1;
   assert.deepEqual(mock.npm_tag_visibility.latest, {
-    previous: original.previous.npm_version, remaining: 0, reads: 3,
+    previous: original.previous.npm_version, remaining: 0, reads: 2 * readsPerPoll,
   });
   assert.deepEqual(mock.npm_tag_visibility.next, {
-    previous: original.previous.npm_version, remaining: 0, reads: 3,
+    previous: original.previous.npm_version, remaining: 0, reads: readsPerPoll,
   });
   assert.deepEqual(mock.sleeps, [10_000, 10_000, 10_000, 10_000]);
   assert.equal(mock.elapsed, 40_000);
@@ -341,8 +347,9 @@ test("channel split: a failed next restore is verified, then GHCR restores and r
 });
 
 test("channel split: a delayed npm restore read-back is not reported as a failure", () => {
+  const lagReads = 2;
   const { result, state, receipt } = restore({
-    events: [], npm_tags: { latest: original.version, next: original.version }, dist_tag_lag_reads: 2,
+    events: [], npm_tags: { latest: original.version, next: original.version }, dist_tag_lag_reads: lagReads,
     responses: { [npmRegistry]: { npm_tags: true } },
   });
   assert.equal(result.status, 0, result.stderr);
@@ -361,8 +368,9 @@ test("channel split: a delayed npm restore read-back is not reported as a failur
     { latest: original.previous.npm_version, next: original.version },
     { latest: original.previous.npm_version, next: original.previous.npm_version },
   ]);
-  assert.deepEqual(state.npm_tag_visibility.latest, { previous: original.version, remaining: 0, reads: 3 });
-  assert.deepEqual(state.npm_tag_visibility.next, { previous: original.version, remaining: 0, reads: 3 });
+  const readsPerPoll = lagReads + 1;
+  assert.deepEqual(state.npm_tag_visibility.latest, { previous: original.version, remaining: 0, reads: 2 * readsPerPoll });
+  assert.deepEqual(state.npm_tag_visibility.next, { previous: original.version, remaining: 0, reads: readsPerPoll });
   assert.deepEqual(state.sleeps, [10_000, 10_000, 10_000, 10_000]);
   assert.equal(state.elapsed, 40_000);
   assert.deepEqual(state.calls.filter((c: any) =>
