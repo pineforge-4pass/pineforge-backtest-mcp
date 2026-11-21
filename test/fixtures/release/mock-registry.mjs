@@ -68,7 +68,7 @@ globalThis.fetch = async (input, { signal } = {}) => {
     return new Response(r.base64 ? Buffer.from(r.base64, "base64") : r.body ?? JSON.stringify(payload), { status: r.status ?? 200 });
   }
   if (url !== "https://registry.npmjs.org/@pineforge%2fbacktest-mcp") throw Error(`unexpected network: ${url}`);
-  return new Response(JSON.stringify({ "dist-tags": { latest: s.npm_version } }), { status: 200 });
+  return new Response(JSON.stringify({ "dist-tags": s.npm_tags ?? { latest: s.npm_version } }), { status: 200 });
 };
 
 // Test-only subprocess entry point, following invoke-chain's publishNpm harness.
