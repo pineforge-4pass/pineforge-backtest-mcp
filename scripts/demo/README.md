@@ -17,8 +17,11 @@ from the environment (Vertex / `ANTHROPIC_*` env vars).
 
 ```bash
 # 1. self-contained image (the MCP the session talks to)
-docker build -f docker/Dockerfile --build-arg PINEFORGE_RELEASE_VERSION=<X.Y.Z> \
-  -t pineforge-backtest-mcp:local .   # or use ghcr :latest (<X.Y.Z> = a pineforge-release tag, no leading v)
+docker build -f docker/Dockerfile \
+  --build-arg "PINEFORGE_RELEASE_IMAGE=$(node -p "const l=require('./release-lock.json'); l.image.repository+'@'+l.image.digest")" \
+  --build-arg "PINEFORGE_RELEASE_VERSION=$(node -p "require('./release-lock.json').release_version")" \
+  --build-arg "PINEFORGE_SOURCE_SHA=$(git rev-parse HEAD)" \
+  -t pineforge-backtest-mcp:local .   # or use the published GHCR :latest image
 
 # 2. isolated HOME with only the pineforge MCP + tools pre-approved
 mkdir -p /tmp/pf-home/.claude /tmp/pf-sandbox
