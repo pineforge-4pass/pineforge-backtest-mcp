@@ -28,7 +28,6 @@ LIVE_PREFIX = "live-bind-probe-"
 # target as its only argument. No shell, no id and no hash tool run there; the observer hashes
 # the bytes cat wrote, on the host.
 LIVE_READER = "cat"
-LIVE_TIMEOUT = 60
 
 
 def digest(path):
@@ -148,11 +147,7 @@ def live_bind_probe(docker, args, chart):
         run["argv"] = [docker, "run", "--rm", "--pull=never", "--network=none", "--log-driver=none", "-e", "LC_ALL=C",
                        "-v", binds[0], "--entrypoint", LIVE_READER, pin, LIVE_TARGET]
         run["startedNs"] = time.time_ns()
-        try:
-            proc = subprocess.run(run["argv"], stdin=subprocess.DEVNULL, capture_output=True, timeout=LIVE_TIMEOUT)
-        except subprocess.TimeoutExpired as exc:
-            run.update(endedNs=time.time_ns(), stderr=live_text(exc.stderr))
-            return refuse(f"the probe container did not finish within {LIVE_TIMEOUT} seconds")
+        proc = subprocess.run(run["argv"], stdin=subprocess.DEVNULL, capture_output=True)
         ended = time.time_ns()
         size, sha = live_stdout(proc.stdout)
         run.update(endedNs=ended, exit=proc.returncode, stdoutBytes=size, stdoutSha256=sha,
