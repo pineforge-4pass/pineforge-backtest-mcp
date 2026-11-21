@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inflateRawSync } from "node:zlib";
 import type { EngineRunner, ParamMap, RuntimeArgsLike } from "./engine.js";
+import { copyBindInput, writeBindInput } from "./bind-input.js";
 import {
   NUMBER_KEYS,
   STRING_KEYS,
@@ -67,7 +68,7 @@ export interface ParityDeps {
    * The instrument of a Binance symbol, or (no symbol) of the sidecar next to the user's bars file
    * (src/instrument.ts). Omitted: no instrument is passed to the grading core.
    */
-  resolveInstrument?(req: InstrumentRequest, csvPath: string | undefined): Promise<Resolution>;
+  resolveInstrument?(req: InstrumentRequest, csvPath: string | undefined, inputPath?: string): Promise<Resolution>;
 }
 
 const MAX_PINE_BYTES = 256 * 1024;
@@ -142,8 +143,14 @@ interface Bars {
   source: string;
   /** The user's own bars file, if that is where they came from (its sidecar may name the instrument). */
   origin?: string;
+  /** The exact caller bytes read by this request, before any format conversion. */
+  snapshot?: string;
   /** Present only for fetched chart bars inside the harness's run bounds. */
   fetched?: { bars: number; firstOpenMs: number; lastOpenMs: number };
+}
+
+function writeBars(path: string, csv: string, docker: boolean): Promise<void> {
+  return docker ? writeBindInput(path, csv) : writeFile(path, csv, "utf8");
 }
 
 async function suppliedBars(
@@ -151,6 +158,7 @@ async function suppliedBars(
   csvPath: string | undefined,
   kind: "ohlcv" | "magnifier_ohlcv",
   work: string,
+  docker: boolean,
   deps: ParityDeps,
 ): Promise<Bars | undefined> {
   if (csvText !== undefined && csvPath !== undefined) {
@@ -163,7 +171,7 @@ async function suppliedBars(
     const text = csvText.replace(/^\uFEFF/, "");
     const csv = barsFormat(text.split(/\r?\n/)[0] ?? "") === "engine" ? text : fromTradingViewChart(text);
     const path = join(work, `${kind}.csv`);
-    await writeFile(path, csv, "utf8");
+    await writeBars(path, csv, docker);
     return { path, source: `the ${kind}_csv you passed` };
   }
   if (csvPath !== undefined) {
@@ -175,16 +183,23 @@ async function suppliedBars(
     }
     const st = await stat(abs).catch(() => null);
     if (!st || !st.isFile()) throw new ParityInputError("no_bars", `OHLCV file not found: ${abs}`);
-    const head = await firstLine(abs);
+    // Inspect and convert the same snapshot that supplies the run. A sidecar
+    // describes the original format, so authenticate the snapshot before
+    // normalization, using the origin only to locate and name the sidecar.
+    const input = docker ? join(work, `${kind}-input.csv`) : abs;
+    // The new owner of the copy may lack owner-read on the inherited mode.
+    if (docker) await copyBindInput(abs, input);
+    const head = await firstLine(input);
     const path = join(work, `${kind}.csv`);
+    const identity = { origin: abs, ...(docker ? { snapshot: input } : {}) };
     if (barsFormat(head) === "engine") {
-      if (!head.startsWith("\uFEFF")) return { path: abs, source: `your file ${abs}`, origin: abs };
+      if (!head.startsWith("\uFEFF")) return { path: input, source: `your file ${abs}`, ...identity };
       // The grading core reads the header without a byte-order mark.
-      await writeFile(path, (await readFile(abs, "utf8")).replace(/^\uFEFF/, ""), "utf8");
-      return { path, source: `your file ${abs}`, origin: abs };
+      await writeBars(path, (await readFile(input, "utf8")).replace(/^\uFEFF/, ""), docker);
+      return { path, source: `your file ${abs}`, ...identity };
     }
-    await writeFile(path, fromTradingViewChart(await readFile(abs, "utf8")), "utf8");
-    return { path, source: `your file ${abs} (TradingView chart export, converted)`, origin: abs };
+    await writeBars(path, fromTradingViewChart(await readFile(input, "utf8")), docker);
+    return { path, source: `your file ${abs} (TradingView chart export, converted)`, ...identity };
   }
   return undefined;
 }
@@ -196,9 +211,10 @@ async function findBars(
   startMs: number,
   endMs: number,
   work: string,
+  docker: boolean,
   deps: ParityDeps,
 ): Promise<Bars> {
-  const supplied = await suppliedBars(args.ohlcv_csv, args.ohlcv_csv_path, "ohlcv", work, deps);
+  const supplied = await suppliedBars(args.ohlcv_csv, args.ohlcv_csv_path, "ohlcv", work, docker, deps);
   if (supplied) return supplied;
   if (!symbol) throw noBars("No bars and no symbol.");
   const t = parseTicker(symbol);
@@ -227,7 +243,7 @@ async function findBars(
     .filter((ms) => Number.isFinite(ms) && ms >= startMs && ms <= endMs);
   if (!opens.length) throw noBars("Binance returned no chart bars inside the run's range.");
   const path = join(work, "ohlcv.csv");
-  await writeFile(path, csv, "utf8");
+  await writeBars(path, csv, docker);
   return {
     path,
     fetched: { bars, firstOpenMs: opens[0]!, lastOpenMs: opens[opens.length - 1]! },
@@ -253,6 +269,7 @@ export async function parityInstrument(
   symbol: string | null,
   origin: string | undefined,
   deps: ParityDeps,
+  snapshot?: string,
 ): Promise<Resolution | undefined> {
   if (!deps.resolveInstrument) return undefined;
   if (symbol) {
@@ -270,7 +287,7 @@ export async function parityInstrument(
       hint: PARITY_HINT,
     });
   }
-  return deps.resolveInstrument({ syminfo: args.syminfo, hint: PARITY_HINT }, origin);
+  return deps.resolveInstrument({ syminfo: args.syminfo, hint: PARITY_HINT }, origin, snapshot);
 }
 
 /**
@@ -348,11 +365,12 @@ export async function checkParity(
     );
   }
   const endMs = s.rangeEndMs ?? span.lastRowMs;
+  const docker = runner.mode === "docker";
   const work = await mkdtemp(join(tmpdir(), "pineforge-pt-"));
   try {
     let magnifier = await suppliedBars(args.magnifier_ohlcv_csv, args.magnifier_ohlcv_csv_path,
-      "magnifier_ohlcv", work, deps);
-    const bars = await findBars(args, s.symbol, s.timeframe, s.rangeStartMs, endMs, work, deps);
+      "magnifier_ohlcv", work, docker, deps);
+    const bars = await findBars(args, s.symbol, s.timeframe, s.rangeStartMs, endMs, work, docker, deps);
     // runtime.bar_magnifier false (passed, or from the XLSX Properties) turns the magnifier off:
     // the harness then runs without it, so no 1-minute feed is fetched or budgeted.
     // Only chart timeframes the harness magnifies (coarser than 1 minute, at most 1 day) need the feed.
@@ -375,11 +393,11 @@ export async function checkParity(
         throw noBars(`Fetching ${t.ticker} 1m magnifier bars from Binance failed: ${(e as Error).message.slice(0, 300)}.`);
       }
       const path = join(work, "magnifier_ohlcv.csv");
-      await writeFile(path, fine.csv, "utf8");
+      await writeBars(path, fine.csv, docker);
       magnifier = { path, source: `Binance ${market === "spot" ? "spot" : "USDT-M perpetual"} ${t.symbol} 1m klines ` +
         `(${fine.bars} bars, fetched from the public API)` };
     }
-    const instrument = await parityInstrument(args, s.symbol, bars.origin, deps);
+    const instrument = await parityInstrument(args, s.symbol, bars.origin, deps, bars.snapshot);
     const request: Record<string, unknown> = {
       pine: args.pine,
       tradingview_trades_csv: exp.csv,

@@ -15,6 +15,7 @@ import { lstatSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, isAbsolute, dirname, relative, sep, basename } from "node:path";
 import { VERSION } from "./version.js";
+import { copyBindInput, writeBindInput } from "./bind-input.js";
 import {
   DEFAULT_IMAGE,
   stringifyParams,
@@ -155,21 +156,19 @@ function reportWarnings(value: unknown): string[] {
 async function runBacktest(runner: EngineRunner, args: BacktestArgs): Promise<unknown> {
   const csvPath = await resolveCsvPath(args.ohlcv_csv_path);
   const image = args.image ?? DEFAULT_IMAGE;
-  const resolution = await resolveInstrument(args, csvPath, lookupBinanceSymbol);
-  const instrument = resolution.instrument;
-  // An instrument with nothing the engine can be given is not passed: the run is then the image's own.
-  const apply = hasApplicableField(instrument);
-  const cpp = await runner.transpile(args.source, args.image);
-
   const tmp = await mkdtemp(join(tmpdir(), "pineforge-bt-"));
-  const cppPath = join(tmp, "strategy.cpp");
-  await writeFile(cppPath, cpp, "utf8");
-
-  const notices: string[] = [];
   try {
+    const inputPath = await backtestCsvInput(runner, csvPath, tmp);
+    const resolution = await resolveInstrument(args, csvPath, lookupBinanceSymbol, undefined, inputPath);
+    const instrument = resolution.instrument;
+    // An instrument with nothing the engine can be given is not passed: the run is then the image's own.
+    const apply = hasApplicableField(instrument);
+    const cpp = await runner.transpile(args.source, args.image);
+    const cppPath = await writeBacktestCpp(runner, tmp, cpp);
+    const notices: string[] = [];
     const report = await runner.backtest({
       cppPath,
-      csvPath,
+      csvPath: inputPath,
       image: args.image,
       inputs: args.inputs,
       overrides: args.overrides,
@@ -218,7 +217,7 @@ async function runBacktest(runner: EngineRunner, args: BacktestArgs): Promise<un
       _meta: r._meta,
     };
   } finally {
-    rm(tmp, { recursive: true, force: true }).catch(() => undefined);
+    await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
@@ -246,17 +245,18 @@ async function runBacktestGrid(runner: EngineRunner, args: BacktestGridArgs): Pr
     );
   }
 
-  const resolution = await resolveInstrument(args, csvPath, lookupBinanceSymbol);
-  const instrument = resolution.instrument;
-  const apply = hasApplicableField(instrument);
-  const engineWarnings = new Set<string>(apply ? [] : [NOT_APPLIED_WARNING]);
-  let checkedQuantities = false; // one report is enough to see whether the engine floors to the lot size
-  const cpp = await runner.transpile(args.source, args.image);
   const tmp = await mkdtemp(join(tmpdir(), "pineforge-grid-"));
-  const cppPath = join(tmp, "strategy.cpp");
-  await writeFile(cppPath, cpp, "utf8");
-
   try {
+    // Finish both inputs before any worker starts. Workers only read this request's copies.
+    const inputPath = await backtestCsvInput(runner, csvPath, tmp);
+    const resolution = await resolveInstrument(args, csvPath, lookupBinanceSymbol, undefined, inputPath);
+    const instrument = resolution.instrument;
+    const apply = hasApplicableField(instrument);
+    const engineWarnings = new Set<string>(apply ? [] : [NOT_APPLIED_WARNING]);
+    let checkedQuantities = false; // one report is enough to see whether the engine floors to the lot size
+    const cpp = await runner.transpile(args.source, args.image);
+    const cppPath = await writeBacktestCpp(runner, tmp, cpp);
+
     type Row = {
       ok: boolean;
       inputs: Record<string, string>;
@@ -275,7 +275,7 @@ async function runBacktestGrid(runner: EngineRunner, args: BacktestGridArgs): Pr
         const notices: string[] = [];
         try {
           const report = await runner.backtest({
-            cppPath, csvPath,
+            cppPath, csvPath: inputPath,
             image: args.image,
             inputs: combo.inputs, overrides: combo.overrides,
             runtime: args.runtime,
@@ -358,7 +358,7 @@ async function runBacktestGrid(runner: EngineRunner, args: BacktestGridArgs): Pr
         `(${MAX_INLINE_BYTES} bytes). Inlined the top ${TOP} by ${sortBy}. ${loc.note}`,
     };
   } finally {
-    rm(tmp, { recursive: true, force: true }).catch(() => undefined);
+    await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
@@ -466,14 +466,27 @@ async function resolveCsvPath(p: string): Promise<string> {
   const abs = resolveScopedPath(p, "OHLCV");
   const st = await stat(abs).catch(() => null);
   if (!st || !st.isFile()) throw new Error(`OHLCV file not found: ${abs}`);
-  const head = (await readFile(abs, "utf8")).slice(0, 200).split(/\r?\n/)[0] ?? "";
+  return abs;
+}
+
+async function backtestCsvInput(runner: EngineRunner, origin: string, tmp: string): Promise<string> {
+  const input = runner.mode === "docker" ? join(tmp, "ohlcv.csv") : origin;
+  if (input !== origin) await copyBindInput(origin, input);
+  const head = (await readFile(input, "utf8")).slice(0, 200).split(/\r?\n/)[0] ?? "";
   const expected = ["timestamp", "open", "high", "low", "close", "volume"];
   const cols = head.toLowerCase().split(",").map((s) => s.trim());
   if (expected.some((c, i) => cols[i] !== c)) {
     // The file's own first line is not echoed: the path may name any readable file.
-    throw new Error(`OHLCV header mismatch: the first line of ${abs} is not ${expected.join(",")}.`);
+    throw new Error(`OHLCV header mismatch: the first line of ${origin} is not ${expected.join(",")}.`);
   }
-  return abs;
+  return input;
+}
+
+async function writeBacktestCpp(runner: EngineRunner, tmp: string, cpp: string): Promise<string> {
+  const path = join(tmp, "strategy.cpp");
+  if (runner.mode === "docker") await writeBindInput(path, cpp);
+  else await writeFile(path, cpp, "utf8");
+  return path;
 }
 
 // ─── Binance public-API client ────────────────────────────────────────────
@@ -1254,7 +1267,7 @@ export function createServer(runner: EngineRunner, opts: { imageTools: boolean }
       const { collected } = await collectKlines(market, symbol, interval, startMs, endMs, limit);
       return { csv: klinesCsv(collected), bars: collected.length };
     },
-    resolveInstrument: (req, csvPath) => resolveInstrument(req, csvPath, lookupBinanceSymbol),
+    resolveInstrument: (req, csvPath, inputPath) => resolveInstrument(req, csvPath, lookupBinanceSymbol, undefined, inputPath),
   };
   const parityWhere = runner.mode === "docker"
     ? "The run and the grading use the pineforge-release Docker image (no network inside the container)."

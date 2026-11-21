@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Instrument } from "./instrument.js";
+import { writeBindInput } from "./bind-input.js";
 import { HUB_IMAGE } from "./release.generated.js";
 import {
   IMAGE_LAYOUT, IMAGE_PREFIX, OVERLAY_MOUNT, SKIP_REASONS,
@@ -41,8 +42,8 @@ const PARITY_STDOUT_CAP = 64 * 1024 * 1024;
 export async function dockerTranspile(source: string, image: string): Promise<string> {
   const tmp = await mkdtemp(join(tmpdir(), "pineforge-tr-"));
   const pinePath = join(tmp, "strategy.pine");
-  await writeFile(pinePath, source, "utf8");
   try {
+    await writeBindInput(pinePath, source);
     const dockerArgs = [
       "run", "--rm", "--network=none",
       "-e", "PINEFORGE_TRANSPILE_ONLY=1",
@@ -58,7 +59,7 @@ export async function dockerTranspile(source: string, image: string): Promise<st
     }
     return stdout;
   } finally {
-    rm(tmp, { recursive: true, force: true }).catch(() => undefined);
+    await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
@@ -298,14 +299,14 @@ function dockerBacktestArgsWithDigest(
 
 /**
  * One backtest in a container. With an instrument that has something to apply, the run goes through the prefix
- * overlay (overlay.ts). A run never fails for want of it: no overlay is built when there is nothing to apply, when
- * the host cannot link the prefix or when building it throws (each says so in `notices`), and a run that fails
+ * overlay (overlay.ts). No overlay is built when there is nothing to apply or when the host cannot
+ * link the prefix. If staging fails, no container starts. A run that fails
  * with the overlay and whose stderr names it (a prefix layout the overlay does not mirror, a folder the container
  * cannot mount) is run once more without it. A failure that does not name the overlay is the run's own.
  */
 export async function dockerBacktest(args: DockerBacktestArgs): Promise<unknown> {
-  const cppSha256 = await strategyCppSha256(args.cppPath);
-  let overlay: Overlay | undefined = await tryOverlay(args.instrument, IMAGE_PREFIX, IMAGE_LAYOUT, args.notices);
+  const cppSha256 = strategyCppSha256(args.cppPath);
+  let overlay: Overlay | undefined = await tryOverlay(args.instrument, IMAGE_PREFIX, IMAGE_LAYOUT, args.notices, true);
   try {
     for (let attempt = 0; ; attempt++) {
       const child = spawn(
@@ -368,6 +369,7 @@ export interface EngineInfo {
 }
 
 export interface BacktestCall {
+  // In Docker mode both paths are prepared in the request's private staging dir.
   cppPath: string;                 // pre-transpiled TU (grid reuses one)
   csvPath: string;                 // OHLCV csv
   image?: string;                  // per-call docker image override; ignored by LocalRunner
@@ -383,9 +385,9 @@ export interface BacktestCall {
 export interface ParityCall {
   /** The grading core's request (parity/pf_parity.py) without file paths. */
   request: Record<string, unknown>;
-  /** The bars CSV on this machine (header timestamp,open,high,low,close,volume). */
+  /** The bars CSV (header timestamp,open,high,low,close,volume), staged for Docker. */
   barsPath: string;
-  /** Optional 1-minute magnifier feed on this machine. */
+  /** Optional 1-minute magnifier feed, staged for Docker. */
   magnifierBarsPath?: string;
 }
 
@@ -428,7 +430,7 @@ export class DockerRunner implements EngineRunner {
         "-v", `${call.barsPath}:/in/ohlcv.csv:ro`,
       ];
       if (call.magnifierBarsPath) args.push("-v", `${call.magnifierBarsPath}:/in/magnifier.csv:ro`);
-      // Run as the caller so the 0700 jail and the caller's files are readable.
+      // Run as the caller so the 0700 writable jail is accessible.
       if (typeof process.getuid === "function" && typeof process.getgid === "function") {
         args.push("--user", `${process.getuid()}:${process.getgid()}`);
       }

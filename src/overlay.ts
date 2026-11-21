@@ -16,10 +16,11 @@
  * links (/opt/pineforge/...) resolve inside the image.
  */
 
-import { chmod, copyFile, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
+import { copyBindInput, writeBindInput } from "./bind-input.js";
 import { hasApplicableField, type Instrument } from "./instrument.js";
 
 /** Where the release image keeps the engine. */
@@ -85,11 +86,12 @@ export function mentionsOverlay(stderr: string, overlayDir: string): boolean {
  * /opt/pineforge in the image) holding `instrument` as instrument.json.
  */
 export async function createOverlay(instrument: Instrument, realPrefix: string, layout: PrefixLayout): Promise<Overlay> {
-  const dir = await mkdtemp(join(tmpdir(), "pineforge-overlay-"));
-  const cleanup = () => rm(dir, { recursive: true, force: true });
+  const root = await mkdtemp(join(tmpdir(), "pineforge-overlay-"));
+  const cleanup = () => rm(root, { recursive: true, force: true });
   try {
-    // mkdtemp makes it 0700, and the umask shapes the rest; a container user other than
-    // the caller must read all of it.
+    // Only mount the child. The private mkdtemp parent stays on the host.
+    const dir = join(root, "prefix");
+    await mkdir(dir);
     await chmod(dir, 0o755);
     await mkdir(join(dir, "bin"));
     await chmod(join(dir, "bin"), 0o755);
@@ -99,10 +101,8 @@ export async function createOverlay(instrument: Instrument, realPrefix: string, 
     for (const name of layout.bin) {
       if (name !== "run_json.py") await overlayFs.symlink(posix.join(realPrefix, "bin", name), join(dir, "bin", name));
     }
-    await copyFile(shimPath(), join(dir, "bin", "run_json.py"));
-    await chmod(join(dir, "bin", "run_json.py"), 0o644);
-    await writeFile(join(dir, "instrument.json"), JSON.stringify(instrument) + "\n");
-    await chmod(join(dir, "instrument.json"), 0o644);
+    await copyBindInput(shimPath(), join(dir, "bin", "run_json.py"));
+    await writeBindInput(join(dir, "instrument.json"), JSON.stringify(instrument) + "\n");
     return { dir, cleanup };
   } catch (e) {
     await cleanup().catch(() => undefined);
@@ -112,14 +112,15 @@ export async function createOverlay(instrument: Instrument, realPrefix: string, 
 
 /**
  * The overlay a run needs, or undefined: none when the instrument has nothing the engine can be given
- * (the run is then the image's own), none on a host that cannot link the prefix, and none, with a notice,
- * when building it fails for any reason. A run never fails because its overlay could not be built.
+ * (the run is then the image's own), or none on a host that cannot link the prefix.
+ * The same-UID local runner can keep its existing fallback when building fails.
  */
 export async function tryOverlay(
   instrument: Instrument | undefined,
   realPrefix: string,
   layout: PrefixLayout | (() => Promise<PrefixLayout>),
   notices?: string[],
+  failOnBuildError = false,
 ): Promise<Overlay | undefined> {
   if (!instrument || !hasApplicableField(instrument)) return undefined;
   const unavailable = overlayUnavailable();
@@ -129,7 +130,8 @@ export async function tryOverlay(
   }
   try {
     return await createOverlay(instrument, realPrefix, typeof layout === "function" ? await layout() : layout);
-  } catch {
+  } catch (e) {
+    if (failOnBuildError) throw e;
     notices?.push(skippedWarning(SKIP_REASONS.build));
     return undefined;
   }
